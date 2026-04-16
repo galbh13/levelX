@@ -1,0 +1,15 @@
+export const C = {
+  bg:           '#050912',
+  surface:      '#07111F',
+  deepBlue:     '#5B8EFF',
+  iceGlow:      '#5B8EFF',
+  lockedBg:     '#0a1a2e',
+  lockedBorder: '#1a3050',
+  text:         '#E8F4FF',
+  textMuted:    '#2a4a6a',
+  cardBorder:   '#0a2040',
+  navBg:        '#040810',
+  lvlBadgeBg:   '#0a2a4a',
+  nodeLine:     '#5B8EFF',
+  nodeLineLock: '#1a3050',
+};

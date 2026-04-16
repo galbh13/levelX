@@ -1,7 +1,7 @@
 # Work & Business
 
 **Type:** Solo developer / personal trainer
-**Main Project:** Gamified calisthenics training web app (name TBD)
+**Main Project:** LevelX — Gamified calisthenics training app
 
 ## What the App Does
 A platform for Gal's calisthenics students that makes training feel like a game.
@@ -15,8 +15,14 @@ A platform for Gal's calisthenics students that makes training feel like a game.
 More features will be added as the product evolves.
 
 ## Stack & Tools
+- Framework: Expo (React Native) — mobile-first
 - Editor: VS Code
 - MCP servers: None
+
+## Design System
+- Background: near-black (#0a0a0a / #111111)
+- Accent: Electric Blue (#00BFFF)
+- Vibe: dark, bold, gaming aesthetic — like a game UI
 
 ## Target
 Simple, clean, easy to use — for both Gal and his students.
