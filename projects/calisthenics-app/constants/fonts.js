@@ -1,5 +1,5 @@
 export const F = {
-  heading: 'Cinzel_700Bold',
-  body: 'ChakraPetch_600SemiBold',
-  bodyMed: 'ChakraPetch_400Regular',
+  heading: 'Exo2_700Bold',
+  body:    'Exo2_600SemiBold',
+  bodyMed: 'Exo2_400Regular',
 };

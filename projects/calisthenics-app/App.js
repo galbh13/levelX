@@ -4,11 +4,12 @@ import { NavigationContainer } from '@react-navigation/native';
 import { C } from './constants/colors';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { useFonts, Cinzel_700Bold } from '@expo-google-fonts/cinzel';
 import {
-  ChakraPetch_400Regular,
-  ChakraPetch_600SemiBold,
-} from '@expo-google-fonts/chakra-petch';
+  useFonts,
+  Exo2_400Regular,
+  Exo2_600SemiBold,
+  Exo2_700Bold,
+} from '@expo-google-fonts/exo-2';
 import * as SplashScreen from 'expo-splash-screen';
 import { F } from './constants/fonts';
 import { supabase } from './lib/supabase';
@@ -29,13 +30,22 @@ import ExerciseGalleryScreen from './screens/ExerciseGalleryScreen';
 import ExerciseDetailScreen  from './screens/ExerciseDetailScreen';
 import AddExerciseScreen     from './screens/AddExerciseScreen';
 import CreateWorkoutScreen   from './screens/CreateWorkoutScreen';
+import WorkoutEditScreen       from './screens/WorkoutEditScreen';
+import AllWorkoutsScreen       from './screens/AllWorkoutsScreen';
+import CheckupBuilderScreen    from './screens/CheckupBuilderScreen';
+import CheckupScreen           from './screens/CheckupScreen';
+import CheckupReviewScreen     from './screens/CheckupReviewScreen';
+import CoachResponseScreen     from './screens/CoachResponseScreen';
+import ClassQuestScreen        from './screens/ClassQuestScreen';
+import { CoachProvider }       from './context/CoachContext';
 
 SplashScreen.preventAutoHideAsync();
 
-const Tab         = createBottomTabNavigator();
-const SkillsStack  = createNativeStackNavigator();
-const CoachStack   = createNativeStackNavigator();
-const AdminStack   = createNativeStackNavigator();
+const Tab           = createBottomTabNavigator();
+const SkillsStack   = createNativeStackNavigator();
+const WorkoutsStack = createNativeStackNavigator();
+const CoachStack    = createNativeStackNavigator();
+const AdminStack    = createNativeStackNavigator();
 
 function TabIcon({ label, focused }) {
   const icons = { Skills: '⚡', Chat: '💬', Workouts: '🏋', Community: '👥' };
@@ -53,18 +63,36 @@ function SkillsNavigator() {
   );
 }
 
+function WorkoutsNavigator() {
+  return (
+    <WorkoutsStack.Navigator screenOptions={{ headerShown: false }}>
+      <WorkoutsStack.Screen name="WorkoutsList"  component={WorkoutsScreen} />
+      <WorkoutsStack.Screen name="WorkoutDetail"   component={WorkoutDetailScreen} />
+      <WorkoutsStack.Screen name="Checkup"         component={CheckupScreen} />
+      <WorkoutsStack.Screen name="CoachResponse"   component={CoachResponseScreen} />
+    </WorkoutsStack.Navigator>
+  );
+}
+
 function CoachNavigator() {
   return (
-    <CoachStack.Navigator screenOptions={{ headerShown: false }}>
-      <CoachStack.Screen name="CoachDashboard"   component={CoachDashboard} />
-      <CoachStack.Screen name="StudentDetail"    component={StudentDetailScreen} />
-      <CoachStack.Screen name="WorkoutDetail"    component={WorkoutDetailScreen} />
-      <CoachStack.Screen name="AddWorkout"       component={AddWorkoutScreen} />
-      <CoachStack.Screen name="CreateWorkout"    component={CreateWorkoutScreen} />
-      <CoachStack.Screen name="ExerciseGallery"  component={ExerciseGalleryScreen} />
-      <CoachStack.Screen name="ExerciseDetail"   component={ExerciseDetailScreen} />
-      <CoachStack.Screen name="AddExercise"      component={AddExerciseScreen} />
-    </CoachStack.Navigator>
+    <CoachProvider>
+      <CoachStack.Navigator screenOptions={{ headerShown: false }}>
+        <CoachStack.Screen name="CoachDashboard"   component={CoachDashboard} />
+        <CoachStack.Screen name="StudentDetail"    component={StudentDetailScreen} />
+        <CoachStack.Screen name="WorkoutDetail"    component={WorkoutDetailScreen} />
+        <CoachStack.Screen name="WorkoutEdit"      component={WorkoutEditScreen} />
+        <CoachStack.Screen name="AddWorkout"       component={AddWorkoutScreen} />
+        <CoachStack.Screen name="CreateWorkout"    component={CreateWorkoutScreen} />
+        <CoachStack.Screen name="ExerciseGallery"  component={ExerciseGalleryScreen} />
+        <CoachStack.Screen name="ExerciseDetail"   component={ExerciseDetailScreen} />
+        <CoachStack.Screen name="AddExercise"      component={AddExerciseScreen} />
+        <CoachStack.Screen name="AllWorkouts"      component={AllWorkoutsScreen} />
+        <CoachStack.Screen name="CheckupBuilder"  component={CheckupBuilderScreen} />
+        <CoachStack.Screen name="CheckupReview"   component={CheckupReviewScreen} />
+        <CoachStack.Screen name="ClassQuest"      component={ClassQuestScreen} />
+      </CoachStack.Navigator>
+    </CoachProvider>
   );
 }
 
@@ -123,7 +151,7 @@ function StudentApp() {
       />
       <Tab.Screen
         name="Workouts"
-        component={WorkoutsScreen}
+        component={WorkoutsNavigator}
         options={{ tabBarIcon: ({ focused }) => <TabIcon label="Workouts" focused={focused} /> }}
       />
       <Tab.Screen
@@ -137,9 +165,9 @@ function StudentApp() {
 
 export default function App() {
   const [fontsLoaded] = useFonts({
-    Cinzel_700Bold,
-    ChakraPetch_400Regular,
-    ChakraPetch_600SemiBold,
+    Exo2_400Regular,
+    Exo2_600SemiBold,
+    Exo2_700Bold,
   });
 
   const [session, setSession] = useState(undefined); // undefined = loading

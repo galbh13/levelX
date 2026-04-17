@@ -1,66 +1,142 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity,
+  ActivityIndicator, Linking,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { F } from '../constants/fonts';
-import { C } from '../constants/colors';
+
+const SL = {
+  bg:     '#050912',
+  panel:  '#070d1a',
+  border: '#1a3a5c',
+  accent: '#4A9EBF',
+  blue:   '#3A6E9E',
+  text:   '#E8F4FF',
+  muted:  '#4a6a8a',
+  danger: '#FF4444',
+};
+
+function Corner({ pos }) {
+  const s = pos === 'TL'
+    ? { top: -1, left: -1, borderTopWidth: 1.5, borderLeftWidth: 1.5 }
+    : { bottom: -1, right: -1, borderBottomWidth: 1.5, borderRightWidth: 1.5 };
+  return <View style={[styles.corner, s]} pointerEvents="none" />;
+}
 
 export default function WorkoutDetailScreen({ route, navigation }) {
-  const { workout } = route.params;
+  const { workout, studentView } = route.params;
 
-  const [exercises, setExercises] = useState(workout.exercises ?? []);
-  const [loading, setLoading]     = useState(!workout.exercises);
+  const [exercises,      setExercises]      = useState([]);
+  const [loading,        setLoading]        = useState(true);
+  const [completed,      setCompleted]      = useState(workout.completed ?? false);
+  const [completing,     setCompleting]     = useState(false);
+  const [workoutTitle,   setWorkoutTitle]   = useState(workout.title   ?? '');
+  const [workoutPurpose, setWorkoutPurpose] = useState(workout.purpose ?? '');
 
-  useEffect(() => {
-    if (!workout.exercises) fetchExercises();
-  }, []);
-
-  async function fetchExercises() {
+  const fetchExercises = useCallback(async () => {
+    setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('exercises')
-        .select('id, letter, name, sets, reps, notes')
-        .eq('workout_id', workout.id)
-        .order('letter', { ascending: true });
-      if (!error && data) setExercises(data);
-    } catch { /* silent */ }
+      const [exercisesRes, workoutRes, galleryRes] = await Promise.all([
+        supabase
+          .from('exercises')
+          .select('*')
+          .eq('workout_id', workout.id)
+          .order('letter', { ascending: true }),
+        supabase
+          .from('workouts')
+          .select('title, purpose')
+          .eq('id', workout.id)
+          .single(),
+        supabase
+          .from('exercises_gallery')
+          .select('name, youtube_url'),
+      ]);
+      if (exercisesRes.error) console.error('[WorkoutDetail] exercises fetch error:', exercisesRes.error);
+      if (workoutRes.data) {
+        setWorkoutTitle(workoutRes.data.title ?? '');
+        setWorkoutPurpose(workoutRes.data.purpose ?? '');
+      }
+      const galleryMap = Object.fromEntries(
+        (galleryRes.data ?? []).map(g => [g.name.toLowerCase(), g.youtube_url])
+      );
+      const exercisesWithVideo = (exercisesRes.data ?? []).map(ex => ({
+        ...ex,
+        youtube_url: galleryMap[ex.name?.toLowerCase()] ?? null,
+      }));
+      setExercises(exercisesWithVideo);
+    } catch (e) {
+      console.error('[WorkoutDetail] fetchExercises exception:', e);
+    }
     setLoading(false);
+  }, [workout.id]);
+
+  useFocusEffect(useCallback(() => { fetchExercises(); }, [fetchExercises]));
+
+  async function handleMarkComplete() {
+    setCompleting(true);
+    try {
+      const { error } = await supabase
+        .from('workouts')
+        .update({ completed: true })
+        .eq('id', workout.id);
+      if (!error) setCompleted(true);
+      else        alert('Could not mark workout as complete.');
+    } catch {
+      alert('Something went wrong.');
+    }
+    setCompleting(false);
   }
 
   return (
     <View style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Text style={styles.backText}>← BACK</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>{workout.title}</Text>
-        {workout.purpose ? (
-          <Text style={styles.purpose}>{workout.purpose}</Text>
+        <Text style={styles.workoutTitle}>{workoutTitle?.toUpperCase()}</Text>
+        {workoutPurpose ? (
+          <View style={styles.purposeRow}>
+            <View style={styles.purposeAccent} />
+            <Text style={styles.purposeText}>{workoutPurpose}</Text>
+          </View>
         ) : null}
+        <View style={styles.divider} />
       </View>
 
       {loading ? (
-        <ActivityIndicator color={C.iceGlow} style={{ marginTop: 40 }} />
+        <ActivityIndicator color={SL.accent} style={{ marginTop: 48 }} size="large" />
       ) : (
         <ScrollView contentContainerStyle={styles.list}>
+          {/* Exercise list */}
           {exercises.map((ex) => (
-            <View key={ex.id} style={styles.exerciseCard}>
-              <View style={styles.letterBadge}>
-                <Text style={styles.letterText}>{ex.letter}</Text>
-              </View>
-              <View style={styles.exerciseBody}>
-                <Text style={styles.exerciseName}>{ex.name}</Text>
-                <View style={styles.metaRow}>
-                  <Text style={styles.metaItem}>{ex.sets} sets</Text>
-                  <Text style={styles.metaDivider}>·</Text>
-                  <Text style={styles.metaItem}>{ex.reps} reps</Text>
+            <View key={ex.id} style={styles.exCard}>
+              <Corner pos="TL" />
+              <Corner pos="BR" />
+              <View style={styles.exCardInner}>
+                <View style={styles.letterBadge}>
+                  <Text style={styles.letterText}>{ex.letter}</Text>
+                </View>
+                <View style={styles.exBody}>
+                  <Text style={styles.exName}>{ex.name?.toUpperCase()}</Text>
+                  <View style={styles.metaRow}>
+                    {ex.sets ? <Text style={styles.metaItem}>{ex.sets} SETS</Text> : null}
+                    {ex.sets && ex.reps ? <Text style={styles.metaDot}>·</Text> : null}
+                    {ex.reps ? <Text style={styles.metaItem}>{ex.reps} REPS</Text> : null}
+                  </View>
                   {ex.notes ? (
-                    <>
-                      <Text style={styles.metaDivider}>·</Text>
-                      <Text style={[styles.metaItem, styles.notes]}>{ex.notes}</Text>
-                    </>
+                    <Text style={styles.exNotes}>{ex.notes}</Text>
+                  ) : null}
+                  {ex.youtube_url ? (
+                    <TouchableOpacity
+                      style={styles.videoBtn}
+                      onPress={() => Linking.openURL(ex.youtube_url)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.videoBtnText}>▶ WATCH VIDEO</Text>
+                    </TouchableOpacity>
                   ) : null}
                 </View>
               </View>
@@ -68,13 +144,41 @@ export default function WorkoutDetailScreen({ route, navigation }) {
           ))}
 
           {exercises.length === 0 && (
-            <Text style={styles.empty}>No exercises added yet.</Text>
+            <Text style={styles.emptyText}>NO EXERCISES ADDED YET</Text>
           )}
 
-          {/* Edit placeholder */}
-          <TouchableOpacity style={styles.editBtn} activeOpacity={0.8}>
-            <Text style={styles.editBtnText}>Edit Workout</Text>
-          </TouchableOpacity>
+          <View style={{ height: 16 }} />
+
+          {/* CTA */}
+          {studentView ? (
+            completed ? (
+              <View style={styles.completedBanner}>
+                <Text style={styles.completedText}>✅ MISSION COMPLETE</Text>
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={[styles.primaryBtn, completing && { opacity: 0.6 }]}
+                onPress={handleMarkComplete}
+                disabled={completing}
+                activeOpacity={0.85}
+              >
+                {completing
+                  ? <ActivityIndicator color={SL.bg} />
+                  : <Text style={styles.primaryBtnText}>MARK AS COMPLETE</Text>
+                }
+              </TouchableOpacity>
+            )
+          ) : (
+            <TouchableOpacity
+              style={styles.secondaryBtn}
+              activeOpacity={0.8}
+              onPress={() => navigation.navigate('WorkoutEdit', { workout, exercises })}
+            >
+              <Text style={styles.secondaryBtnText}>EDIT WORKOUT</Text>
+            </TouchableOpacity>
+          )}
+
+          <View style={{ height: 32 }} />
         </ScrollView>
       )}
     </View>
@@ -82,112 +186,193 @@ export default function WorkoutDetailScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.bg },
+  container: { flex: 1, backgroundColor: SL.bg },
+
+  corner: {
+    position: 'absolute',
+    width: 14,
+    height: 14,
+    borderColor: SL.accent,
+    zIndex: 2,
+  },
 
   header: {
     paddingHorizontal: 24,
-    paddingTop: 56,
-    paddingBottom: 20,
+    paddingTop: 60,
+    paddingBottom: 24,
     borderBottomWidth: 1,
-    borderBottomColor: C.cardBorder,
+    borderBottomColor: SL.border,
   },
-  back:     { marginBottom: 12 },
-  backText: { fontFamily: F.bodyMed, color: C.iceGlow, fontSize: 13, letterSpacing: 2 },
-  title: {
+  backText: {
+    fontFamily: F.bodyMed,
+    fontSize: 20,
+    color: SL.accent,
+    letterSpacing: 2,
+    marginBottom: 20,
+  },
+  workoutTitle: {
     fontFamily: F.heading,
-    fontSize: 22,
-    color: C.text,
+    fontSize: 32,
+    color: SL.accent,
     letterSpacing: 3,
+    textAlign: 'center',
     textTransform: 'uppercase',
   },
-  purpose: {
-    fontFamily: F.body,
-    fontSize: 12,
-    color: C.textMuted,
-    letterSpacing: 0.5,
-    marginTop: 6,
-  },
-
-  list: {
-    padding: 16,
-    gap: 12,
-  },
-
-  exerciseCard: {
+  purposeRow: {
     flexDirection: 'row',
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 10,
-    padding: 16,
-    gap: 14,
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 12,
+  },
+  purposeAccent: {
+    width: 3,
+    height: 18,
+    backgroundColor: SL.accent,
+    borderRadius: 2,
+  },
+  purposeText: {
+    fontFamily: F.body,
+    fontSize: 22,
+    color: SL.text,
+    letterSpacing: 0.5,
+    flex: 1,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: SL.accent,
+    opacity: 0.3,
+    marginTop: 20,
+  },
+
+  list: { paddingHorizontal: 16, paddingTop: 20, gap: 10 },
+
+  exCard: {
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderRadius: 4,
+    overflow: 'visible',
+    position: 'relative',
+  },
+  exCardInner: {
+    flexDirection: 'row',
     alignItems: 'flex-start',
+    gap: 16,
+    padding: 16,
   },
   letterBadge: {
-    width: 36,
-    height: 36,
-    borderRadius: 6,
-    backgroundColor: C.lockedBg,
-    borderWidth: 1,
-    borderColor: C.deepBlue,
+    width: 40,
+    height: 40,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 4,
     justifyContent: 'center',
     alignItems: 'center',
+    backgroundColor: 'rgba(74,158,191,0.08)',
+    flexShrink: 0,
   },
   letterText: {
     fontFamily: F.heading,
-    fontSize: 14,
-    color: C.iceGlow,
+    fontSize: 20,
+    color: SL.accent,
     letterSpacing: 1,
   },
-  exerciseBody: { flex: 1, gap: 6 },
-  exerciseName: {
+  exBody: { flex: 1, gap: 6 },
+  exName: {
     fontFamily: F.heading,
-    fontSize: 13,
-    color: C.text,
+    fontSize: 26,
+    color: SL.text,
     letterSpacing: 1.5,
     textTransform: 'uppercase',
   },
-  metaRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: 4,
-  },
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
   metaItem: {
-    fontFamily: F.body,
-    fontSize: 11,
-    color: C.textMuted,
+    fontFamily: F.bodyMed,
+    fontSize: 20,
+    color: SL.muted,
+    letterSpacing: 1,
+  },
+  metaDot: { color: SL.border, fontSize: 20 },
+  exNotes: {
+    fontFamily: F.bodyMed,
+    fontSize: 20,
+    color: SL.muted,
     letterSpacing: 0.5,
-  },
-  metaDivider: {
-    color: C.textMuted,
-    fontSize: 11,
-  },
-  notes: {
     fontStyle: 'italic',
+    marginTop: 2,
   },
 
-  empty: {
-    fontFamily: F.body,
+  videoBtn: {
+    marginTop: 6,
+    height: 34,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(74,158,191,0.08)',
+  },
+  videoBtnText: {
+    fontFamily: F.bodyMed,
     fontSize: 13,
-    color: C.textMuted,
+    color: SL.accent,
+    letterSpacing: 2,
+  },
+
+  emptyText: {
+    fontFamily: F.heading,
+    fontSize: 22,
+    color: SL.muted,
+    letterSpacing: 3,
     textAlign: 'center',
     marginTop: 32,
   },
 
-  editBtn: {
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 8,
-    paddingVertical: 14,
+  // Buttons
+  primaryBtn: {
+    height: 44,
+    backgroundColor: SL.accent,
+    borderRadius: 6,
+    justifyContent: 'center',
     alignItems: 'center',
   },
-  editBtnText: {
+  primaryBtnText: {
     fontFamily: F.heading,
-    fontSize: 12,
-    color: C.textMuted,
-    letterSpacing: 2,
+    fontSize: 22,
+    color: SL.bg,
+    letterSpacing: 3,
     textTransform: 'uppercase',
+  },
+  secondaryBtn: {
+    height: 36,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 6,
+    paddingHorizontal: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: 'transparent',
+  },
+  secondaryBtnText: {
+    fontFamily: F.heading,
+    fontSize: 22,
+    color: SL.accent,
+    letterSpacing: 3,
+  },
+  completedBanner: {
+    height: 44,
+    borderWidth: 1.5,
+    borderColor: '#4CAF50',
+    borderRadius: 6,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(76,175,80,0.08)',
+  },
+  completedText: {
+    fontFamily: F.heading,
+    fontSize: 22,
+    color: '#4CAF50',
+    letterSpacing: 3,
   },
 });

@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Dimensions } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Dimensions, Platform } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
@@ -7,34 +7,25 @@ import { C } from '../constants/colors';
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const VIDEO_HEIGHT = SCREEN_WIDTH * 0.5625; // 16:9
 
-function getYouTubeId(url) {
+function getEmbedUrl(url) {
   if (!url) return null;
-  const patterns = [/[?&]v=([^&]+)/, /youtu\.be\/([^?&]+)/, /shorts\/([^?&]+)/];
-  for (const p of patterns) {
-    const m = url.match(p);
-    if (m) return m[1];
-  }
-  return null;
+  const shortsMatch = url.match(/youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/);
+  const watchMatch = url.match(/[?&]v=([a-zA-Z0-9_-]+)/);
+  const id = shortsMatch?.[1] || watchMatch?.[1];
+  return id ? `https://www.youtube.com/embed/${id}` : null;
+}
+
+function SectionTitle({ children }) {
+  return <Text style={styles.sectionTitle}>{children}</Text>;
 }
 
 export default function ExerciseDetailScreen({ route, navigation }) {
   const { exercise } = route.params;
-  const videoId = getYouTubeId(exercise.youtube_url);
+  const embedUrl = getEmbedUrl(exercise.youtube_url);
 
-  const embedHtml = `
-    <html>
-      <head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-      <body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;height:100vh;">
-        <iframe
-          width="100%" height="100%"
-          src="https://www.youtube.com/embed/${videoId}?rel=0&modestbranding=1"
-          frameborder="0"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-          allowfullscreen>
-        </iframe>
-      </body>
-    </html>
-  `;
+  const cues = exercise.coaching_cues
+    ? exercise.coaching_cues.split('\n').filter(line => line.trim().length > 0)
+    : [];
 
   return (
     <View style={styles.container}>
@@ -47,24 +38,58 @@ export default function ExerciseDetailScreen({ route, navigation }) {
 
       <ScrollView contentContainerStyle={styles.body}>
         {/* Video */}
-        {videoId ? (
-          <WebView
-            source={{ html: embedHtml }}
-            style={styles.video}
-            allowsFullscreenVideo
-            javaScriptEnabled
-          />
+        {embedUrl ? (
+          Platform.OS === 'web' ? (
+            <iframe
+              src={embedUrl}
+              style={{ width: '100%', aspectRatio: '16/9', border: 'none', display: 'block' }}
+              allowFullScreen
+            />
+          ) : (
+            <WebView
+              source={{ uri: embedUrl }}
+              style={styles.video}
+              allowsFullscreenVideo
+              javaScriptEnabled
+            />
+          )
         ) : (
           <View style={styles.noVideo}>
             <Text style={styles.noVideoText}>No video added yet</Text>
           </View>
         )}
 
-        {/* Badge + info */}
-        <View style={styles.info}>
+        <View style={styles.content}>
+          {/* Movement Type Badge */}
           <View style={styles.typeBadge}>
             <Text style={styles.typeText}>{exercise.movement_type}</Text>
           </View>
+
+          {/* Description */}
+          {exercise.description ? (
+            <View style={styles.section}>
+              <SectionTitle>DESCRIPTION</SectionTitle>
+              <Text style={styles.bodyText}>{exercise.description}</Text>
+            </View>
+          ) : null}
+
+          {/* Coaching Cues */}
+          {cues.length > 0 ? (
+            <View style={styles.section}>
+              <SectionTitle>COACHING CUES</SectionTitle>
+              {cues.map((cue, i) => (
+                <View key={i} style={styles.cueRow}>
+                  <Text style={styles.cueBullet}>▸</Text>
+                  <Text style={styles.cueText}>{cue.trim()}</Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
+
+          {/* Added By */}
+          {exercise.added_by_name ? (
+            <Text style={styles.addedBy}>Added by {exercise.added_by_name}</Text>
+          ) : null}
         </View>
       </ScrollView>
     </View>
@@ -92,7 +117,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  body: { paddingBottom: 48 },
+  body: { paddingBottom: 56 },
 
   video: {
     width: SCREEN_WIDTH,
@@ -112,24 +137,73 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
   },
 
-  info: {
-    padding: 20,
-    gap: 12,
+  content: {
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    gap: 24,
   },
+
   typeBadge: {
     alignSelf: 'flex-start',
     backgroundColor: C.lockedBg,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: C.deepBlue,
-    borderRadius: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 5,
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
   },
   typeText: {
+    fontFamily: F.body,
+    fontSize: 14,
+    color: C.iceGlow,
+    letterSpacing: 3,
+    textTransform: 'uppercase',
+  },
+
+  section: { gap: 10 },
+
+  sectionTitle: {
+    fontFamily: F.heading,
+    fontSize: 13,
+    color: C.deepBlue,
+    letterSpacing: 3,
+    textTransform: 'uppercase',
+  },
+
+  bodyText: {
+    fontFamily: F.body,
+    fontSize: 14,
+    color: C.text,
+    lineHeight: 22,
+    letterSpacing: 0.5,
+  },
+
+  cueRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  cueBullet: {
+    fontFamily: F.body,
+    fontSize: 14,
+    color: C.deepBlue,
+    lineHeight: 22,
+  },
+  cueText: {
+    fontFamily: F.body,
+    fontSize: 14,
+    color: C.text,
+    lineHeight: 22,
+    flex: 1,
+    letterSpacing: 0.5,
+  },
+
+  addedBy: {
     fontFamily: F.bodyMed,
     fontSize: 12,
-    color: C.iceGlow,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
+    color: C.textMuted,
+    letterSpacing: 1.5,
+    textAlign: 'center',
+    marginTop: 8,
   },
 });

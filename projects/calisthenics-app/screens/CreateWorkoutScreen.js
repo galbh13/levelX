@@ -1,346 +1,530 @@
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
-  ScrollView, ActivityIndicator, Alert,
+  ScrollView, ActivityIndicator,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
-import { C } from '../constants/colors';
 
-const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+// ─── Theme ────────────────────────────────────────────────────────────────────
 
-export default function CreateWorkoutScreen({ route, navigation }) {
-  const { student, day } = route.params;
+const SL = {
+  bg:     '#050912',
+  panel:  '#070d1a',
+  border: '#1a3a5c',
+  accent: '#4A9EBF',
+  text:   '#E8F4FF',
+  muted:  '#4a6a8a',
+  danger: '#FF4444',
+};
 
-  const [title,     setTitle]     = useState('');
-  const [purpose,   setPurpose]   = useState('');
-  const [date,      setDate]      = useState(day?.dateStr ?? '');
-  const [exercises, setExercises] = useState([]);
-  const [saving,    setSaving]    = useState(false);
+// ─── Screen ───────────────────────────────────────────────────────────────────
 
-  // Receive a selected exercise from ExerciseGallery
-  useEffect(() => {
-    if (route.params?.selectedExercise) {
-      const ex = route.params.selectedExercise;
-      setExercises(prev => [
-        ...prev,
-        { tempId: Date.now().toString(), exercise: ex, sets: '', reps: '', notes: '' },
-      ]);
-      // Clear the param so re-renders don't re-add
-      navigation.setParams({ selectedExercise: undefined });
-    }
-  }, [route.params?.selectedExercise]);
+export default function CreateWorkoutScreen({ navigation }) {
+  const {
+    selectedStudent,
+    selectedDay,
+    pendingExercises,
+    removeExercise,
+    clearExercises,
+  } = useCoach();
 
-  function updateExercise(tempId, field, value) {
-    setExercises(prev =>
-      prev.map(e => e.tempId === tempId ? { ...e, [field]: value } : e)
-    );
+  const [title,           setTitle]           = useState('');
+  const [purpose,         setPurpose]         = useState('');
+  // Keyed by ex._uid for stability when exercises are removed mid-list
+  const [exerciseDetails, setExerciseDetails] = useState({});
+  const [saving,          setSaving]          = useState(false);
+
+  // Clear any leftover exercises from a previous session
+  useEffect(() => { clearExercises(); }, []);
+
+  function updateDetail(uid, field, value) {
+    setExerciseDetails(prev => ({
+      ...prev,
+      [uid]: { ...prev[uid], [field]: value },
+    }));
   }
 
-  function removeExercise(tempId) {
-    setExercises(prev => prev.filter(e => e.tempId !== tempId));
+  function handleRemove(index, uid) {
+    removeExercise(index);
+    // Drop the details entry for this exercise
+    setExerciseDetails(prev => {
+      const next = { ...prev };
+      delete next[uid];
+      return next;
+    });
   }
 
-  async function handleSave() {
-    if (!title.trim()) { Alert.alert('Required', 'Please enter a workout title.'); return; }
-    if (!date.trim())  { Alert.alert('Required', 'Please enter a scheduled date.'); return; }
+  // ── Save ──────────────────────────────────────────────────────────────────
+
+  const canSave = title.trim().length > 0 && pendingExercises.length > 0 && !saving;
+
+  const handleSave = async () => {
+    if (!title.trim())                { alert('Please enter a workout title.');      return; }
+    if (pendingExercises.length === 0){ alert('Please add at least one exercise.'); return; }
+    if (!selectedStudent)             { alert('No student selected.');               return; }
 
     setSaving(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      if (userError) throw userError;
 
       const { data: workout, error: workoutError } = await supabase
         .from('workouts')
         .insert({
-          title:          title.trim(),
-          purpose:        purpose.trim() || null,
-          assigned_to:    student.id,
-          created_by:     user.id,
-          scheduled_date: date.trim(),
+          title:       title.trim(),
+          purpose:     purpose.trim(),
+          assigned_to: selectedStudent.id,
+          created_by:  user.id,
         })
-        .select('id')
+        .select()
         .single();
 
       if (workoutError) throw workoutError;
 
-      if (exercises.length > 0) {
-        const rows = exercises.map((e, idx) => ({
+      if (selectedDay?.dateStr) {
+        const { error: assignError } = await supabase
+          .from('workout_override_workouts')
+          .insert({
+            student_id:    selectedStudent.id,
+            coach_id:      user.id,
+            specific_date: selectedDay.dateStr,
+            workout_id:    workout.id,
+          });
+        if (assignError) throw assignError;
+      }
+
+      for (let i = 0; i < pendingExercises.length; i++) {
+        const ex      = pendingExercises[i];
+        const details = exerciseDetails[ex._uid] ?? {};
+        const { error: exError } = await supabase.from('exercises').insert({
           workout_id: workout.id,
-          letter:     LETTERS[idx] ?? String(idx + 1),
-          name:       e.exercise.name,
-          sets:       parseInt(e.sets) || null,
-          reps:       e.reps.trim() || null,
-          notes:      e.notes.trim() || null,
-        }));
-        const { error: exError } = await supabase.from('exercises').insert(rows);
+          letter:     String.fromCharCode(65 + i),
+          name:       ex.name,
+          sets:       parseInt(details.sets) || 0,
+          reps:       details.reps  ?? '',
+          notes:      details.notes ?? '',
+        });
         if (exError) throw exError;
       }
 
+      clearExercises();
+      alert('Workout saved successfully!');
       navigation.goBack();
-    } catch (e) {
-      Alert.alert('Error', e.message ?? 'Failed to save workout.');
+    } catch (err) {
+      alert('Failed to save: ' + (err.message ?? 'Unknown error'));
     }
     setSaving(false);
-  }
+  };
+
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <View style={styles.container}>
+      {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
           <Text style={styles.backText}>← BACK</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>New Workout</Text>
-        <View style={{ width: 60 }} />
+        <Text style={styles.title}>CREATE WORKOUT</Text>
+        {selectedStudent && (
+          <Text style={styles.studentCtx}>
+            FOR: <Text style={styles.studentCtxName}>{selectedStudent.full_name?.toUpperCase()}</Text>
+          </Text>
+        )}
+        {selectedDay && (
+          <Text style={styles.dayCtx}>{selectedDay.label} · {selectedDay.dateStr}</Text>
+        )}
+        <View style={styles.divider} />
       </View>
 
       <ScrollView contentContainerStyle={styles.form} keyboardShouldPersistTaps="handled">
-        <Text style={styles.studentLabel}>For: <Text style={styles.studentName}>{student.full_name}</Text></Text>
 
-        {/* Title */}
-        <Text style={styles.label}>Workout Title</Text>
+        {/* Workout Title */}
+        <Text style={styles.inputLabel}>WORKOUT TITLE</Text>
         <TextInput
           style={styles.input}
-          placeholder="e.g. Pull Day A"
-          placeholderTextColor={C.textMuted}
+          placeholder="e.g. PULL DAY A"
+          placeholderTextColor={SL.muted}
           value={title}
           onChangeText={setTitle}
         />
 
         {/* Purpose */}
-        <Text style={styles.label}>Goal / Purpose <Text style={styles.optional}>(optional)</Text></Text>
+        <Text style={styles.inputLabel}>
+          GOAL / PURPOSE{'  '}
+          <Text style={styles.optional}>(OPTIONAL)</Text>
+        </Text>
         <TextInput
           style={styles.input}
-          placeholder="e.g. Build pulling strength"
-          placeholderTextColor={C.textMuted}
+          placeholder="e.g. BUILD PULLING STRENGTH"
+          placeholderTextColor={SL.muted}
           value={purpose}
           onChangeText={setPurpose}
         />
 
-        {/* Date */}
-        <Text style={styles.label}>Scheduled Date</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="YYYY-MM-DD"
-          placeholderTextColor={C.textMuted}
-          value={date}
-          onChangeText={setDate}
-        />
-
-        {/* Exercises */}
+        {/* Exercise count header */}
         <View style={styles.exercisesHeader}>
-          <Text style={styles.label}>Exercises</Text>
-          <TouchableOpacity
-            style={styles.addExBtn}
-            onPress={() => navigation.navigate('ExerciseGallery', {
-              selectionMode: true,
-              returnTo: 'CreateWorkout',
-            })}
-          >
-            <Text style={styles.addExBtnText}>+ Add Exercise</Text>
-          </TouchableOpacity>
+          <Text style={styles.inputLabel} style={styles.exercisesLabel}>EXERCISES</Text>
+          {pendingExercises.length > 0 && (
+            <View style={styles.exCountBadge}>
+              <Text style={styles.exCountText}>
+                {pendingExercises.length} ADDED
+              </Text>
+            </View>
+          )}
         </View>
 
-        {exercises.map((item, idx) => (
-          <View key={item.tempId} style={styles.exerciseRow}>
-            <View style={styles.letterBadge}>
-              <Text style={styles.letterText}>{LETTERS[idx]}</Text>
-            </View>
-            <View style={styles.exerciseFields}>
-              <Text style={styles.exerciseTitle}>{item.exercise.name}</Text>
-              <View style={styles.inlineRow}>
-                <TextInput
-                  style={[styles.input, styles.inputSmall]}
-                  placeholder="Sets"
-                  placeholderTextColor={C.textMuted}
-                  value={item.sets}
-                  onChangeText={v => updateExercise(item.tempId, 'sets', v)}
-                  keyboardType="numeric"
-                />
-                <TextInput
-                  style={[styles.input, styles.inputSmall]}
-                  placeholder="Reps"
-                  placeholderTextColor={C.textMuted}
-                  value={item.reps}
-                  onChangeText={v => updateExercise(item.tempId, 'reps', v)}
-                />
-              </View>
-              <TextInput
-                style={[styles.input, styles.inputNotes]}
-                placeholder="Coaching notes..."
-                placeholderTextColor={C.textMuted}
-                value={item.notes}
-                onChangeText={v => updateExercise(item.tempId, 'notes', v)}
-                multiline
-              />
-            </View>
-            <TouchableOpacity onPress={() => removeExercise(item.tempId)} style={styles.removeBtn}>
-              <Text style={styles.removeBtnText}>✕</Text>
-            </TouchableOpacity>
+        {/* Empty state */}
+        {pendingExercises.length === 0 && (
+          <View style={styles.emptyExWrap}>
+            <Text style={styles.emptyExText}>NO EXERCISES YET</Text>
+            <Text style={styles.emptyExSub}>Tap + ADD EXERCISE below to build your workout</Text>
           </View>
-        ))}
-
-        {exercises.length === 0 && (
-          <Text style={styles.emptyExercises}>No exercises added yet.</Text>
         )}
 
-        {/* Save */}
+        {/* Exercise cards */}
+        {pendingExercises.map((ex, i) => {
+          const uid = ex._uid;
+          return (
+            <View key={uid} style={styles.exCard}>
+
+              {/* Card header: letter badge + name + remove */}
+              <View style={styles.exCardHead}>
+                <View style={styles.letterBadge}>
+                  <Text style={styles.letterText}>{String.fromCharCode(65 + i)}</Text>
+                </View>
+                <Text style={styles.exName} numberOfLines={2}>{ex.name?.toUpperCase()}</Text>
+                <TouchableOpacity
+                  style={styles.removeBtn}
+                  onPress={() => handleRemove(i, uid)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Text style={styles.removeBtnText}>✕</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Sets + Reps row */}
+              <View style={styles.exRow}>
+                <View style={styles.exField}>
+                  <Text style={styles.fieldLabel}>SETS</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="4"
+                    placeholderTextColor={SL.muted}
+                    keyboardType="numeric"
+                    value={exerciseDetails[uid]?.sets ?? ''}
+                    onChangeText={v => updateDetail(uid, 'sets', v)}
+                  />
+                </View>
+                <View style={styles.exField}>
+                  <Text style={styles.fieldLabel}>REPS</Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="8-10"
+                    placeholderTextColor={SL.muted}
+                    value={exerciseDetails[uid]?.reps ?? ''}
+                    onChangeText={v => updateDetail(uid, 'reps', v)}
+                  />
+                </View>
+              </View>
+
+              {/* Notes */}
+              <Text style={styles.fieldLabel}>COACHING NOTES</Text>
+              <TextInput
+                style={[styles.input, styles.inputMultiline]}
+                placeholder="Focus cues, technique notes..."
+                placeholderTextColor={SL.muted}
+                multiline
+                value={exerciseDetails[uid]?.notes ?? ''}
+                onChangeText={v => updateDetail(uid, 'notes', v)}
+              />
+            </View>
+          );
+        })}
+
+        {/* Add Exercise */}
         <TouchableOpacity
-          style={[styles.saveBtn, saving && styles.saveBtnDisabled]}
-          onPress={handleSave}
-          disabled={saving}
+          style={styles.addExBtn}
+          onPress={() => navigation.navigate('ExerciseGallery', { selectionMode: true })}
           activeOpacity={0.8}
         >
+          <Text style={styles.addExBtnText}>+ ADD EXERCISE</Text>
+        </TouchableOpacity>
+
+        {/* Save Workout */}
+        <TouchableOpacity
+          style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
+          onPress={handleSave}
+          disabled={!canSave}
+          activeOpacity={0.85}
+        >
           {saving
-            ? <ActivityIndicator color="#fff" />
-            : <Text style={styles.saveBtnText}>Save Workout</Text>
+            ? <ActivityIndicator color={SL.bg} />
+            : <Text style={[styles.saveBtnText, !canSave && styles.saveBtnTextDisabled]}>
+                SAVE WORKOUT
+              </Text>
           }
         </TouchableOpacity>
+
+        <View style={{ height: 40 }} />
       </ScrollView>
     </View>
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.bg },
+  container: { flex: 1, backgroundColor: SL.bg },
+
+  // ── Header ──────────────────────────────────────────────────────────────────
 
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 56,
-    paddingBottom: 14,
+    paddingHorizontal: 24,
+    paddingTop: 60,
+    paddingBottom: 24,
     borderBottomWidth: 1,
-    borderBottomColor: C.cardBorder,
+    borderBottomColor: SL.border,
   },
-  back: { width: 60 },
-  backText: { fontFamily: F.bodyMed, color: C.iceGlow, fontSize: 13, letterSpacing: 2 },
-  title: {
-    flex: 1,
-    fontFamily: F.heading,
+  backText: {
+    fontFamily: F.bodyMed,
     fontSize: 18,
-    color: C.text,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
+    color: SL.accent,
+    letterSpacing: 2,
+    marginBottom: 14,
+  },
+  title: {
+    fontFamily: F.heading,
+    fontSize: 32,
+    color: SL.accent,
+    letterSpacing: 4,
     textAlign: 'center',
+    textTransform: 'uppercase',
+  },
+  studentCtx: {
+    fontFamily: F.bodyMed,
+    fontSize: 16,
+    color: SL.muted,
+    letterSpacing: 2,
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  studentCtxName: { color: SL.text },
+  dayCtx: {
+    fontFamily: F.bodyMed,
+    fontSize: 15,
+    color: SL.muted,
+    letterSpacing: 1,
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: SL.accent,
+    opacity: 0.3,
+    marginTop: 18,
   },
 
-  form: { padding: 20, gap: 6, paddingBottom: 60 },
+  // ── Form ────────────────────────────────────────────────────────────────────
 
-  studentLabel: {
+  form: { padding: 20, gap: 0, paddingBottom: 24 },
+
+  inputLabel: {
     fontFamily: F.bodyMed,
     fontSize: 12,
-    color: C.textMuted,
-    letterSpacing: 1.5,
-    textTransform: 'uppercase',
-    marginBottom: 8,
-  },
-  studentName: { color: C.iceGlow },
-
-  label: {
-    fontFamily: F.bodyMed,
-    fontSize: 11,
-    color: C.textMuted,
+    color: SL.muted,
     letterSpacing: 2,
     textTransform: 'uppercase',
-    marginTop: 14,
-    marginBottom: 4,
+    marginTop: 18,
+    marginBottom: 6,
   },
-  optional: { fontSize: 10 },
+  optional: {
+    fontSize: 11,
+    color: SL.muted,
+    opacity: 0.7,
+  },
 
   input: {
-    height: 50,
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 8,
+    height: 46,
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderRadius: 4,
     paddingHorizontal: 14,
     fontFamily: F.body,
-    fontSize: 14,
-    color: C.text,
+    fontSize: 16,
+    color: SL.text,
   },
+  inputMultiline: {
+    height: 76,
+    paddingTop: 12,
+    textAlignVertical: 'top',
+  },
+
+  // ── Exercises section ────────────────────────────────────────────────────────
 
   exercisesHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginTop: 14,
+    marginTop: 24,
+    marginBottom: 6,
   },
-  addExBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: C.iceGlow,
-    borderRadius: 6,
-  },
-  addExBtnText: {
+  exercisesLabel: {
     fontFamily: F.bodyMed,
     fontSize: 12,
-    color: C.iceGlow,
-    letterSpacing: 1,
-  },
-
-  exerciseRow: {
-    flexDirection: 'row',
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 10,
-    padding: 12,
-    gap: 10,
-    marginTop: 10,
-    alignItems: 'flex-start',
-  },
-  letterBadge: {
-    width: 32,
-    height: 32,
-    borderRadius: 6,
-    backgroundColor: C.lockedBg,
-    borderWidth: 1,
-    borderColor: C.deepBlue,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 2,
-  },
-  letterText: { fontFamily: F.heading, fontSize: 14, color: C.iceGlow },
-  exerciseFields: { flex: 1, gap: 6 },
-  exerciseTitle: {
-    fontFamily: F.heading,
-    fontSize: 12,
-    color: C.text,
-    letterSpacing: 1.5,
+    color: SL.muted,
+    letterSpacing: 2,
     textTransform: 'uppercase',
-    marginBottom: 2,
+    marginTop: 0,
+    marginBottom: 0,
   },
-  inlineRow: { flexDirection: 'row', gap: 8 },
-  inputSmall: { flex: 1, height: 42, fontSize: 13 },
-  inputNotes: { height: 60, paddingTop: 10, fontSize: 12, textAlignVertical: 'top' },
-
-  removeBtn: { padding: 4, marginTop: 2 },
-  removeBtnText: { color: C.textMuted, fontSize: 16 },
-
-  emptyExercises: {
+  exCountBadge: {
+    backgroundColor: 'rgba(74,158,191,0.15)',
+    borderWidth: 1,
+    borderColor: SL.accent,
+    borderRadius: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+  },
+  exCountText: {
     fontFamily: F.body,
     fontSize: 12,
-    color: C.textMuted,
+    color: SL.accent,
+    letterSpacing: 1.5,
+  },
+
+  emptyExWrap: {
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderRadius: 4,
+    borderStyle: 'dashed',
+    paddingVertical: 28,
+    alignItems: 'center',
+    gap: 8,
+  },
+  emptyExText: {
+    fontFamily: F.heading,
+    fontSize: 16,
+    color: SL.muted,
+    letterSpacing: 2,
+  },
+  emptyExSub: {
+    fontFamily: F.bodyMed,
+    fontSize: 13,
+    color: SL.muted,
+    letterSpacing: 0.5,
     textAlign: 'center',
+    paddingHorizontal: 20,
+    opacity: 0.7,
+  },
+
+  // ── Exercise card ────────────────────────────────────────────────────────────
+
+  exCard: {
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderRadius: 4,
+    padding: 16,
     marginTop: 12,
+    gap: 10,
+  },
+  exCardHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  letterBadge: {
+    width: 36,
+    height: 36,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(74,158,191,0.08)',
+    flexShrink: 0,
+  },
+  letterText: {
+    fontFamily: F.heading,
+    fontSize: 18,
+    color: SL.accent,
+  },
+  exName: {
+    fontFamily: F.heading,
+    fontSize: 20,
+    color: SL.text,
     letterSpacing: 1,
+    flex: 1,
+  },
+  removeBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 4,
+    borderWidth: 1.5,
+    borderColor: SL.danger,
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  removeBtnText: {
+    fontFamily: F.body,
+    fontSize: 13,
+    color: SL.danger,
+  },
+
+  exRow: { flexDirection: 'row', gap: 12 },
+  exField: { flex: 1, gap: 6 },
+
+  fieldLabel: {
+    fontFamily: F.bodyMed,
+    fontSize: 12,
+    color: SL.muted,
+    letterSpacing: 2,
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+
+  // ── Buttons ──────────────────────────────────────────────────────────────────
+
+  addExBtn: {
+    height: 40,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  addExBtnText: {
+    fontFamily: F.heading,
+    fontSize: 16,
+    color: SL.accent,
+    letterSpacing: 3,
   },
 
   saveBtn: {
-    marginTop: 28,
-    height: 52,
-    backgroundColor: C.iceGlow,
-    borderRadius: 8,
+    height: 48,
+    backgroundColor: SL.accent,
+    borderRadius: 4,
     justifyContent: 'center',
     alignItems: 'center',
+    marginTop: 14,
   },
-  saveBtnDisabled: { opacity: 0.6 },
+  saveBtnDisabled: {
+    backgroundColor: SL.border,
+  },
   saveBtnText: {
     fontFamily: F.heading,
-    fontSize: 13,
-    color: '#fff',
+    fontSize: 18,
+    color: SL.bg,
     letterSpacing: 3,
     textTransform: 'uppercase',
+  },
+  saveBtnTextDisabled: {
+    color: SL.muted,
   },
 });

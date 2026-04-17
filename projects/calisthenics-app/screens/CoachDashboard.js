@@ -1,16 +1,40 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
+  Animated, View, Text, StyleSheet, ScrollView,
+  TouchableOpacity, ActivityIndicator,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { supabase } from '../lib/supabase';
+import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
-import { C } from '../constants/colors';
 
-const MOCK_STUDENTS = [
-  { id: 'student-1', full_name: 'Alex Ronen', level: 7,  next_checkup: '2026-04-15' },
-  { id: 'student-2', full_name: 'Maya Cohen', level: 4,  next_checkup: '2026-04-20' },
-  { id: 'student-3', full_name: 'Ido Levi',   level: 11, next_checkup: '2026-04-12' },
-];
+// ─── Solo Leveling palette ────────────────────────────────────────────────────
+
+const SL = {
+  bg:     '#050912',
+  panel:  '#070d1a',
+  border: '#1a3a5c',
+  accent: '#4A9EBF',
+  blue:   '#3A6E9E',
+  text:   '#E8F4FF',
+  muted:  '#4a6a8a',
+  danger: '#FF4444',
+  green:  '#4CAF50',
+};
+
+const TODAY = new Date().toISOString().split('T')[0];
+
+// ─── Corner component ─────────────────────────────────────────────────────────
+
+function Corner({ pos }) {
+  const isTop = pos === 'TL';
+  const style = isTop
+    ? { top: -1, left: -1, borderTopWidth: 1.5, borderLeftWidth: 1.5 }
+    : { bottom: -1, right: -1, borderBottomWidth: 1.5, borderRightWidth: 1.5 };
+  return <View style={[styles.corner, { borderColor: SL.accent }, style]} pointerEvents="none" />;
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatCheckup(dateStr) {
   if (!dateStr) return '—';
@@ -18,65 +42,163 @@ function formatCheckup(dateStr) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+// ─── Student card (manages its own pulse animation) ───────────────────────────
+
+function StudentCard({ student, todayStatus, onPress }) {
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (todayStatus !== 'missed') return;
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.2, duration: 900, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1,   duration: 900, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [todayStatus]);
+
+  const leftBorderStyle = todayStatus === 'missed'
+    ? { borderLeftWidth: 3, borderLeftColor: SL.danger }
+    : todayStatus === 'complete'
+    ? { borderLeftWidth: 3, borderLeftColor: SL.green }
+    : {};
+
+  return (
+    <TouchableOpacity onPress={onPress} activeOpacity={0.75}>
+      <View style={[styles.panel, leftBorderStyle]}>
+        <Corner pos="TL" />
+        <Corner pos="BR" />
+
+        {/* Pulsing red dot — only when missed */}
+        {todayStatus === 'missed' && (
+          <Animated.View style={[styles.pulseDot, { opacity: pulseAnim }]} />
+        )}
+
+        <View style={styles.cardInner}>
+          <View style={styles.cardMain}>
+            <Text style={styles.studentName}>{student.full_name?.toUpperCase()}</Text>
+
+            {/* Today status label */}
+            {todayStatus === 'missed' && (
+              <Text style={styles.missedLabel}>⚠ MISSED TODAY'S WORKOUT</Text>
+            )}
+            {todayStatus === 'complete' && (
+              <Text style={styles.completeLabel}>✓ TODAY COMPLETE</Text>
+            )}
+
+            <Text style={styles.checkupText}>
+              NEXT CHECKUP: <Text style={styles.checkupValue}>{formatCheckup(student.nextCheckup)}</Text>
+            </Text>
+          </View>
+
+          <View style={styles.cardRight}>
+            <View style={styles.levelBadge}>
+              <Text style={styles.levelText}>LVL {student.level ?? '—'}</Text>
+            </View>
+            <Text style={styles.chevron}>→</Text>
+          </View>
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+// ─── Screen ───────────────────────────────────────────────────────────────────
+
 export default function CoachDashboard({ navigation }) {
+  const { setSelectedStudent } = useCoach();
+  // Each entry: { ...studentProfile, todayStatus: 'missed' | 'complete' | null }
   const [students, setStudents] = useState([]);
-  const [loading, setLoading]   = useState(true);
+  const [loading,  setLoading]  = useState(true);
 
-  useEffect(() => { fetchStudents(); }, []);
-
-  async function fetchStudents() {
+  const fetchStudents = useCallback(async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      const { data, error } = await supabase
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      if (userError || !user) { setLoading(false); return; }
+
+      const { data: profileData, error: profileError } = await supabase
         .from('profiles')
-        .select('id, full_name, level, next_checkup')
-        .eq('coach_id', user.id)
-        .eq('role', 'student');
-      setStudents((!error && data?.length) ? data : MOCK_STUDENTS);
-    } catch {
-      setStudents(MOCK_STUDENTS);
+        .select('*')
+        .eq('role', 'student')
+        .eq('coach_id', user.id);
+
+      if (profileError || !profileData) { setLoading(false); return; }
+
+      // For each student, fetch today's workouts in parallel
+      const enriched = await Promise.all(
+        profileData.map(async (student) => {
+          const { data: todayAssignments } = await supabase
+            .from('workout_override_workouts')
+            .select('id, workout_id, completed')
+            .eq('student_id', student.id)
+            .eq('specific_date', TODAY);
+
+          const todayWorkouts = todayAssignments ?? [];
+
+          let todayStatus = null;
+          if (todayWorkouts.length > 0) {
+            todayStatus = todayWorkouts.every(w => w.completed) ? 'complete' : 'missed';
+          }
+
+          const { data: nextCheckup } = await supabase
+            .from('checkups')
+            .select('scheduled_date')
+            .eq('student_id', student.id)
+            .eq('status', 'pending')
+            .order('scheduled_date', { ascending: true })
+            .limit(1)
+            .maybeSingle();
+
+          return { ...student, todayStatus, nextCheckup: nextCheckup?.scheduled_date ?? null };
+        })
+      );
+
+      setStudents(enriched);
+    } catch (e) {
+      console.error('[CoachDashboard] fetchStudents:', e);
     }
     setLoading(false);
-  }
+  }, []);
+
+  useEffect(() => { fetchStudents(); }, [fetchStudents]);
+
+  useFocusEffect(useCallback(() => { fetchStudents(); }, [fetchStudents]));
 
   return (
     <View style={styles.container}>
+      {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerRow}>
-          <Text style={styles.title}>My Students</Text>
-          <TouchableOpacity onPress={() => supabase.auth.signOut()} style={styles.signOut}>
-            <Text style={styles.signOutText}>Sign Out</Text>
+          <TouchableOpacity onPress={() => supabase.auth.signOut()}>
+            <Text style={styles.signOut}>SIGN OUT</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => navigation.navigate('ExerciseGallery')}>
+            <Text style={styles.galleryLink}>EXERCISE GALLERY →</Text>
           </TouchableOpacity>
         </View>
-        <Text style={styles.subtitle}>Coach Dashboard</Text>
-        <TouchableOpacity
-          style={styles.galleryBtn}
-          onPress={() => navigation.navigate('ExerciseGallery')}
-        >
-          <Text style={styles.galleryBtnText}>Exercise Gallery</Text>
-        </TouchableOpacity>
+        <Text style={styles.subtitle}>COACH DASHBOARD</Text>
+        <Text style={styles.title}>MY STUDENTS</Text>
+        <View style={styles.divider} />
       </View>
 
       {loading ? (
-        <ActivityIndicator color={C.iceGlow} style={{ marginTop: 40 }} />
+        <ActivityIndicator color={SL.accent} style={{ marginTop: 48 }} size="large" />
+      ) : students.length === 0 ? (
+        <View style={styles.emptyWrap}>
+          <Text style={styles.emptyText}>NO STUDENTS ASSIGNED YET</Text>
+          <Text style={styles.emptySubText}>Contact admin to have students assigned to your account.</Text>
+        </View>
       ) : (
         <ScrollView contentContainerStyle={styles.list}>
           {students.map((student) => (
-            <TouchableOpacity
+            <StudentCard
               key={student.id}
-              style={styles.card}
-              onPress={() => navigation.navigate('StudentDetail', { student })}
-              activeOpacity={0.75}
-            >
-              <View style={styles.cardMain}>
-                <Text style={styles.studentName}>{student.full_name}</Text>
-                <Text style={styles.checkup}>CHECKUP: {formatCheckup(student.next_checkup)}</Text>
-              </View>
-              <View style={styles.cardRight}>
-                <Text style={styles.level}>LVL {student.level ?? '—'}</Text>
-                <Text style={styles.chevron}>›</Text>
-              </View>
-            </TouchableOpacity>
+              student={student}
+              todayStatus={student.todayStatus}
+              onPress={() => { setSelectedStudent(student); navigation.navigate('StudentDetail'); }}
+            />
           ))}
         </ScrollView>
       )}
@@ -84,106 +206,164 @@ export default function CoachDashboard({ navigation }) {
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: C.bg,
-  },
+  container: { flex: 1, backgroundColor: SL.bg },
+
   header: {
     paddingHorizontal: 24,
-    paddingTop: 64,
-    paddingBottom: 20,
+    paddingTop: 60,
+    paddingBottom: 24,
     borderBottomWidth: 1,
-    borderBottomColor: C.cardBorder,
+    borderBottomColor: SL.border,
   },
   headerRow: {
     flexDirection: 'row',
-    alignItems: 'center',
     justifyContent: 'space-between',
-  },
-  title: {
-    fontFamily: F.heading,
-    fontSize: 26,
-    color: C.text,
-    letterSpacing: 4,
-    textTransform: 'uppercase',
+    alignItems: 'center',
+    marginBottom: 20,
   },
   signOut: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  signOutText: {
     fontFamily: F.bodyMed,
-    fontSize: 12,
-    color: C.iceGlow,
+    fontSize: 16,
+    color: SL.muted,
     letterSpacing: 2,
-    textTransform: 'uppercase',
+  },
+  galleryLink: {
+    fontFamily: F.bodyMed,
+    fontSize: 18,
+    color: SL.accent,
+    letterSpacing: 1.5,
   },
   subtitle: {
     fontFamily: F.bodyMed,
-    fontSize: 11,
-    color: C.iceGlow,
+    fontSize: 20,
+    color: SL.muted,
     letterSpacing: 4,
-    marginTop: 6,
+    textAlign: 'center',
+    textTransform: 'uppercase',
+    marginBottom: 6,
+  },
+  title: {
+    fontFamily: F.heading,
+    fontSize: 40,
+    color: SL.accent,
+    letterSpacing: 4,
+    textAlign: 'center',
     textTransform: 'uppercase',
   },
-  galleryBtn: {
-    marginTop: 14,
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 8,
-    paddingVertical: 10,
+  divider: {
+    height: 1,
+    backgroundColor: SL.accent,
+    marginTop: 20,
+    opacity: 0.4,
+  },
+
+  emptyWrap: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
-  },
-  galleryBtnText: {
-    fontFamily: F.bodyMed,
-    fontSize: 12,
-    color: C.iceGlow,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-  },
-  list: {
-    padding: 16,
+    paddingHorizontal: 32,
     gap: 12,
   },
-  card: {
+  emptyText: {
+    fontFamily: F.heading,
+    fontSize: 24,
+    color: SL.muted,
+    letterSpacing: 3,
+    textAlign: 'center',
+  },
+  emptySubText: {
+    fontFamily: F.bodyMed,
+    fontSize: 20,
+    color: SL.muted,
+    letterSpacing: 0.5,
+    textAlign: 'center',
+    opacity: 0.7,
+    lineHeight: 28,
+  },
+
+  list: { padding: 16, gap: 12, paddingBottom: 48 },
+
+  // Panel base
+  panel: {
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderRadius: 4,
+    overflow: 'visible',
+    position: 'relative',
+  },
+  corner: {
+    position: 'absolute',
+    width: 14,
+    height: 14,
+    zIndex: 2,
+  },
+
+  // Pulsing red dot
+  pulseDot: {
+    position: 'absolute',
+    top: 12,
+    left: -6,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: SL.danger,
+    zIndex: 10,
+  },
+
+  cardInner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.deepBlue,
-    borderRadius: 10,
     padding: 18,
     gap: 12,
   },
-  cardMain: {
-    flex: 1,
-    gap: 6,
-  },
+  cardMain: { flex: 1, gap: 6 },
   studentName: {
     fontFamily: F.heading,
-    fontSize: 15,
-    color: C.text,
-    letterSpacing: 1.5,
+    fontSize: 28,
+    color: SL.text,
+    letterSpacing: 2,
   },
-  checkup: {
-    fontFamily: F.body,
+  missedLabel: {
+    fontFamily: F.bodyMed,
     fontSize: 11,
-    color: C.textMuted,
+    color: SL.danger,
     letterSpacing: 1.5,
   },
-  cardRight: {
-    alignItems: 'flex-end',
-    gap: 4,
+  completeLabel: {
+    fontFamily: F.bodyMed,
+    fontSize: 11,
+    color: SL.green,
+    letterSpacing: 1.5,
   },
-  level: {
-    fontFamily: F.heading,
-    fontSize: 13,
-    color: C.iceGlow,
+  checkupText: {
+    fontFamily: F.bodyMed,
+    fontSize: 20,
+    color: SL.muted,
+    letterSpacing: 1.5,
+    marginTop: 2,
+  },
+  checkupValue: { color: SL.text },
+  cardRight: { alignItems: 'flex-end', gap: 8 },
+  levelBadge: {
+    borderWidth: 1,
+    borderColor: SL.accent,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  levelText: {
+    fontFamily: F.bodyMed,
+    fontSize: 20,
+    color: SL.accent,
     letterSpacing: 2,
   },
   chevron: {
-    fontSize: 22,
-    color: C.iceGlow,
+    fontSize: 24,
+    color: SL.accent,
+    fontFamily: F.bodyMed,
   },
 });
