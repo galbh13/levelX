@@ -32,12 +32,10 @@ export default function ClassQuestScreen({ route, navigation }) {
   const [completedIds, setCompletedIds] = useState(new Set());
   const [allClasses,   setAllClasses]   = useState([]);
   const [loading,      setLoading]      = useState(true);
-  const [toggling,     setToggling]     = useState(null);
   const [classModal,   setClassModal]   = useState(false);
   const [assigning,    setAssigning]    = useState(false);
 
   // Inline confirmation state (replaces Alert.alert — unreliable on Expo web)
-  const [pendingQuest,  setPendingQuest]  = useState(null);
   const [showPrestige,  setShowPrestige]  = useState(false);
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
@@ -110,51 +108,6 @@ export default function ClassQuestScreen({ route, navigation }) {
     fetchData();
   }
 
-  // ── Toggle quest completion ────────────────────────────────────────────────
-
-  async function toggleQuest(quest) {
-    setToggling(quest.id);
-    const done = completedIds.has(quest.id);
-    try {
-      if (done) {
-        const { error: delErr } = await supabase
-          .from('student_quest_completions')
-          .delete()
-          .eq('student_id', student.id)
-          .eq('quest_id', quest.id);
-        if (delErr) throw delErr;
-
-        const newLvl = Math.max(0, (profile?.current_lvl ?? 0) - quest.lvl_reward);
-        const { error: updErr } = await supabase
-          .from('profiles')
-          .update({ current_lvl: newLvl })
-          .eq('id', student.id);
-        if (updErr) throw updErr;
-
-        setCompletedIds(prev => { const s = new Set(prev); s.delete(quest.id); return s; });
-        setProfile(prev => ({ ...prev, current_lvl: newLvl }));
-      } else {
-        const { error: insErr } = await supabase
-          .from('student_quest_completions')
-          .insert({ student_id: student.id, quest_id: quest.id });
-        if (insErr) throw insErr;
-
-        const newLvl = (profile?.current_lvl ?? 0) + quest.lvl_reward;
-        const { error: updErr } = await supabase
-          .from('profiles')
-          .update({ current_lvl: newLvl })
-          .eq('id', student.id);
-        if (updErr) throw updErr;
-
-        setCompletedIds(prev => new Set([...prev, quest.id]));
-        setProfile(prev => ({ ...prev, current_lvl: newLvl }));
-      }
-    } catch (e) {
-      console.error('[ClassQuestScreen] toggleQuest:', e);
-    }
-    setToggling(null);
-  }
-
   // ── Prestige ───────────────────────────────────────────────────────────────
 
   async function handlePrestige() {
@@ -203,7 +156,9 @@ export default function ClassQuestScreen({ route, navigation }) {
   const sideQuests = quests.filter(q => q.quest_type === 'side');
   const chains     = [...new Set(mainQuests.map(q => q.chain).filter(Boolean))];
 
-  const confirmBarVisible = pendingQuest !== null || showPrestige;
+  const sideDone   = sideQuests.filter(q => completedIds.has(q.id)).length;
+
+  const confirmBarVisible = showPrestige;
 
   return (
     <View style={styles.container}>
@@ -262,95 +217,65 @@ export default function ClassQuestScreen({ route, navigation }) {
           </TouchableOpacity>
         )}
 
-        {/* ── Main Quests ── */}
-        {mainQuests.length > 0 && (
+        {/* ── Main Quest chains — one card per chain → opens CoachQuestTree ── */}
+        {chains.length > 0 && (
           <>
             <Text style={styles.sectionLabel}>MAIN QUESTS</Text>
             {chains.map(chain => {
               const chainQuests = mainQuests.filter(q => q.chain === chain);
+              const done        = chainQuests.filter(q => completedIds.has(q.id));
+              const earnedLvl   = done.reduce((s, q) => s + (q.lvl_reward ?? 0), 0);
               return (
-                <View key={chain} style={styles.chainBlock}>
-                  <Text style={styles.chainLabel}>{chain.toUpperCase()}</Text>
-                  {chainQuests.map((quest, i) => {
-                    const done       = completedIds.has(quest.id);
-                    const prevDone   = i === 0 || completedIds.has(chainQuests[i - 1].id);
-                    const locked     = !done && !prevDone;
-                    const isToggling = toggling === quest.id;
-                    return (
-                      <TouchableOpacity
-                        key={quest.id}
-                        style={[
-                          styles.questCard,
-                          done   && styles.questCardDone,
-                          locked && styles.questCardLocked,
-                        ]}
-                        onPress={() => { if (!locked) setPendingQuest(quest); }}
-                        disabled={!!toggling || locked}
-                        activeOpacity={locked ? 1 : 0.75}
-                      >
-                        <Text style={[
-                          styles.questName,
-                          done   && styles.questNameDone,
-                          locked && styles.questNameLocked,
-                        ]}>
-                          {locked ? '🔒  ' : ''}{quest.name}
-                        </Text>
-                        <View style={styles.questRight}>
-                          {isToggling ? (
-                            <ActivityIndicator color={SL.accent} size="small" />
-                          ) : done ? (
-                            <View style={styles.doneBadge}>
-                              <Text style={styles.doneBadgeText}>✓ DONE</Text>
-                            </View>
-                          ) : (
-                            <View style={[styles.rewardBadge, locked && { opacity: 0.35 }]}>
-                              <Text style={styles.rewardText}>+{quest.lvl_reward} LVL</Text>
-                            </View>
-                          )}
-                        </View>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
+                <TouchableOpacity
+                  key={chain}
+                  style={styles.chainCard}
+                  activeOpacity={0.8}
+                  onPress={() =>
+                    navigation.navigate('CoachQuestTree', {
+                      student,
+                      classId:   profile.class_id,
+                      chain,
+                      questType: 'main',
+                    })
+                  }
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.chainCardName}>
+                      {chain.replace(/_/g, ' ').toUpperCase()}
+                    </Text>
+                    <Text style={styles.chainCardMeta}>
+                      {done.length}/{chainQuests.length} · +{earnedLvl} LVL earned
+                    </Text>
+                  </View>
+                  <Text style={styles.chevron}>›</Text>
+                </TouchableOpacity>
               );
             })}
           </>
         )}
 
-        {/* ── Side Quests ── */}
+        {/* ── Side Quests — single card → opens CoachSideQuests ── */}
         {sideQuests.length > 0 && (
           <>
             <Text style={[styles.sectionLabel, { marginTop: 24 }]}>SIDE QUESTS</Text>
-            {sideQuests.map(quest => {
-              const done       = completedIds.has(quest.id);
-              const isToggling = toggling === quest.id;
-              return (
-                <TouchableOpacity
-                  key={quest.id}
-                  style={[styles.questCard, done && styles.questCardDone]}
-                  onPress={() => setPendingQuest(quest)}
-                  disabled={!!toggling}
-                  activeOpacity={0.75}
-                >
-                  <Text style={[styles.questName, done && styles.questNameDone]}>
-                    {quest.name}
-                  </Text>
-                  <View style={styles.questRight}>
-                    {isToggling ? (
-                      <ActivityIndicator color={SL.accent} size="small" />
-                    ) : done ? (
-                      <View style={styles.doneBadge}>
-                        <Text style={styles.doneBadgeText}>✓ DONE</Text>
-                      </View>
-                    ) : (
-                      <View style={styles.rewardBadge}>
-                        <Text style={styles.rewardText}>+{quest.lvl_reward} LVL</Text>
-                      </View>
-                    )}
-                  </View>
-                </TouchableOpacity>
-              );
-            })}
+            <TouchableOpacity
+              style={styles.chainCard}
+              activeOpacity={0.8}
+              onPress={() =>
+                navigation.navigate('CoachSideQuests', {
+                  student,
+                  classId: profile.class_id,
+                })
+              }
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.chainCardName}>SIDE QUESTS</Text>
+                <Text style={styles.chainCardMeta}>
+                  {sideDone}/{sideQuests.length} completed
+                </Text>
+              </View>
+              <Text style={styles.chevron}>›</Text>
+            </TouchableOpacity>
           </>
         )}
 
@@ -360,36 +285,6 @@ export default function ClassQuestScreen({ route, navigation }) {
           </View>
         )}
       </ScrollView>
-
-      {/* ── Quest confirmation bar ── */}
-      {pendingQuest && (
-        <View style={styles.confirmBar}>
-          <Text style={styles.confirmText}>
-            {completedIds.has(pendingQuest.id)
-              ? `Remove "${pendingQuest.name}"? (−${pendingQuest.lvl_reward} LVL)`
-              : `Mark "${pendingQuest.name}" done? (+${pendingQuest.lvl_reward} LVL)`
-            }
-          </Text>
-          <View style={styles.confirmButtons}>
-            <TouchableOpacity
-              style={styles.confirmCancel}
-              onPress={() => setPendingQuest(null)}
-            >
-              <Text style={styles.confirmCancelText}>CANCEL</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.confirmOk}
-              onPress={() => {
-                const q = pendingQuest;
-                setPendingQuest(null);
-                toggleQuest(q);
-              }}
-            >
-              <Text style={styles.confirmOkText}>CONFIRM</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      )}
 
       {/* ── Prestige confirmation bar ── */}
       {showPrestige && (
@@ -602,76 +497,38 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
   },
 
-  // ── Quest cards ──────────────────────────────────────────────────────────────
+  // ── Chain / side-quest cards ─────────────────────────────────────────────────
 
-  chainBlock: {
-    marginHorizontal: 16,
-    marginBottom: 14,
-  },
-  chainLabel: {
-    fontFamily: F.heading,
-    fontSize: 13,
-    color: SL.accent,
-    letterSpacing: 4,
-    marginBottom: 8,
-    opacity: 0.7,
-  },
-  questCard: {
+  chainCard: {
     flexDirection: 'row',
     alignItems: 'center',
+    marginHorizontal: 16,
+    marginBottom: 10,
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 4,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    marginBottom: 6,
+    borderRadius: 6,
+    paddingHorizontal: 18,
+    paddingVertical: 18,
   },
-  questCardDone: {
-    backgroundColor: 'rgba(76,175,80,0.08)',
-    borderColor: SL.green,
-    borderLeftWidth: 3,
-    borderLeftColor: SL.green,
-  },
-  questCardLocked: {
-    opacity: 0.45,
-  },
-  questName: {
-    flex: 1,
+  chainCardName: {
     fontFamily: F.heading,
-    fontSize: 18,
+    fontSize: 20,
     color: SL.text,
-    letterSpacing: 1,
+    letterSpacing: 3,
+    marginBottom: 4,
   },
-  questNameDone:   { color: SL.green },
-  questNameLocked: { color: SL.muted },
-  questRight: { marginLeft: 12 },
-  doneBadge: {
-    backgroundColor: 'rgba(76,175,80,0.15)',
-    borderWidth: 1,
-    borderColor: SL.green,
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  doneBadgeText: {
-    fontFamily: F.heading,
-    fontSize: 12,
-    color: SL.green,
-    letterSpacing: 2,
-  },
-  rewardBadge: {
-    borderWidth: 1,
-    borderColor: SL.accent,
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  rewardText: {
+  chainCardMeta: {
     fontFamily: F.bodyMed,
     fontSize: 13,
     color: SL.accent,
-    letterSpacing: 1.5,
+    letterSpacing: 1,
+  },
+  chevron: {
+    fontFamily: F.heading,
+    fontSize: 28,
+    color: SL.muted,
+    marginLeft: 12,
   },
 
   noClass: {

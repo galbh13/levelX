@@ -16,6 +16,8 @@ const SL = {
   text:   '#E8F4FF',
   muted:  '#4a6a8a',
   danger: '#FF4444',
+  green:  '#4CAF50',
+  gold:   '#FFD700',
 };
 
 function Corner({ pos }) {
@@ -30,15 +32,17 @@ export default function WorkoutDetailScreen({ route, navigation }) {
 
   const [exercises,      setExercises]      = useState([]);
   const [loading,        setLoading]        = useState(true);
-  const [completed,      setCompleted]      = useState(workout.completed ?? false);
-  const [completing,     setCompleting]     = useState(false);
-  const [workoutTitle,   setWorkoutTitle]   = useState(workout.title   ?? '');
-  const [workoutPurpose, setWorkoutPurpose] = useState(workout.purpose ?? '');
+  const [completed,       setCompleted]       = useState(workout.completed    ?? false);
+  const [completing,      setCompleting]      = useState(false);
+  const [workoutTitle,    setWorkoutTitle]    = useState(workout.title        ?? '');
+  const [workoutPurpose,  setWorkoutPurpose]  = useState(workout.purpose      ?? '');
+  const [coachFeedback,   setCoachFeedback]   = useState(workout.coachFeedback  ?? null);
+  const [feedbackIsRead,  setFeedbackIsRead]  = useState(workout.feedbackIsRead ?? false);
 
   const fetchExercises = useCallback(async () => {
     setLoading(true);
     try {
-      const [exercisesRes, workoutRes, galleryRes] = await Promise.all([
+      const queries = [
         supabase
           .from('exercises')
           .select('*')
@@ -52,11 +56,25 @@ export default function WorkoutDetailScreen({ route, navigation }) {
         supabase
           .from('exercises_gallery')
           .select('name, youtube_url'),
-      ]);
+      ];
+      if (workout.overrideId) {
+        queries.push(
+          supabase
+            .from('workout_override_workouts')
+            .select('coach_feedback, feedback_is_read')
+            .eq('id', workout.overrideId)
+            .maybeSingle()
+        );
+      }
+      const [exercisesRes, workoutRes, galleryRes, overrideRes] = await Promise.all(queries);
       if (exercisesRes.error) console.error('[WorkoutDetail] exercises fetch error:', exercisesRes.error);
       if (workoutRes.data) {
         setWorkoutTitle(workoutRes.data.title ?? '');
         setWorkoutPurpose(workoutRes.data.purpose ?? '');
+      }
+      if (overrideRes?.data) {
+        setCoachFeedback(overrideRes.data.coach_feedback ?? null);
+        setFeedbackIsRead(overrideRes.data.feedback_is_read ?? false);
       }
       const galleryMap = Object.fromEntries(
         (galleryRes.data ?? []).map(g => [g.name.toLowerCase(), g.youtube_url])
@@ -70,9 +88,23 @@ export default function WorkoutDetailScreen({ route, navigation }) {
       console.error('[WorkoutDetail] fetchExercises exception:', e);
     }
     setLoading(false);
-  }, [workout.id]);
+  }, [workout.id, workout.overrideId]);
 
   useFocusEffect(useCallback(() => { fetchExercises(); }, [fetchExercises]));
+
+  async function handleToggleFeedbackRead() {
+    if (!workout.overrideId) return;
+    const newVal = !feedbackIsRead;
+    setFeedbackIsRead(newVal);
+    const { error } = await supabase
+      .from('workout_override_workouts')
+      .update({ feedback_is_read: newVal })
+      .eq('id', workout.overrideId);
+    if (error) {
+      setFeedbackIsRead(!newVal);
+      alert('Failed to update: ' + error.message);
+    }
+  }
 
   async function handleMarkComplete() {
     setCompleting(true);
@@ -148,6 +180,41 @@ export default function WorkoutDetailScreen({ route, navigation }) {
           )}
 
           <View style={{ height: 16 }} />
+
+          {/* ── Coach Feedback ── */}
+          {studentView && coachFeedback?.trim()?.length > 0 ? (
+            <View style={[
+              styles.feedbackCard,
+              feedbackIsRead
+                ? { borderColor: SL.border }
+                : { borderColor: SL.gold, shadowColor: SL.gold, shadowOpacity: 0.15, shadowRadius: 8 },
+            ]}>
+              <View style={styles.feedbackHeader}>
+                <Text style={styles.feedbackLabel}>COACH FEEDBACK</Text>
+                <TouchableOpacity
+                  style={[
+                    styles.feedbackReadBtn,
+                    { borderColor: feedbackIsRead ? SL.gold : SL.muted },
+                  ]}
+                  onPress={handleToggleFeedbackRead}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[
+                    styles.feedbackReadBtnText,
+                    { color: feedbackIsRead ? SL.gold : SL.muted },
+                  ]}>
+                    {feedbackIsRead ? '👁 MARK AS UNREAD' : '👁 MARK AS READ'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              <Text style={[
+                styles.feedbackText,
+                { color: feedbackIsRead ? SL.muted : SL.gold },
+              ]}>
+                {coachFeedback}
+              </Text>
+            </View>
+          ) : null}
 
           {/* CTA */}
           {studentView ? (
@@ -326,6 +393,56 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     textAlign: 'center',
     marginTop: 32,
+  },
+
+  // ── Coach Feedback card ───────────────────────────────────────────────────
+
+  feedbackCard: {
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderRadius: 4,
+    padding: 16,
+    gap: 12,
+  },
+  feedbackHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  feedbackLabel: {
+    fontFamily: F.bodyMed,
+    fontSize: 13,
+    color: SL.muted,
+    letterSpacing: 2,
+    textTransform: 'uppercase',
+  },
+  feedbackReadBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderWidth: 1.5,
+    borderColor: SL.muted,
+    borderRadius: 4,
+  },
+  feedbackReadBtnRead: {
+    borderColor: SL.gold,
+  },
+  feedbackReadBtnText: {
+    fontFamily: F.bodyMed,
+    fontSize: 13,
+    color: SL.muted,
+    letterSpacing: 1.5,
+  },
+  feedbackReadBtnTextRead: {
+    color: SL.gold,
+  },
+  feedbackText: {
+    fontFamily: F.body,
+    fontSize: 17,
+    color: SL.accent,
+    letterSpacing: 0.5,
+    lineHeight: 25,
   },
 
   // Buttons

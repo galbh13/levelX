@@ -37,6 +37,9 @@ import CheckupScreen           from './screens/CheckupScreen';
 import CheckupReviewScreen     from './screens/CheckupReviewScreen';
 import CoachResponseScreen     from './screens/CoachResponseScreen';
 import ClassQuestScreen        from './screens/ClassQuestScreen';
+import CoachQuestTreeScreen    from './screens/CoachQuestTreeScreen';
+import CoachSideQuestScreen    from './screens/CoachSideQuestScreen';
+import QuestTreeScreen         from './screens/QuestTreeScreen';
 import { CoachProvider }       from './context/CoachContext';
 
 SplashScreen.preventAutoHideAsync();
@@ -57,8 +60,9 @@ function TabIcon({ label, focused }) {
 function SkillsNavigator() {
   return (
     <SkillsStack.Navigator screenOptions={{ headerShown: false }}>
-      <SkillsStack.Screen name="SkillsList" component={SkillsScreen} />
-      <SkillsStack.Screen name="SkillTree"  component={SkillTreeScreen} />
+      <SkillsStack.Screen name="SkillsList"  component={SkillsScreen} />
+      <SkillsStack.Screen name="SkillTree"   component={SkillTreeScreen} />
+      <SkillsStack.Screen name="QuestTree"   component={QuestTreeScreen} />
     </SkillsStack.Navigator>
   );
 }
@@ -91,6 +95,8 @@ function CoachNavigator() {
         <CoachStack.Screen name="CheckupBuilder"  component={CheckupBuilderScreen} />
         <CoachStack.Screen name="CheckupReview"   component={CheckupReviewScreen} />
         <CoachStack.Screen name="ClassQuest"      component={ClassQuestScreen} />
+        <CoachStack.Screen name="CoachQuestTree"  component={CoachQuestTreeScreen} />
+        <CoachStack.Screen name="CoachSideQuests" component={CoachSideQuestScreen} />
       </CoachStack.Navigator>
     </CoachProvider>
   );

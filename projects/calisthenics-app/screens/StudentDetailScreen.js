@@ -17,12 +17,13 @@ const SL = {
   text:   '#E8F4FF',
   muted:  '#4a6a8a',
   danger: '#FF4444',
+  gold:   '#FFD700',
 };
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
 const MONTH_ABBR = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-const DAY_LABELS = ['MON','TUE','WED','THU','FRI','SAT','SUN'];
+const DAY_LABELS = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
 const TODAY_STR  = (() => {
   const t = new Date();
   return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
@@ -37,24 +38,22 @@ function toDateStr(date) {
 
 function getWeekDays(offset = 0) {
   const today  = new Date();
-  const dow    = today.getDay();
-  const diff   = dow === 0 ? -6 : 1 - dow;
-  const monday = new Date(today);
-  monday.setDate(today.getDate() + diff + offset * 7);
-  monday.setHours(0, 0, 0, 0);
+  const dow    = today.getDay(); // 0=Sun … 6=Sat
+  const sunday = new Date(today);
+  sunday.setDate(today.getDate() - dow + offset * 7);
+  sunday.setHours(0, 0, 0, 0);
 
   return DAY_LABELS.map((label, i) => {
-    const d = new Date(monday);
-    d.setDate(monday.getDate() + i);
-    const jsDay    = d.getDay();
-    const dayOfWeek = jsDay === 0 ? 6 : jsDay - 1; // 0=Mon … 6=Sun
+    const d = new Date(sunday);
+    d.setDate(sunday.getDate() + i);
+    const jsDay = d.getDay();
     return {
       label,
-      date:     d,
-      dateStr:  toDateStr(d),
-      dayIndex: i,
-      dayOfWeek,
-      month:    MONTH_ABBR[d.getMonth()],
+      date:      d,
+      dateStr:   toDateStr(d),
+      dayIndex:  i,
+      dayOfWeek: jsDay,
+      month:     MONTH_ABBR[d.getMonth()],
     };
   });
 }
@@ -79,8 +78,8 @@ export default function StudentDetailScreen({ navigation }) {
   // Data
   const [overrideWorkouts,  setOverrideWorkouts]  = useState([]);  // workout_override_workouts rows
   const [studentWorkouts,   setStudentWorkouts]   = useState([]);  // all workouts for this student
-  const [pendingCheckup,    setPendingCheckup]    = useState(null); // upcoming pending checkup
-  const [submittedCheckup,  setSubmittedCheckup]  = useState(null); // latest submitted checkup
+  const [pendingCheckup,    setPendingCheckup]    = useState(null);  // upcoming pending checkup
+  const [submittedCheckups, setSubmittedCheckups] = useState([]);    // submitted checkups (up to 2)
   const [loading,           setLoading]           = useState(true);
 
   // Week navigation
@@ -132,12 +131,11 @@ export default function StudentDetailScreen({ navigation }) {
 
         supabase
           .from('checkups')
-          .select('id, status, scheduled_date')
+          .select('id, status, scheduled_date, is_read')
           .eq('student_id', student.id)
           .eq('status', 'submitted')
-          .order('scheduled_date', { ascending: false })
-          .limit(1)
-          .maybeSingle(),
+          .order('created_at', { ascending: true })
+          .limit(2),
       ]);
 
       if (overridesRes.error) console.error('[StudentDetail] overrides:', overridesRes.error);
@@ -146,7 +144,7 @@ export default function StudentDetailScreen({ navigation }) {
       setOverrideWorkouts(overridesRes.data ?? []);
       setStudentWorkouts(workoutsRes.data ?? []);
       setPendingCheckup(checkupRes.data ?? null);
-      setSubmittedCheckup(submittedRes.data ?? null);
+      setSubmittedCheckups(submittedRes.data ?? []);
     } catch (e) {
       console.error('[StudentDetail] fetchData:', e);
     }
@@ -253,6 +251,21 @@ export default function StudentDetailScreen({ navigation }) {
     setSaving(false);
   }
 
+  // ── Toggle is_read on a submitted checkup ────────────────────────────────
+
+  async function handleToggleRead(checkup) {
+    const newVal = !checkup.is_read;
+    setSubmittedCheckups(prev => prev.map(c => c.id === checkup.id ? { ...c, is_read: newVal } : c));
+    const { error } = await supabase
+      .from('checkups')
+      .update({ is_read: newVal })
+      .eq('id', checkup.id);
+    if (error) {
+      setSubmittedCheckups(prev => prev.map(c => c.id === checkup.id ? { ...c, is_read: !newVal } : c));
+      alert('Failed to update: ' + error.message);
+    }
+  }
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   if (!student) {
@@ -290,14 +303,6 @@ export default function StudentDetailScreen({ navigation }) {
             </Text>
           </View>
           <View style={styles.checkupBtns}>
-            {submittedCheckup && (
-              <TouchableOpacity
-                style={styles.viewSubmissionBtn}
-                onPress={() => navigation.navigate('CheckupReview', { student })}
-              >
-                <Text style={styles.viewSubmissionBtnText}>📋 VIEW</Text>
-              </TouchableOpacity>
-            )}
             {pendingCheckup && (
               <TouchableOpacity
                 style={styles.editBtn}
@@ -314,6 +319,33 @@ export default function StudentDetailScreen({ navigation }) {
             </TouchableOpacity>
           </View>
         </View>
+
+        {/* Submitted checkups with read toggle */}
+        {submittedCheckups.map((sc, i) => (
+          <View key={sc.id} style={styles.submittedCheckupRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.checkupLabel}>SUBMITTED CHECKUP {submittedCheckups.length > 1 ? i + 1 : ''}</Text>
+              <Text style={styles.checkupValue}>{formatDisplayDate(sc.scheduled_date)}</Text>
+            </View>
+            <View style={styles.checkupBtns}>
+              <TouchableOpacity
+                style={styles.viewSubmissionBtn}
+                onPress={() => navigation.navigate('CheckupReview', { student, checkupId: sc.id })}
+              >
+                <Text style={styles.viewSubmissionBtnText}>📋 VIEW</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.readToggleBtn, sc.is_read && styles.readToggleBtnRead]}
+                onPress={() => handleToggleRead(sc)}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.readToggleBtnText, sc.is_read && styles.readToggleBtnTextRead]}>
+                  {sc.is_read ? '👁 UNREAD' : '👁 READ'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ))}
 
         {/* Class & Quests button */}
         <TouchableOpacity
@@ -685,6 +717,35 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   newCheckupBtnText: { fontFamily: F.bodyMed, fontSize: 14, color: SL.accent, letterSpacing: 2 },
+  submittedCheckupRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: SL.border,
+    gap: 12,
+  },
+  readToggleBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1.5,
+    borderColor: SL.muted,
+    borderRadius: 6,
+  },
+  readToggleBtnRead: {
+    borderColor: SL.gold,
+  },
+  readToggleBtnText: {
+    fontFamily: F.bodyMed,
+    fontSize: 13,
+    color: SL.muted,
+    letterSpacing: 1.5,
+  },
+  readToggleBtnTextRead: {
+    color: SL.gold,
+  },
+
   classQuestBtn: {
     marginHorizontal: 20,
     marginVertical: 12,

@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
-  View, Text, StyleSheet, ScrollView, ActivityIndicator,
+  View, Text, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { F } from '../constants/fonts';
@@ -22,11 +22,12 @@ const SL = {
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
-export default function SkillsScreen() {
+export default function SkillsScreen({ navigation }) {
   const [profile,     setProfile]     = useState(null);
   const [classData,   setClassData]   = useState(null);
   const [quests,      setQuests]      = useState([]);
   const [completions, setCompletions] = useState(new Set());
+  const [exp,         setExp]         = useState(0);
   const [loading,     setLoading]     = useState(true);
 
   const fetchData = useCallback(async () => {
@@ -45,7 +46,7 @@ export default function SkillsScreen() {
 
       if (!profileData.class_id) { setLoading(false); return; }
 
-      const [classRes, questsRes, completionsRes] = await Promise.all([
+      const [classRes, questsRes, completionsRes, expRes] = await Promise.all([
         supabase
           .from('classes')
           .select('*')
@@ -62,11 +63,17 @@ export default function SkillsScreen() {
           .from('student_quest_completions')
           .select('quest_id')
           .eq('student_id', user.id),
+        supabase
+          .from('workout_override_workouts')
+          .select('*', { count: 'exact', head: true })
+          .eq('student_id', user.id)
+          .eq('completed', true),
       ]);
 
       setClassData(classRes.data ?? null);
       setQuests(questsRes.data ?? []);
       setCompletions(new Set((completionsRes.data ?? []).map(c => c.quest_id)));
+      setExp(expRes.count ?? 0);
     } catch (e) {
       console.error('[SkillsScreen] fetchData:', e);
     }
@@ -87,16 +94,34 @@ export default function SkillsScreen() {
   }
 
   const lvl      = profile?.current_lvl   ?? 0;
-  const exp      = profile?.total_exp     ?? 0;
   const prestige = profile?.prestige_count ?? 0;
   const lvlPct   = Math.min(lvl / 100, 1);
 
-  const mainQuests = quests.filter(q => q.quest_type === 'main');
-  const sideQuests = quests.filter(q => q.quest_type === 'side');
-  const chains     = [...new Set(mainQuests.map(q => q.chain).filter(Boolean))];
+  // Build one entry per unique chain
+  const mainChains = [...new Set(
+    quests.filter(q => q.quest_type === 'main').map(q => q.chain).filter(Boolean)
+  )];
+  const sideChains = [...new Set(
+    quests.filter(q => q.quest_type === 'side').map(q => q.chain).filter(Boolean)
+  )];
 
-  const mainLvl = mainQuests.filter(q => completions.has(q.id)).reduce((s, q) => s + q.lvl_reward, 0);
-  const sideLvl = sideQuests.filter(q => completions.has(q.id)).reduce((s, q) => s + q.lvl_reward, 0);
+  function chainStats(chain, questType) {
+    const chainQuests = quests.filter(q => q.chain === chain && q.quest_type === questType);
+    const completed   = chainQuests.filter(q => completions.has(q.id));
+    return {
+      total:     chainQuests.length,
+      completed: completed.length,
+      earnedLvl: completed.reduce((s, q) => s + (q.lvl_reward ?? 0), 0),
+    };
+  }
+
+  function openTree(chain, questType) {
+    navigation.navigate('QuestTree', {
+      classId:   profile?.class_id,
+      chain,
+      questType,
+    });
+  }
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.body}>
@@ -119,18 +144,38 @@ export default function SkillsScreen() {
         <Text style={styles.lvlNumber}>LVL {lvl}</Text>
         <Text style={styles.expText}>{exp} EXP</Text>
 
-        <View style={styles.progressBarBg}>
-          <View style={[styles.progressBarFill, { width: `${(lvlPct * 100).toFixed(1)}%` }]} />
-        </View>
-        <Text style={styles.progressLabel}>{lvl} / 100</Text>
-
-        {lvl >= 80 && (
-          <View style={styles.prestigeBanner}>
-            <Text style={styles.prestigeBannerText}>✨ PRESTIGE AVAILABLE</Text>
+        <View style={styles.progressBarContainer}>
+          <View style={styles.progressBarBg}>
+            <View style={[
+              styles.progressBarFill,
+              { width: `${Math.min(lvl, 100)}%` },
+              lvl >= 80 && { backgroundColor: SL.gold },
+            ]} />
           </View>
-        )}
+          <View style={[styles.prestigeMarker, { left: '80%' }]}>
+            <View style={styles.prestigeMarkerLine} />
+            <Text style={styles.prestigeMarkerLabel}>80</Text>
+          </View>
+        </View>
+        <Text style={[styles.barLabel, lvl >= 80 && { color: SL.gold }]}>
+          {lvl >= 80
+            ? '⭐ PRESTIGE UNLOCKED'
+            : `${lvl} / 100 · ${80 - lvl > 0 ? `${80 - lvl} LVL until prestige` : 'prestige available'}`
+          }
+        </Text>
+
         <View style={styles.headerDivider} />
       </View>
+
+      {/* ── Prestige banner ── */}
+      {lvl >= 80 && (
+        <View style={styles.prestigeBanner}>
+          <Text style={styles.prestigeBannerTitle}>⚡ PRESTIGE AVAILABLE</Text>
+          <Text style={styles.prestigeBannerSub}>
+            You have reached LVL {lvl}. Contact your coach to advance to the next class.
+          </Text>
+        </View>
+      )}
 
       {/* ── No class ── */}
       {!classData ? (
@@ -140,78 +185,61 @@ export default function SkillsScreen() {
         </View>
       ) : (
         <>
-          {/* ── Main Quests ── */}
-          <Text style={styles.sectionLabel}>MAIN QUESTS</Text>
-
-          {chains.map(chain => {
-            const chainQuests = mainQuests.filter(q => q.chain === chain);
-            return (
-              <View key={chain} style={styles.chainBlock}>
-                <Text style={styles.chainLabel}>{chain.toUpperCase()}</Text>
-                {chainQuests.map((quest, i) => {
-                  const done     = completions.has(quest.id);
-                  const prevDone = i === 0 || completions.has(chainQuests[i - 1].id);
-                  const locked   = !done && !prevDone;
-                  return (
-                    <View
-                      key={quest.id}
-                      style={[
-                        styles.questCard,
-                        done   && styles.questCardDone,
-                        locked && styles.questCardLocked,
-                      ]}
-                    >
-                      <Text style={[
-                        styles.questName,
-                        done   && styles.questNameDone,
-                        locked && styles.questNameMuted,
-                      ]}>
-                        {locked ? '🔒  ' : ''}{quest.name}
-                      </Text>
-                      <View style={styles.questRight}>
-                        {done ? (
-                          <View style={styles.doneBadge}>
-                            <Text style={styles.doneBadgeText}>✓ DONE</Text>
-                          </View>
-                        ) : (
-                          <View style={[styles.rewardBadge, locked && { opacity: 0.4 }]}>
-                            <Text style={styles.rewardText}>+{quest.lvl_reward} LVL</Text>
-                          </View>
-                        )}
+          {/* ── Main Quest cards ── */}
+          {mainChains.length > 0 && (
+            <>
+              <Text style={styles.sectionLabel}>MAIN QUESTS</Text>
+              {mainChains.map(chain => {
+                const { total, completed, earnedLvl } = chainStats(chain, 'main');
+                return (
+                  <TouchableOpacity
+                    key={chain}
+                    style={styles.chainCard}
+                    onPress={() => openTree(chain, 'main')}
+                    activeOpacity={0.75}
+                  >
+                    <View style={styles.chainCardInner}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.chainCardTitle}>{chain.toUpperCase()}</Text>
+                        <Text style={styles.chainCardMeta}>
+                          {completed}/{total} unlocked · +{earnedLvl} LVL
+                        </Text>
                       </View>
+                      <Text style={styles.chainCardChevron}>›</Text>
                     </View>
-                  );
-                })}
-              </View>
-            );
-          })}
+                  </TouchableOpacity>
+                );
+              })}
+            </>
+          )}
 
-          {/* ── Side Quests ── */}
-          <Text style={[styles.sectionLabel, { marginTop: 28 }]}>SIDE QUESTS</Text>
-          <View style={styles.sideGrid}>
-            {sideQuests.map(quest => {
-              const done = completions.has(quest.id);
-              return (
-                <View key={quest.id} style={[styles.sideCard, done && styles.sideCardDone]}>
-                  <Text style={[styles.sideName, done && styles.sideNameDone]} numberOfLines={2}>
-                    {quest.name}
-                  </Text>
-                  {done
-                    ? <Text style={styles.sideDone}>✓ DONE</Text>
-                    : <Text style={styles.sideReward}>+{quest.lvl_reward} LVL</Text>
-                  }
-                </View>
-              );
-            })}
-          </View>
-
-          {/* ── Total ── */}
-          <View style={styles.totalCard}>
-            <Text style={styles.totalTitle}>TOTAL: {lvl} / 100 LVL</Text>
-            <Text style={styles.totalBreakdown}>
-              {mainLvl} from main quests  ·  {sideLvl} from side quests
-            </Text>
-          </View>
+          {/* ── Side Quest cards ── */}
+          {sideChains.length > 0 && (
+            <>
+              <Text style={[styles.sectionLabel, { marginTop: 28 }]}>SIDE QUESTS</Text>
+              {sideChains.map(chain => {
+                const { total, completed, earnedLvl } = chainStats(chain, 'side');
+                return (
+                  <TouchableOpacity
+                    key={chain}
+                    style={styles.chainCard}
+                    onPress={() => openTree(chain, 'side')}
+                    activeOpacity={0.75}
+                  >
+                    <View style={styles.chainCardInner}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.chainCardTitle}>{chain.toUpperCase()}</Text>
+                        <Text style={styles.chainCardMeta}>
+                          {completed}/{total} unlocked · +{earnedLvl} LVL
+                        </Text>
+                      </View>
+                      <Text style={styles.chainCardChevron}>›</Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </>
+          )}
         </>
       )}
 
@@ -283,39 +311,74 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
     marginBottom: 16,
   },
-  progressBarBg: {
+  progressBarContainer: {
+    position: 'relative',
+    height: 20,
+    justifyContent: 'center',
     width: '100%',
+  },
+  progressBarBg: {
     height: 6,
     backgroundColor: SL.border,
     borderRadius: 3,
     overflow: 'hidden',
-    marginBottom: 6,
   },
   progressBarFill: {
     height: '100%',
     backgroundColor: SL.accent,
     borderRadius: 3,
   },
-  progressLabel: {
+  prestigeMarker: {
+    position: 'absolute',
+    alignItems: 'center',
+    top: 0,
+  },
+  prestigeMarkerLine: {
+    width: 2,
+    height: 14,
+    backgroundColor: SL.gold,
+    borderRadius: 1,
+  },
+  prestigeMarkerLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 13,
+    fontSize: 10,
+    color: SL.gold,
+    letterSpacing: 1,
+    marginTop: 2,
+  },
+  barLabel: {
+    fontFamily: F.bodyMed,
+    fontSize: 12,
     color: SL.muted,
-    letterSpacing: 1.5,
+    letterSpacing: 1,
+    textAlign: 'center',
+    marginTop: 6,
   },
   prestigeBanner: {
-    marginTop: 14,
+    marginHorizontal: 16,
+    marginTop: 16,
     paddingHorizontal: 20,
-    paddingVertical: 8,
+    paddingVertical: 16,
     borderWidth: 1.5,
     borderColor: SL.gold,
-    borderRadius: 6,
-    backgroundColor: 'rgba(255,215,0,0.08)',
+    borderRadius: 4,
+    backgroundColor: 'rgba(255,215,0,0.06)',
   },
-  prestigeBannerText: {
+  prestigeBannerTitle: {
     fontFamily: F.heading,
-    fontSize: 16,
+    fontSize: 20,
     color: SL.gold,
     letterSpacing: 3,
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  prestigeBannerSub: {
+    fontFamily: F.bodyMed,
+    fontSize: 14,
+    color: SL.gold,
+    opacity: 0.8,
+    letterSpacing: 0.5,
+    textAlign: 'center',
   },
   headerDivider: {
     height: 1,
@@ -362,143 +425,40 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
   },
 
-  // ── Main quest chains ────────────────────────────────────────────────────────
+  // ── Chain cards ──────────────────────────────────────────────────────────────
 
-  chainBlock: {
+  chainCard: {
     marginHorizontal: 16,
-    marginBottom: 16,
+    marginBottom: 10,
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderRadius: 4,
+    paddingHorizontal: 18,
+    paddingVertical: 16,
   },
-  chainLabel: {
-    fontFamily: F.heading,
-    fontSize: 14,
-    color: SL.accent,
-    letterSpacing: 4,
-    marginBottom: 8,
-    opacity: 0.7,
-  },
-  questCard: {
+  chainCardInner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: SL.panel,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    marginBottom: 6,
   },
-  questCardDone: {
-    backgroundColor: 'rgba(76,175,80,0.08)',
-    borderColor: SL.green,
-  },
-  questCardLocked: {
-    opacity: 0.45,
-  },
-  questName: {
-    flex: 1,
+  chainCardTitle: {
     fontFamily: F.heading,
-    fontSize: 18,
+    fontSize: 20,
     color: SL.text,
-    letterSpacing: 1,
-  },
-  questNameDone: { color: SL.green },
-  questNameMuted: { color: SL.muted },
-  questRight: { marginLeft: 12 },
-  doneBadge: {
-    backgroundColor: 'rgba(76,175,80,0.15)',
-    borderWidth: 1,
-    borderColor: SL.green,
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  doneBadgeText: {
-    fontFamily: F.heading,
-    fontSize: 12,
-    color: SL.green,
-    letterSpacing: 2,
-  },
-  rewardBadge: {
-    borderWidth: 1,
-    borderColor: SL.accent,
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  rewardText: {
-    fontFamily: F.bodyMed,
-    fontSize: 13,
-    color: SL.accent,
-    letterSpacing: 1.5,
-  },
-
-  // ── Side quests ──────────────────────────────────────────────────────────────
-
-  sideGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    paddingHorizontal: 16,
-    gap: 10,
-  },
-  sideCard: {
-    width: '47%',
-    backgroundColor: SL.panel,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    padding: 16,
-    gap: 8,
-    justifyContent: 'space-between',
-    minHeight: 90,
-  },
-  sideCardDone: {
-    backgroundColor: 'rgba(76,175,80,0.08)',
-    borderColor: SL.green,
-  },
-  sideName: {
-    fontFamily: F.heading,
-    fontSize: 16,
-    color: SL.text,
-    letterSpacing: 1,
-  },
-  sideNameDone: { color: SL.green },
-  sideDone: {
-    fontFamily: F.bodyMed,
-    fontSize: 12,
-    color: SL.green,
-    letterSpacing: 2,
-  },
-  sideReward: {
-    fontFamily: F.bodyMed,
-    fontSize: 13,
-    color: SL.accent,
-    letterSpacing: 1.5,
-  },
-
-  // ── Total ────────────────────────────────────────────────────────────────────
-
-  totalCard: {
-    marginHorizontal: 16,
-    marginTop: 28,
-    backgroundColor: SL.panel,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    padding: 20,
-    alignItems: 'center',
-    gap: 6,
-  },
-  totalTitle: {
-    fontFamily: F.heading,
-    fontSize: 22,
-    color: SL.accent,
     letterSpacing: 3,
+    marginBottom: 4,
   },
-  totalBreakdown: {
+  chainCardMeta: {
     fontFamily: F.bodyMed,
-    fontSize: 14,
+    fontSize: 13,
     color: SL.muted,
     letterSpacing: 1,
-    textAlign: 'center',
+  },
+  chainCardChevron: {
+    fontFamily: F.heading,
+    fontSize: 28,
+    color: SL.accent,
+    marginLeft: 12,
+    opacity: 0.7,
   },
 });

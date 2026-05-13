@@ -158,9 +158,7 @@ export default function CheckupScreen({ route, navigation }) {
         .eq('id', checkup.id);
       if (statusError) throw statusError;
 
-      Alert.alert('CHECKUP SUBMITTED', 'Your checkup has been submitted to your coach.', [
-        { text: 'OK', onPress: () => navigation.goBack() },
-      ]);
+      navigation.navigate('WorkoutsList');
     } catch (e) {
       Alert.alert('Submit failed', e.message ?? 'Something went wrong.');
     }

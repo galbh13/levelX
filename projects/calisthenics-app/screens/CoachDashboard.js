@@ -63,6 +63,8 @@ function StudentCard({ student, todayStatus, onPress }) {
     ? { borderLeftWidth: 3, borderLeftColor: SL.danger }
     : todayStatus === 'complete'
     ? { borderLeftWidth: 3, borderLeftColor: SL.green }
+    : student.unreadCheckup
+    ? { borderLeftWidth: 3, borderLeftColor: '#FFD700' }
     : {};
 
   return (
@@ -86,6 +88,9 @@ function StudentCard({ student, todayStatus, onPress }) {
             )}
             {todayStatus === 'complete' && (
               <Text style={styles.completeLabel}>✓ TODAY COMPLETE</Text>
+            )}
+            {student.unreadCheckup && (
+              <Text style={styles.checkupReadyLabel}>📋 CHECKUP READY TO REVIEW</Text>
             )}
 
             <Text style={styles.checkupText}>
@@ -151,7 +156,22 @@ export default function CoachDashboard({ navigation }) {
             .limit(1)
             .maybeSingle();
 
-          return { ...student, todayStatus, nextCheckup: nextCheckup?.scheduled_date ?? null };
+          const { data: unreadCheckup } = await supabase
+            .from('checkups')
+            .select('id, scheduled_date')
+            .eq('student_id', student.id)
+            .eq('status', 'submitted')
+            .eq('is_read', false)
+            .order('scheduled_date', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          return {
+            ...student,
+            todayStatus,
+            nextCheckup: nextCheckup?.scheduled_date ?? null,
+            unreadCheckup: unreadCheckup ?? null,
+          };
         })
       );
 
@@ -338,6 +358,13 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: SL.green,
     letterSpacing: 1.5,
+  },
+  checkupReadyLabel: {
+    fontFamily: F.bodyMed,
+    fontSize: 12,
+    color: '#FFD700',
+    letterSpacing: 1.5,
+    marginTop: 4,
   },
   checkupText: {
     fontFamily: F.bodyMed,

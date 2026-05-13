@@ -34,7 +34,6 @@ function fmtDate(dateStr) {
   return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-// Extract storage path from public URL: everything after '/checkup-videos/'
 function extractStoragePath(url) {
   if (!url) return null;
   const marker = '/checkup-videos/';
@@ -46,29 +45,31 @@ function extractStoragePath(url) {
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function CheckupReviewScreen({ route, navigation }) {
-  const { student } = route.params;
+  const { student, checkupId: initialCheckupId } = route.params;
 
-  const [checkup,       setCheckup]       = useState(null);
-  const [questions,     setQuestions]     = useState([]);
-  const [answers,       setAnswers]       = useState({});   // { [question_id]: string }
-  const [exercises,     setExercises]     = useState([]);
-  const [uploads,       setUploads]       = useState({});   // { [checkup_exercise_id]: video_url }
-  const [coachResponse, setCoachResponse] = useState('');
-  const [loading,       setLoading]       = useState(true);
-  const [saving,        setSaving]        = useState(false);
-  const [deleting,      setDeleting]      = useState(false);
+  const [allCheckups,       setAllCheckups]       = useState([]);
+  const [activeCheckupId,   setActiveCheckupId]   = useState(initialCheckupId ?? null);
+  const [checkup,           setCheckup]           = useState(null);
+  const [questions,         setQuestions]         = useState([]);
+  const [answers,           setAnswers]           = useState({});
+  const [exercises,         setExercises]         = useState([]);
+  const [uploads,           setUploads]           = useState({});
+  const [coachResponse,     setCoachResponse]     = useState('');
+  const [loading,           setLoading]           = useState(true);
+  const [saving,            setSaving]            = useState(false);
+  const [deleting,          setDeleting]          = useState(false);
+  const [confirmingDelete,  setConfirmingDelete]  = useState(false);
+  const [daysLeft,          setDaysLeft]          = useState(null);
 
-  const fetchData = useCallback(async () => {
+  // ── Fetch detail for a specific checkup ───────────────────────────────────
+
+  const fetchData = useCallback(async (checkupId) => {
     setLoading(true);
     try {
-      // Fetch the most recent submitted checkup for this student
       const { data: checkupData, error: checkupError } = await supabase
         .from('checkups')
         .select('*')
-        .eq('student_id', student.id)
-        .eq('status', 'submitted')
-        .order('scheduled_date', { ascending: false })
-        .limit(1)
+        .eq('id', checkupId)
         .maybeSingle();
 
       if (checkupError) { console.error('[CheckupReview] checkup fetch:', checkupError); setLoading(false); return; }
@@ -77,7 +78,15 @@ export default function CheckupReviewScreen({ route, navigation }) {
       setCheckup(checkupData);
       setCoachResponse(checkupData.coach_response ?? '');
 
-      // Fetch all detail in parallel
+      const createdAt = new Date(checkupData.created_at);
+      const expiresAt = new Date(createdAt);
+      expiresAt.setDate(createdAt.getDate() + 10);
+      setDaysLeft(Math.ceil((expiresAt - new Date()) / (1000 * 60 * 60 * 24)));
+
+      if (checkupData.status === 'submitted' && !checkupData.coach_read) {
+        await supabase.from('checkups').update({ coach_read: true }).eq('id', checkupData.id);
+      }
+
       const [qRes, aRes, exRes, upRes] = await Promise.all([
         supabase.from('checkup_questions').select('*').eq('checkup_id', checkupData.id).order('order_index'),
         supabase.from('checkup_answers').select('*').eq('checkup_id', checkupData.id),
@@ -100,9 +109,49 @@ export default function CheckupReviewScreen({ route, navigation }) {
       console.error('[CheckupReview] fetchData:', e);
     }
     setLoading(false);
-  }, [student.id]);
+  }, []);
 
-  useFocusEffect(useCallback(() => { fetchData(); }, [fetchData]));
+  // ── On focus: fetch all checkups, then load active one ────────────────────
+
+  useFocusEffect(useCallback(() => {
+    async function init() {
+      setLoading(true);
+
+      const { data: all } = await supabase
+        .from('checkups')
+        .select('id, created_at, scheduled_date')
+        .eq('student_id', student.id)
+        .eq('status', 'submitted')
+        .order('created_at', { ascending: true })
+        .limit(2);
+
+      const checkups = all ?? [];
+      setAllCheckups(checkups);
+
+      if (checkups.length === 0) {
+        setCheckup(null);
+        setLoading(false);
+        return;
+      }
+
+      let targetId = initialCheckupId;
+      if (!targetId || !checkups.find(c => c.id === targetId)) {
+        targetId = checkups[checkups.length - 1].id;
+      }
+      setActiveCheckupId(targetId);
+      await fetchData(targetId);
+    }
+    init();
+  }, [fetchData, student.id, initialCheckupId]));
+
+  // ── Switch tab ─────────────────────────────────────────────────────────────
+
+  async function handleSwitchTab(checkupId) {
+    if (checkupId === activeCheckupId) return;
+    setActiveCheckupId(checkupId);
+    setConfirmingDelete(false);
+    await fetchData(checkupId);
+  }
 
   // ── Save response ──────────────────────────────────────────────────────────
 
@@ -113,13 +162,16 @@ export default function CheckupReviewScreen({ route, navigation }) {
       const { error } = await supabase
         .from('checkups')
         .update({
-          coach_response: coachResponse.trim(),
-          responded_at:   new Date().toISOString(),
+          coach_response:   coachResponse.trim(),
+          responded_at:     new Date().toISOString(),
+          response_is_read: false,
         })
         .eq('id', checkup.id);
 
       if (error) throw error;
-      Alert.alert('Response saved!', 'Your response has been sent to the student.');
+      Alert.alert('RESPONSE SAVED', 'Your response has been sent to the student.', [
+        { text: 'OK', onPress: () => navigation.goBack() },
+      ]);
     } catch (e) {
       Alert.alert('Save failed', e.message ?? 'Something went wrong.');
     }
@@ -128,59 +180,37 @@ export default function CheckupReviewScreen({ route, navigation }) {
 
   // ── Delete checkup ─────────────────────────────────────────────────────────
 
-  async function handleDelete() {
-    Alert.alert(
-      'DELETE CHECKUP?',
-      'This will permanently delete the checkup, all answers, and all videos.',
-      [
-        { text: 'CANCEL', style: 'cancel' },
-        {
-          text: 'DELETE',
-          style: 'destructive',
-          onPress: async () => {
-            setDeleting(true);
-            try {
-              // Fetch all uploads for this checkup to delete storage files
-              const { data: uploadRows } = await supabase
-                .from('checkup_uploads')
-                .select('video_url')
-                .eq('checkup_id', checkup.id);
+  async function performDelete() {
+    setDeleting(true);
+    try {
+      const { data: uploadRows } = await supabase
+        .from('checkup_uploads')
+        .select('video_url')
+        .eq('checkup_id', checkup.id);
 
-              if (uploadRows && uploadRows.length > 0) {
-                const paths = uploadRows
-                  .map(u => extractStoragePath(u.video_url))
-                  .filter(Boolean);
-                if (paths.length > 0) {
-                  await supabase.storage.from('checkup-videos').remove(paths);
-                }
-              }
+      if (uploadRows && uploadRows.length > 0) {
+        const paths = uploadRows
+          .map(u => extractStoragePath(u.video_url))
+          .filter(Boolean);
+        if (paths.length > 0) {
+          await supabase.storage.from('checkup-videos').remove(paths);
+        }
+      }
 
-              const { error } = await supabase
-                .from('checkups')
-                .delete()
-                .eq('id', checkup.id);
+      const { error } = await supabase
+        .from('checkups')
+        .delete()
+        .eq('id', checkup.id);
 
-              if (error) throw error;
-              navigation.goBack();
-            } catch (e) {
-              Alert.alert('Delete failed', e.message ?? 'Something went wrong.');
-              setDeleting(false);
-            }
-          },
-        },
-      ]
-    );
+      if (error) throw error;
+      navigation.goBack();
+    } catch (e) {
+      Alert.alert('Delete failed', e.message ?? 'Something went wrong.');
+      setDeleting(false);
+    }
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
-
-  if (loading) {
-    return (
-      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator size="large" color={SL.accent} />
-      </View>
-    );
-  }
 
   return (
     <KeyboardAvoidingView
@@ -197,10 +227,44 @@ export default function CheckupReviewScreen({ route, navigation }) {
         {checkup && (
           <Text style={styles.dateSubtitle}>{fmtDate(checkup.scheduled_date)}</Text>
         )}
+
+        {/* Switcher — only when student has 2 checkups */}
+        {allCheckups.length >= 2 && (
+          <View style={styles.switcher}>
+            {allCheckups.map((c, i) => {
+              const isActive = c.id === activeCheckupId;
+              return (
+                <TouchableOpacity
+                  key={c.id}
+                  style={[styles.switcherTab, isActive && styles.switcherTabActive]}
+                  onPress={() => handleSwitchTab(c.id)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[styles.switcherTabText, isActive && styles.switcherTabTextActive]}>
+                    CHECKUP {i + 1}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
+
         <View style={styles.divider} />
       </View>
 
-      {!checkup ? (
+      {daysLeft !== null && daysLeft <= 3 && (
+        <View style={styles.expiryBanner}>
+          <Text style={styles.expiryText}>
+            ⚠ This checkup auto-deletes in {daysLeft} day{daysLeft !== 1 ? 's' : ''}
+          </Text>
+        </View>
+      )}
+
+      {loading ? (
+        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          <ActivityIndicator size="large" color={SL.accent} />
+        </View>
+      ) : !checkup ? (
         <View style={styles.empty}>
           <Text style={styles.emptyText}>NO SUBMITTED CHECKUPS YET</Text>
         </View>
@@ -270,7 +334,6 @@ export default function CheckupReviewScreen({ route, navigation }) {
             />
           </View>
 
-          {/* Save button */}
           <TouchableOpacity
             style={[styles.saveBtn, saving && { opacity: 0.6 }]}
             onPress={handleSaveResponse}
@@ -283,10 +346,9 @@ export default function CheckupReviewScreen({ route, navigation }) {
             }
           </TouchableOpacity>
 
-          {/* Delete button */}
           <TouchableOpacity
             style={[styles.deleteBtn, deleting && { opacity: 0.6 }]}
-            onPress={handleDelete}
+            onPress={() => setConfirmingDelete(true)}
             disabled={deleting}
             activeOpacity={0.85}
           >
@@ -298,6 +360,31 @@ export default function CheckupReviewScreen({ route, navigation }) {
 
           <View style={{ height: 48 }} />
         </ScrollView>
+      )}
+
+      {confirmingDelete && (
+        <View style={styles.confirmBar}>
+          <Text style={styles.confirmBarText}>
+            Delete this checkup permanently? All videos will be removed.
+          </Text>
+          <View style={styles.confirmBarButtons}>
+            <TouchableOpacity
+              style={styles.confirmCancel}
+              onPress={() => setConfirmingDelete(false)}
+            >
+              <Text style={styles.confirmCancelText}>CANCEL</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.confirmDelete}
+              onPress={async () => {
+                setConfirmingDelete(false);
+                await performDelete();
+              }}
+            >
+              <Text style={styles.confirmDeleteText}>DELETE</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       )}
     </KeyboardAvoidingView>
   );
@@ -353,11 +440,59 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 4,
   },
+
+  switcher: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 14,
+  },
+  switcherTab: {
+    flex: 1,
+    height: 36,
+    borderWidth: 1.5,
+    borderColor: SL.muted,
+    borderRadius: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  switcherTabActive: {
+    borderColor: SL.accent,
+    backgroundColor: 'rgba(74,158,191,0.12)',
+  },
+  switcherTabText: {
+    fontFamily: F.bodyMed,
+    fontSize: 13,
+    color: SL.muted,
+    letterSpacing: 2,
+  },
+  switcherTabTextActive: {
+    fontFamily: F.heading,
+    color: SL.accent,
+  },
+
   divider: {
     height: 1,
     backgroundColor: SL.accent,
     opacity: 0.3,
     marginTop: 20,
+  },
+
+  expiryBanner: {
+    backgroundColor: 'rgba(255,165,0,0.1)',
+    borderWidth: 1,
+    borderColor: '#FFA500',
+    borderRadius: 4,
+    marginHorizontal: 16,
+    marginTop: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  expiryText: {
+    fontFamily: F.bodyMed,
+    fontSize: 14,
+    color: '#FFA500',
+    letterSpacing: 1,
   },
 
   empty: {
@@ -504,6 +639,56 @@ const styles = StyleSheet.create({
   deleteBtnText: {
     fontFamily: F.bodyMed,
     fontSize: 16,
+    color: SL.danger,
+    letterSpacing: 2,
+  },
+
+  confirmBar: {
+    padding: 16,
+    borderTopWidth: 1.5,
+    borderTopColor: SL.danger,
+    backgroundColor: 'rgba(255,68,68,0.08)',
+    gap: 12,
+  },
+  confirmBarText: {
+    fontFamily: F.bodyMed,
+    fontSize: 14,
+    color: SL.danger,
+    letterSpacing: 0.5,
+    textAlign: 'center',
+  },
+  confirmBarButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  confirmCancel: {
+    flex: 1,
+    height: 44,
+    borderWidth: 1.5,
+    borderColor: SL.muted,
+    borderRadius: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  confirmCancelText: {
+    fontFamily: F.bodyMed,
+    fontSize: 15,
+    color: SL.muted,
+    letterSpacing: 2,
+  },
+  confirmDelete: {
+    flex: 1,
+    height: 44,
+    borderWidth: 1.5,
+    borderColor: SL.danger,
+    borderRadius: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,68,68,0.12)',
+  },
+  confirmDeleteText: {
+    fontFamily: F.bodyMed,
+    fontSize: 15,
     color: SL.danger,
     letterSpacing: 2,
   },

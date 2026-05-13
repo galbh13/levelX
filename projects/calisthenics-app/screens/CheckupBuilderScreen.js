@@ -42,10 +42,11 @@ export default function CheckupBuilderScreen({ route, navigation }) {
   const [scheduledDate, setScheduledDate] = useState(
     existingCheckup?.scheduled_date ?? toDateStr(new Date())
   );
-  const [questions, setQuestions] = useState([]);   // [{ _uid, question }]
-  const [exercises, setExercises] = useState([]);   // [{ _uid, exercise_name, exercise_gallery_id }]
-  const [saving,    setSaving]    = useState(false);
-  const [loading,   setLoading]   = useState(true);
+  const [questions,    setQuestions]    = useState([]);
+  const [exercises,    setExercises]    = useState([]);
+  const [saving,       setSaving]       = useState(false);
+  const [loading,      setLoading]      = useState(true);
+  const [limitReached, setLimitReached] = useState(false);
 
   // Gallery modal
   const [showGallery,    setShowGallery]    = useState(false);
@@ -59,7 +60,6 @@ export default function CheckupBuilderScreen({ route, navigation }) {
     async function load() {
       try {
         if (isEdit) {
-          // Load from existingCheckup
           const [qRes, exRes] = await Promise.all([
             supabase.from('checkup_questions').select('*').eq('checkup_id', existingCheckup.id).order('order_index'),
             supabase.from('checkup_exercises').select('*').eq('checkup_id', existingCheckup.id).order('order_index'),
@@ -67,6 +67,18 @@ export default function CheckupBuilderScreen({ route, navigation }) {
           setQuestions((qRes.data ?? []).map(q => ({ _uid: uid(), question: q.question })));
           setExercises((exRes.data ?? []).map(e => ({ _uid: uid(), exercise_name: e.exercise_name, exercise_gallery_id: e.exercise_gallery_id })));
         } else {
+          // Enforce max 2 checkups per student
+          const { count, error: countError } = await supabase
+            .from('checkups')
+            .select('*', { count: 'exact', head: true })
+            .eq('student_id', student.id);
+
+          if (!countError && count >= 2) {
+            setLimitReached(true);
+            setLoading(false);
+            return;
+          }
+
           // Load last checkup as template
           const { data: lastCheckup } = await supabase
             .from('checkups')
@@ -140,7 +152,6 @@ export default function CheckupBuilderScreen({ route, navigation }) {
           .eq('id', existingCheckup.id);
         if (error) throw error;
         checkupId = existingCheckup.id;
-        // Delete existing questions + exercises then re-insert
         await supabase.from('checkup_questions').delete().eq('checkup_id', checkupId);
         await supabase.from('checkup_exercises').delete().eq('checkup_id', checkupId);
       } else {
@@ -198,6 +209,12 @@ export default function CheckupBuilderScreen({ route, navigation }) {
 
       {loading ? (
         <ActivityIndicator color={SL.accent} style={{ marginTop: 48 }} size="large" />
+      ) : limitReached ? (
+        <View style={styles.limitError}>
+          <Text style={styles.limitErrorText}>
+            This student already has 2 checkups. Delete one before creating a new one.
+          </Text>
+        </View>
       ) : (
         <ScrollView contentContainerStyle={styles.form} keyboardShouldPersistTaps="handled">
 
@@ -390,6 +407,23 @@ const styles = StyleSheet.create({
     backgroundColor: SL.accent,
     opacity: 0.3,
     marginTop: 20,
+  },
+
+  limitError: {
+    margin: 20,
+    padding: 18,
+    borderWidth: 1.5,
+    borderColor: SL.danger,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255,68,68,0.08)',
+  },
+  limitErrorText: {
+    fontFamily: F.bodyMed,
+    fontSize: 15,
+    color: SL.danger,
+    letterSpacing: 0.5,
+    lineHeight: 22,
+    textAlign: 'center',
   },
 
   form: { padding: 20, gap: 0 },

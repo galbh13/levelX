@@ -1,0 +1,37 @@
+# Calisthenics App — Project Knowledge
+
+## Stack
+- React Native + Expo (JavaScript)
+- Supabase (database + auth)
+
+## Roles
+- Admin: assigns players to coaches
+- Coach: creates workouts, builds checkups, sets player class/level
+- Player: views workouts, submits checkups (questions + video records)
+
+## Class & Quest System
+- Each player has a class assignment
+- Classes have main quests + side quests → give level-up points (cap 100)
+- At 80 points, player can prestige → advance to next class, points reset to 0
+- Class count is DYNAMIC — currently 2, more coming. Never hardcode the number.
+
+## Checkups
+- Weekly (frequency configurable)
+- Player answers questions + uploads training video records
+- Coach reviews and adjusts training
+
+## Design System — CRITICAL
+- Colors: import from `constants/colors.js` as `C` — never hardcode hex values
+- Fonts: import from `constants/fonts.js` as `F` — never hardcode font names
+- Theme: dark navy/blue + ice-glow accents (Solo Leveling-inspired)
+
+## Working Rules
+1. Before changing anything, read the relevant files and summarize what you 
+   found. Wait for confirmation.
+2. Propose a plan in plain English before writing code. Wait for approval.
+3. Never break existing functionality. If a change touches shared code, list 
+   every file that imports it.
+4. Never hardcode colors, fonts, or class counts.
+5. Never modify the Supabase schema without showing the SQL first.
+6. Respect role permissions in every feature.
+7. After changes, list every file touched and what changed in each.

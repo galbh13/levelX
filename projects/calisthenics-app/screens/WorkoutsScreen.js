@@ -17,12 +17,13 @@ const SL = {
   text:  '#E8F4FF',
   muted: '#4a6a8a',
   green: '#4CAF50',
+  gold:  '#FFD700',
 };
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
 const MONTH_ABBR = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-const DAY_LABELS = ['MON','TUE','WED','THU','FRI','SAT','SUN'];
+const DAY_LABELS = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
 
 function toDateStr(date) {
   return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
@@ -33,23 +34,18 @@ const TODAY_STR = toDateStr(new Date());
 function getWeekDays(offset = 0) {
   const today  = new Date();
   const dow    = today.getDay();
-  const diff   = dow === 0 ? -6 : 1 - dow;
-  const monday = new Date(today);
-  monday.setDate(today.getDate() + diff + offset * 7);
-  monday.setHours(0, 0, 0, 0);
+  const sunday = new Date(today);
+  sunday.setDate(today.getDate() - dow + offset * 7);
+  sunday.setHours(0, 0, 0, 0);
 
   return DAY_LABELS.map((label, i) => {
-    const d = new Date(monday);
-    d.setDate(monday.getDate() + i);
-    const jsDay     = d.getDay();
-    const dayOfWeek = jsDay === 0 ? 6 : jsDay - 1; // 0=Mon … 6=Sun
+    const d = new Date(sunday);
+    d.setDate(sunday.getDate() + i);
     return {
       label,
-      date:     d,
-      dateStr:  toDateStr(d),
-      dayIndex: i,
-      dayOfWeek,
-      month:    MONTH_ABBR[d.getMonth()],
+      date:    d,
+      dateStr: toDateStr(d),
+      month:   MONTH_ABBR[d.getMonth()],
     };
   });
 }
@@ -66,10 +62,18 @@ function fmtDisplayDate(dateStr) {
   return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
 }
 
+function isLocked(dateStr) {
+  if (!dateStr) return false;
+  const workoutDate = new Date(dateStr + 'T00:00:00');
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.floor((today - workoutDate) / (1000 * 60 * 60 * 24));
+  return diffDays >= 7;
+}
+
 function calcStreak(allOverrides) {
   if (!allOverrides || allOverrides.length === 0) return 0;
 
-  // Group by date: date → { total, completed }
   const dateMap = {};
   for (const o of allOverrides) {
     if (!dateMap[o.specific_date]) {
@@ -79,7 +83,6 @@ function calcStreak(allOverrides) {
     if (o.completed) dateMap[o.specific_date].completed += 1;
   }
 
-  // A day "counts" only if it has workouts AND all are completed
   const completedDays = new Set(
     Object.entries(dateMap)
       .filter(([, v]) => v.completed > 0)
@@ -92,7 +95,6 @@ function calcStreak(allOverrides) {
   let streak = 0;
   const cursor = new Date();
 
-  // If today is not fully done, start counting from yesterday
   const todayStr = toDateStr(cursor);
   if (!completedDays.has(todayStr)) {
     cursor.setDate(cursor.getDate() - 1);
@@ -101,14 +103,11 @@ function calcStreak(allOverrides) {
   while (true) {
     const dateStr = toDateStr(cursor);
     if (completedDays.has(dateStr)) {
-      // Day had workouts, all completed — count it
       streak++;
       cursor.setDate(cursor.getDate() - 1);
     } else if (dateMap[dateStr]) {
-      // Day had workouts but not all done — streak broken
       break;
     } else {
-      // Rest day — skip back, but cap at 365 days
       cursor.setDate(cursor.getDate() - 1);
       if (Math.floor((new Date() - cursor) / 86400000) > 365) break;
     }
@@ -121,10 +120,12 @@ function calcStreak(allOverrides) {
 
 export default function WorkoutsScreen({ navigation }) {
   const [profile,               setProfile]               = useState(null);
+  const [className,             setClassName]             = useState(null);
   const [workoutsById,          setWorkoutsById]          = useState({});
-  const [overrideWorkouts,      setOverrideWorkouts]      = useState([]);  // workout_override_workouts rows
-  const [pendingCheckup,        setPendingCheckup]        = useState(null);
+  const [overrideWorkouts,      setOverrideWorkouts]      = useState([]);
+  const [latestCheckup,         setLatestCheckup]         = useState(null);
   const [coachResponseCheckup,  setCoachResponseCheckup]  = useState(null);
+  const [coachResponseIsRead,   setCoachResponseIsRead]   = useState(true);
   const [expTotal,              setExpTotal]              = useState(0);
   const [winStreak,             setWinStreak]             = useState(0);
   const [allOverrides,          setAllOverrides]          = useState([]);
@@ -138,7 +139,6 @@ export default function WorkoutsScreen({ navigation }) {
     () => getWeekDays(0).find(d => d.dateStr === TODAY_STR) ?? getWeekDays(0)[0]
   );
 
-  // Per-workout marking state: { [workoutId]: true } while in-flight
   const [marking, setMarking] = useState({});
 
   // ── Fetch week data ────────────────────────────────────────────────────────
@@ -151,27 +151,26 @@ export default function WorkoutsScreen({ navigation }) {
       const [profileRes, overridesRes, checkupRes, coachResponseRes, expRes, allOverridesRes] = await Promise.all([
         supabase
           .from('profiles')
-          .select('full_name, level')
+          .select('full_name, current_lvl, class_id')
           .eq('id', user.id)
           .single(),
 
         supabase
           .from('workout_override_workouts')
-          .select('id, specific_date, workout_id, completed')
+          .select('id, specific_date, workout_id, completed, coach_feedback, feedback_is_read, workouts(id, title, purpose, scheduled_date)')
           .eq('student_id', user.id),
 
         supabase
           .from('checkups')
           .select('*')
           .eq('student_id', user.id)
-          .eq('status', 'pending')
-          .order('scheduled_date', { ascending: true })
+          .order('created_at', { ascending: false })
           .limit(1)
           .maybeSingle(),
 
         supabase
           .from('checkups')
-          .select('id, scheduled_date, coach_response, responded_at')
+          .select('id, scheduled_date, coach_response, responded_at, response_is_read')
           .eq('student_id', user.id)
           .not('coach_response', 'is', null)
           .order('responded_at', { ascending: false })
@@ -190,28 +189,31 @@ export default function WorkoutsScreen({ navigation }) {
           .eq('student_id', user.id),
       ]);
 
-      if (profileRes.data)   setProfile(profileRes.data);
-      if (overridesRes.data) setOverrideWorkouts(overridesRes.data);
-      setPendingCheckup(checkupRes.data ?? null);
+      if (profileRes.data) {
+        setProfile(profileRes.data);
+        if (profileRes.data.class_id) {
+          const { data: classData } = await supabase
+            .from('classes')
+            .select('name')
+            .eq('id', profileRes.data.class_id)
+            .maybeSingle();
+          setClassName(classData?.name ?? null);
+        }
+      }
+      const overrides = overridesRes.data ?? [];
+      setOverrideWorkouts(overrides);
+      const wById = {};
+      for (const o of overrides) {
+        if (o.workouts && o.workout_id) wById[o.workout_id] = o.workouts;
+      }
+      setWorkoutsById(wById);
+      setLatestCheckup(checkupRes.data ?? null);
       setCoachResponseCheckup(coachResponseRes.data ?? null);
+      setCoachResponseIsRead(coachResponseRes.data?.response_is_read ?? true);
       const freshAllOverrides = allOverridesRes.data ?? [];
       setExpTotal(expRes.count ?? 0);
       setWinStreak(calcStreak(freshAllOverrides));
       setAllOverrides(freshAllOverrides);
-
-      const ids = [...new Set(
-        (overridesRes.data ?? []).map(o => o.workout_id).filter(Boolean)
-      )];
-
-      if (ids.length > 0) {
-        const { data: ws } = await supabase
-          .from('workouts')
-          .select('id, title, purpose, completed, scheduled_date')
-          .in('id', ids);
-        if (ws) setWorkoutsById(Object.fromEntries(ws.map(w => [w.id, w])));
-      } else {
-        setWorkoutsById({});
-      }
     } catch (e) {
       console.error('[WorkoutsScreen] fetchData:', e);
     }
@@ -229,13 +231,27 @@ export default function WorkoutsScreen({ navigation }) {
     setRefreshing(false);
   };
 
-  // ── Day workout lookup (returns array) ────────────────────────────────────
+  // ── Day workout lookup ─────────────────────────────────────────────────────
 
   function getDayWorkouts(day) {
     const dayOverrides = overrideWorkouts.filter(o => o.specific_date === day.dateStr);
     return dayOverrides
-      .map(o => ({ ...workoutsById[o.workout_id], overrideId: o.id, completed: o.completed ?? false }))
-      .filter(o => o.id);
+      .map(o => {
+        const w = workoutsById[o.workout_id];
+        if (!w) return null;
+        return {
+          id:             w.id,
+          title:          w.title,
+          purpose:        w.purpose,
+          scheduled_date: w.scheduled_date,
+          overrideId:     o.id,
+          completed:      o.completed ?? false,
+          specific_date:  o.specific_date,
+          coachFeedback:  o.coach_feedback ?? null,
+          feedbackIsRead: o.feedback_is_read ?? false,
+        };
+      })
+      .filter(Boolean);
   }
 
   const selectedDayWorkouts = useMemo(
@@ -298,16 +314,28 @@ export default function WorkoutsScreen({ navigation }) {
     setMarking(prev => ({ ...prev, [workout.overrideId]: false }));
   }
 
+  // ── Toggle coach response read state ──────────────────────────────────────
+
+  async function handleToggleResponseRead() {
+    if (!coachResponseCheckup) return;
+    const newVal = !coachResponseIsRead;
+    setCoachResponseIsRead(newVal);
+    const { error } = await supabase
+      .from('checkups')
+      .update({ response_is_read: newVal })
+      .eq('id', coachResponseCheckup.id);
+    if (error) {
+      setCoachResponseIsRead(!newVal);
+      alert('Failed to update: ' + error.message);
+    }
+  }
+
   // ── Stats ──────────────────────────────────────────────────────────────────
 
   const nextOverride = [...overrideWorkouts]
     .filter(o => o.specific_date >= TODAY_STR && !o.completed)
     .sort((a, b) => a.specific_date.localeCompare(b.specific_date))[0];
   const nextWorkout = nextOverride ? workoutsById[nextOverride.workout_id] : null;
-
-  const completedThisWeek = weekDays.filter(d =>
-    getDayWorkouts(d).length > 0 && getDayWorkouts(d).every(w => w.completed)
-  ).length;
 
   // ── Loading ────────────────────────────────────────────────────────────────
 
@@ -332,34 +360,60 @@ export default function WorkoutsScreen({ navigation }) {
         <Text style={styles.studentName}>
           {profile?.full_name?.toUpperCase() ?? '—'}
         </Text>
-        <Text style={styles.level}>LVL {profile?.level ?? '—'}</Text>
+        <Text style={styles.level}>LVL {profile?.current_lvl ?? '—'}</Text>
+        {className && (
+          <Text style={styles.className}>{className.toUpperCase()}</Text>
+        )}
         <View style={styles.headerDivider} />
       </View>
 
-      {/* ── Checkup due banner ── */}
-      {pendingCheckup && (
+      {/* ── Checkup banner ── */}
+      {latestCheckup && (
         <TouchableOpacity
           style={styles.checkupBanner}
-          onPress={() => navigation.navigate('Checkup', { checkup: pendingCheckup })}
+          onPress={() => navigation.navigate('Checkup', { checkup: latestCheckup })}
           activeOpacity={0.8}
         >
-          <Text style={styles.checkupBannerText}>
-            {pendingCheckup.scheduled_date <= TODAY_STR ? '📋 CHECKUP DUE' : '📋 UPCOMING CHECKUP'}
-          </Text>
-          <Text style={styles.checkupBannerDate}>{pendingCheckup.scheduled_date} →</Text>
+          <Text style={styles.checkupBannerText}>📋 MY CHECKUP</Text>
+          <Text style={styles.checkupBannerDate}>{latestCheckup.scheduled_date} →</Text>
         </TouchableOpacity>
       )}
 
       {/* ── Coach response banner ── */}
       {coachResponseCheckup && (
-        <TouchableOpacity
-          style={styles.coachResponseBanner}
-          onPress={() => navigation.navigate('CoachResponse', { checkup: coachResponseCheckup })}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.coachResponseBannerText}>💬 COACH RESPONSE RECEIVED</Text>
-          <Text style={styles.coachResponseBannerDate}>{coachResponseCheckup.scheduled_date} →</Text>
-        </TouchableOpacity>
+        <View style={[
+          styles.coachResponseBanner,
+          { borderColor: coachResponseIsRead ? SL.accent : SL.gold,
+            backgroundColor: coachResponseIsRead ? 'rgba(74,158,191,0.08)' : 'rgba(255,215,0,0.06)' },
+        ]}>
+          <TouchableOpacity
+            style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 }}
+            onPress={() => navigation.navigate('CoachResponse', { checkup: coachResponseCheckup })}
+            activeOpacity={0.8}
+          >
+            <Text style={[
+              styles.coachResponseBannerText,
+              { color: coachResponseIsRead ? SL.accent : SL.gold },
+            ]}>💬 LATEST COACH FEEDBACK</Text>
+            {!coachResponseIsRead && (
+              <View style={styles.newBadge}>
+                <Text style={styles.newBadgeText}>NEW</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            onPress={handleToggleResponseRead}
+            activeOpacity={0.8}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Text style={[
+              styles.responseReadToggleText,
+              { color: coachResponseIsRead ? SL.muted : SL.gold },
+            ]}>
+              {coachResponseIsRead ? '👁 UNREAD' : '👁 READ'}
+            </Text>
+          </TouchableOpacity>
+        </View>
       )}
 
       {/* ── Week nav ── */}
@@ -427,28 +481,25 @@ export default function WorkoutsScreen({ navigation }) {
 
       {/* ── Stats row ── */}
       <View style={styles.statsRow}>
-        {/* NEXT UP */}
-      <View style={styles.statCard}>
-        <Text
-          style={[styles.statValue, { fontSize: 16 }, !nextWorkout && { color: SL.muted }]}
-          numberOfLines={1}
-        >
-          {nextWorkout?.title?.toUpperCase() ?? 'REST'}
-        </Text>
-        <Text style={styles.statLabel}>NEXT UP</Text>
-      </View>
+        <View style={styles.statCard}>
+          <Text
+            style={[styles.statValue, { fontSize: 16 }, !nextWorkout && { color: SL.muted }]}
+            numberOfLines={1}
+          >
+            {nextWorkout?.title?.toUpperCase() ?? 'REST'}
+          </Text>
+          <Text style={styles.statLabel}>NEXT UP</Text>
+        </View>
 
-      {/* EXP */}
-      <View style={styles.statCard}>
-        <Text style={styles.statValue}>{expTotal}</Text>
-        <Text style={styles.statLabel}>EXP</Text>
-      </View>
+        <View style={styles.statCard}>
+          <Text style={styles.statValue}>{expTotal}</Text>
+          <Text style={styles.statLabel}>EXP</Text>
+        </View>
 
-      {/* WIN STREAK */}
-      <View style={styles.statCard}>
-        <Text style={styles.statValue}>{winStreak}</Text>
-        <Text style={styles.statLabel}>WIN STREAK</Text>
-      </View>
+        <View style={styles.statCard}>
+          <Text style={styles.statValue}>{winStreak}</Text>
+          <Text style={styles.statLabel}>WIN STREAK</Text>
+        </View>
       </View>
 
       {/* ── Day detail panel ── */}
@@ -461,12 +512,23 @@ export default function WorkoutsScreen({ navigation }) {
         {selectedDayWorkouts.length > 0 ? (
           selectedDayWorkouts.map(workout => {
             const isMarking = !!marking[workout.overrideId];
+            const locked    = isLocked(workout.specific_date);
+            const hasUnreadFeedback = workout.coachFeedback && !workout.feedbackIsRead;
+
             return (
               <View key={workout.id} style={styles.workoutCard}>
-                <Text style={styles.workoutTitle}>{workout.title?.toUpperCase()}</Text>
+                <View style={styles.workoutTitleRow}>
+                  <Text style={styles.workoutTitle}>{workout.title?.toUpperCase()}</Text>
+                  {hasUnreadFeedback && <View style={styles.feedbackDot} />}
+                </View>
                 {workout.purpose ? (
                   <Text style={styles.workoutPurpose}>{workout.purpose}</Text>
                 ) : null}
+                {locked && (
+                  <View style={styles.lockedBadge}>
+                    <Text style={styles.lockedBadgeText}>🔒 LOCKED (7+ DAYS OLD)</Text>
+                  </View>
+                )}
 
                 <View style={styles.actionRow}>
                   <TouchableOpacity
@@ -486,9 +548,9 @@ export default function WorkoutsScreen({ navigation }) {
                         <Text style={styles.doneTagText}>✓ DONE</Text>
                       </View>
                       <TouchableOpacity
-                        style={styles.undoBtn}
-                        onPress={() => handleUndoDone(workout)}
-                        disabled={isMarking}
+                        style={[styles.undoBtn, locked && { opacity: 0.4 }]}
+                        onPress={locked ? undefined : () => handleUndoDone(workout)}
+                        disabled={isMarking || locked}
                         activeOpacity={0.8}
                       >
                         <Text style={styles.undoBtnText}>UNDO</Text>
@@ -496,9 +558,9 @@ export default function WorkoutsScreen({ navigation }) {
                     </View>
                   ) : (
                     <TouchableOpacity
-                      style={[styles.markDoneBtn, isMarking && { opacity: 0.6 }]}
-                      onPress={() => handleMarkDone(workout)}
-                      disabled={isMarking}
+                      style={[styles.markDoneBtn, (isMarking || locked) && { opacity: locked ? 0.4 : 0.6 }]}
+                      onPress={locked ? undefined : () => handleMarkDone(workout)}
+                      disabled={isMarking || locked}
                       activeOpacity={0.8}
                     >
                       {isMarking
@@ -542,7 +604,7 @@ const styles = StyleSheet.create({
   },
   studentName: {
     fontFamily: F.heading,
-    fontSize: 32,
+    fontSize: 42,
     color: SL.accent,
     letterSpacing: 4,
     textTransform: 'uppercase',
@@ -550,10 +612,18 @@ const styles = StyleSheet.create({
   },
   level: {
     fontFamily: F.body,
-    fontSize: 20,
+    fontSize: 28,
     color: SL.text,
     letterSpacing: 3,
     marginTop: 6,
+  },
+  className: {
+    fontFamily: F.bodyMed,
+    fontSize: 22,
+    color: SL.gold,
+    letterSpacing: 3,
+    marginTop: 4,
+    textAlign: 'center',
   },
   headerDivider: {
     height: 1,
@@ -580,13 +650,13 @@ const styles = StyleSheet.create({
   },
   checkupBannerText: {
     fontFamily: F.heading,
-    fontSize: 18,
+    fontSize: 20,
     color: SL.accent,
     letterSpacing: 2,
   },
   checkupBannerDate: {
     fontFamily: F.bodyMed,
-    fontSize: 14,
+    fontSize: 20,
     color: SL.accent,
     letterSpacing: 1,
   },
@@ -600,21 +670,31 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 14,
     borderWidth: 1.5,
-    borderColor: SL.green,
+    borderColor: SL.accent,
     borderRadius: 6,
-    backgroundColor: 'rgba(76,175,80,0.08)',
+    backgroundColor: 'rgba(74,158,191,0.08)',
   },
   coachResponseBannerText: {
     fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.green,
+    fontSize: 20,
     letterSpacing: 2,
   },
-  coachResponseBannerDate: {
+  newBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    backgroundColor: SL.gold,
+    borderRadius: 3,
+  },
+  newBadgeText: {
     fontFamily: F.bodyMed,
     fontSize: 14,
-    color: SL.green,
+    color: SL.bg,
     letterSpacing: 1,
+  },
+  responseReadToggleText: {
+    fontFamily: F.bodyMed,
+    fontSize: 16,
+    letterSpacing: 1.5,
   },
 
   // ── Week nav ────────────────────────────────────────────────────────────────
@@ -636,18 +716,18 @@ const styles = StyleSheet.create({
     borderColor: SL.border,
     backgroundColor: SL.panel,
   },
-  navArrowText: { fontFamily: F.heading, fontSize: 18, color: SL.accent },
+  navArrowText: { fontFamily: F.heading, fontSize: 30, color: SL.accent },
   navCenter:    { flex: 1, alignItems: 'center', gap: 2 },
   navBadge: {
     fontFamily: F.body,
-    fontSize: 11,
+    fontSize: 18,
     color: SL.accent,
     letterSpacing: 3,
     textTransform: 'uppercase',
   },
   navRange: {
     fontFamily: F.bodyMed,
-    fontSize: 14,
+    fontSize: 20,
     color: SL.muted,
     letterSpacing: 0.5,
   },
@@ -677,7 +757,7 @@ const styles = StyleSheet.create({
 
   dayLabel: {
     fontFamily: F.body,
-    fontSize: 14,
+    fontSize: 18,
     color: SL.muted,
     letterSpacing: 0.5,
     textTransform: 'uppercase',
@@ -685,19 +765,19 @@ const styles = StyleSheet.create({
   dayLabelSel: { color: SL.accent },
   dayNum: {
     fontFamily: F.heading,
-    fontSize: 28,
+    fontSize: 32,
     color: SL.text,
-    lineHeight: 32,
+    lineHeight: 36,
   },
   dayMonth: {
     fontFamily: F.bodyMed,
-    fontSize: 12,
+    fontSize: 18,
     color: SL.muted,
     letterSpacing: 0.5,
     textTransform: 'uppercase',
   },
   dayCheck: {
-    fontSize: 14,
+    fontSize: 20,
     color: SL.green,
     fontFamily: F.heading,
   },
@@ -713,7 +793,7 @@ const styles = StyleSheet.create({
   },
   dayWorkoutName: {
     fontFamily: F.body,
-    fontSize: 10,
+    fontSize: 16,
     color: SL.accent,
     letterSpacing: 0.3,
     textAlign: 'center',
@@ -722,7 +802,7 @@ const styles = StyleSheet.create({
   },
   dayRest: {
     fontFamily: F.bodyMed,
-    fontSize: 10,
+    fontSize: 16,
     color: '#2a4a6a',
     letterSpacing: 0.3,
     textTransform: 'uppercase',
@@ -748,13 +828,13 @@ const styles = StyleSheet.create({
   },
   statValue: {
     fontFamily: F.heading,
-    fontSize: 28,
+    fontSize: 34,
     color: SL.accent,
     letterSpacing: 1,
   },
   statLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 11,
+    fontSize: 18,
     color: SL.muted,
     letterSpacing: 2,
     textTransform: 'uppercase',
@@ -776,19 +856,18 @@ const styles = StyleSheet.create({
   dayCardHead: { gap: 2 },
   dayCardName: {
     fontFamily: F.heading,
-    fontSize: 20,
+    fontSize: 26,
     color: SL.accent,
     letterSpacing: 3,
     textTransform: 'uppercase',
   },
   dayCardDate: {
     fontFamily: F.bodyMed,
-    fontSize: 16,
+    fontSize: 22,
     color: SL.muted,
     letterSpacing: 0.5,
   },
 
-  // Individual workout card inside day panel
   workoutCard: {
     backgroundColor: SL.bg,
     borderWidth: 1.5,
@@ -797,22 +876,34 @@ const styles = StyleSheet.create({
     padding: 14,
     gap: 12,
   },
+  workoutTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   workoutTitle: {
     fontFamily: F.heading,
-    fontSize: 20,
+    fontSize: 24,
     color: SL.accent,
     letterSpacing: 2,
     textTransform: 'uppercase',
+    flex: 1,
+  },
+  feedbackDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: SL.gold,
+    flexShrink: 0,
   },
   workoutPurpose: {
     fontFamily: F.body,
-    fontSize: 15,
+    fontSize: 20,
     color: SL.text,
     letterSpacing: 0.5,
     marginTop: -6,
   },
 
-  // Action buttons row within each workout card
   actionRow: {
     flexDirection: 'row',
     gap: 10,
@@ -828,7 +919,7 @@ const styles = StyleSheet.create({
   },
   viewBtnText: {
     fontFamily: F.body,
-    fontSize: 14,
+    fontSize: 16,
     color: SL.accent,
     letterSpacing: 2,
   },
@@ -842,7 +933,7 @@ const styles = StyleSheet.create({
   },
   markDoneBtnText: {
     fontFamily: F.body,
-    fontSize: 14,
+    fontSize: 16,
     color: SL.bg,
     letterSpacing: 2,
   },
@@ -863,7 +954,7 @@ const styles = StyleSheet.create({
   },
   doneTagText: {
     fontFamily: F.body,
-    fontSize: 14,
+    fontSize: 16,
     color: SL.green,
     letterSpacing: 2,
   },
@@ -878,12 +969,26 @@ const styles = StyleSheet.create({
   },
   undoBtnText: {
     fontFamily: F.body,
-    fontSize: 14,
+    fontSize: 16,
     color: SL.muted,
     letterSpacing: 2,
   },
 
-  // Rest day
+  lockedBadge: {
+    alignSelf: 'flex-start',
+    borderWidth: 1,
+    borderColor: SL.muted,
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  lockedBadgeText: {
+    fontFamily: F.bodyMed,
+    fontSize: 14,
+    color: SL.muted,
+    letterSpacing: 1.5,
+  },
+
   restCard: {
     alignItems: 'center',
     gap: 8,
@@ -891,13 +996,13 @@ const styles = StyleSheet.create({
   },
   restLabel: {
     fontFamily: F.heading,
-    fontSize: 22,
+    fontSize: 28,
     color: SL.muted,
     letterSpacing: 5,
   },
   restSub: {
     fontFamily: F.bodyMed,
-    fontSize: 16,
+    fontSize: 18,
     color: SL.muted,
     letterSpacing: 0.5,
     textAlign: 'center',

@@ -19,12 +19,14 @@ const SL = {
 
 const TODAY = new Date().toISOString().split('T')[0];
 
-export default function HomeScreen() {
-  const [profile,   setProfile]   = useState(null);
-  const [className, setClassName] = useState(null);
-  const [workouts,  setWorkouts]  = useState([]);
-  const [expTotal,  setExpTotal]  = useState(0);
-  const [loading,   setLoading]   = useState(true);
+export default function HomeScreen({ navigation }) {
+  const [profile,        setProfile]        = useState(null);
+  const [className,      setClassName]      = useState(null);
+  const [workouts,       setWorkouts]       = useState([]);
+  const [expTotal,       setExpTotal]       = useState(0);
+  const [pendingCheckup,      setPendingCheckup]      = useState(null);
+  const [coachResponseCheckup, setCoachResponseCheckup] = useState(null);
+  const [loading,        setLoading]        = useState(true);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -41,7 +43,7 @@ export default function HomeScreen() {
       if (!profileData) return;
       setProfile(profileData);
 
-      const [classRes, overridesRes, expRes] = await Promise.all([
+      const [classRes, overridesRes, expRes, checkupRes, coachResponseRes] = await Promise.all([
         profileData.class_id
           ? supabase.from('classes').select('name').eq('id', profileData.class_id).single()
           : Promise.resolve({ data: null }),
@@ -55,10 +57,30 @@ export default function HomeScreen() {
           .select('*', { count: 'exact', head: true })
           .eq('student_id', user.id)
           .eq('completed', true),
+        supabase
+          .from('checkups')
+          .select('*')
+          .eq('student_id', user.id)
+          .eq('status', 'pending')
+          .order('scheduled_date', { ascending: true })
+          .limit(1)
+          .maybeSingle(),
+        supabase
+          .from('checkups')
+          .select('id, scheduled_date, coach_response, responded_at, response_is_read')
+          .eq('student_id', user.id)
+          .not('coach_response', 'is', null)
+          .order('responded_at', { ascending: false })
+          .limit(1)
+          .maybeSingle(),
       ]);
 
       setClassName(classRes.data?.name ?? null);
       setExpTotal(expRes.count ?? 0);
+      setPendingCheckup(checkupRes.data ?? null);
+      setCoachResponseCheckup(
+        coachResponseRes.data?.response_is_read === false ? coachResponseRes.data : null
+      );
 
       const overrides = overridesRes.data ?? [];
       if (overrides.length === 0) { setWorkouts([]); setLoading(false); return; }
@@ -88,7 +110,7 @@ export default function HomeScreen() {
   const allDone  = workouts.length > 0 && workouts.every(w => w.completed);
   const lvl      = profile?.current_lvl   ?? 0;
   const prestige = profile?.prestige_count ?? 0;
-  const lvlPct  = Math.min(lvl / 100, 1);
+  const lvlPct   = Math.min(lvl / 100, 1);
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.body}>
@@ -115,7 +137,6 @@ export default function HomeScreen() {
 
           {/* ── LVL & EXP ── */}
           <View style={styles.statsRow}>
-            {/* LVL card */}
             <View style={styles.statCard}>
               <Text style={styles.statNumber}>{lvl}</Text>
               <Text style={styles.statLabel}>LEVEL</Text>
@@ -124,14 +145,48 @@ export default function HomeScreen() {
               </View>
               <Text style={styles.progressLabel}>{lvl} / 100</Text>
             </View>
-
-            {/* EXP card */}
             <View style={styles.statCard}>
               <Text style={styles.statNumber}>{expTotal}</Text>
               <Text style={styles.statLabel}>EXP</Text>
               <Text style={styles.statSub}>EXPERIENCE</Text>
             </View>
           </View>
+
+          {/* ── Checkup Alert Banner ── */}
+          {pendingCheckup && (
+            <TouchableOpacity
+              style={styles.checkupAlert}
+              onPress={() => navigation.navigate('Checkup', { checkup: pendingCheckup })}
+              activeOpacity={0.8}
+            >
+              <View style={styles.checkupAlertLeft} />
+              <View style={styles.checkupAlertBody}>
+                <Text style={styles.checkupAlertTitle}>📋 CHECKUP AWAITS</Text>
+                <Text style={styles.checkupAlertSub}>
+                  {pendingCheckup.scheduled_date <= TODAY
+                    ? 'Your checkup is due — complete it now.'
+                    : `Scheduled for ${pendingCheckup.scheduled_date}`}
+                </Text>
+              </View>
+              <Text style={styles.checkupAlertArrow}>→</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* ── Coach Response Alert ── */}
+          {coachResponseCheckup && (
+            <TouchableOpacity
+              style={styles.coachResponseAlert}
+              onPress={() => navigation.navigate('CoachResponse', { checkup: coachResponseCheckup })}
+              activeOpacity={0.8}
+            >
+              <View style={styles.coachResponseAlertLeft} />
+              <View style={styles.checkupAlertBody}>
+                <Text style={styles.coachResponseAlertTitle}>💬 NEW COACH FEEDBACK</Text>
+                <Text style={styles.checkupAlertSub}>Your coach left a response — tap to read it.</Text>
+              </View>
+              <Text style={styles.coachResponseAlertArrow}>→</Text>
+            </TouchableOpacity>
+          )}
 
           {/* ── Today's Missions ── */}
           <Text style={styles.sectionLabel}>TODAY'S MISSIONS</Text>
@@ -200,7 +255,7 @@ const styles = StyleSheet.create({
   },
   signOutText: {
     fontFamily: F.bodyMed,
-    fontSize: 11,
+    fontSize: 12,
     color: SL.accent,
     letterSpacing: 2,
   },
@@ -213,20 +268,20 @@ const styles = StyleSheet.create({
   },
   playerName: {
     fontFamily: F.heading,
-    fontSize: 44,
+    fontSize: 64,
     color: SL.accent,
     letterSpacing: 4,
     textAlign: 'center',
   },
   className: {
     fontFamily: F.bodyMed,
-    fontSize: 14,
+    fontSize: 22,
     color: SL.gold,
-    letterSpacing: 3,
+    letterSpacing: 4,
     marginTop: 6,
   },
   prestigeStars: {
-    fontSize: 18,
+    fontSize: 20,
     color: SL.gold,
     letterSpacing: 4,
     marginTop: 6,
@@ -237,7 +292,7 @@ const styles = StyleSheet.create({
   statsRow: {
     flexDirection: 'row',
     gap: 12,
-    marginBottom: 28,
+    marginBottom: 20,
   },
   statCard: {
     flex: 1,
@@ -251,21 +306,21 @@ const styles = StyleSheet.create({
   },
   statNumber: {
     fontFamily: F.heading,
-    fontSize: 48,
+    fontSize: 72,
     color: SL.accent,
     letterSpacing: 2,
-    lineHeight: 56,
+    lineHeight: 80,
   },
   statLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 11,
+    fontSize: 18,
     color: SL.muted,
     letterSpacing: 2,
     textAlign: 'center',
   },
   statSub: {
     fontFamily: F.bodyMed,
-    fontSize: 9,
+    fontSize: 15,
     color: SL.muted,
     letterSpacing: 1.5,
     opacity: 0.6,
@@ -286,17 +341,87 @@ const styles = StyleSheet.create({
   },
   progressLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 11,
+    fontSize: 17,
     color: SL.muted,
     letterSpacing: 1.5,
     marginTop: 2,
+  },
+
+  // ── Checkup Alert Banner ──────────────────────────────────────────────────
+
+  checkupAlert: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderRadius: 4,
+    marginBottom: 20, 
+    overflow: 'hidden',
+  },
+  checkupAlertLeft: {
+    width: 4,
+    alignSelf: 'stretch',
+    backgroundColor: SL.gold,
+  },
+  checkupAlertBody: {
+    flex: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    gap: 4,
+  },
+  checkupAlertTitle: {
+    fontFamily: F.heading,
+    fontSize: 18,
+    color: SL.gold,
+    letterSpacing: 2,
+  },
+  checkupAlertSub: {
+    fontFamily: F.bodyMed,
+    fontSize: 14,
+    color: SL.gold,
+    letterSpacing: 0.5,
+  },
+
+  coachResponseAlert: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: SL.gold,
+    borderRadius: 4,
+    marginBottom: 20,
+    overflow: 'hidden',
+  },
+  coachResponseAlertLeft: {
+    width: 4,
+    alignSelf: 'stretch',
+    backgroundColor: SL.gold,
+  },
+  coachResponseAlertTitle: {
+    fontFamily: F.heading,
+    fontSize: 18,
+    color: SL.gold,
+    letterSpacing: 2,
+  },
+  coachResponseAlertArrow: {
+    fontFamily: F.heading,
+    fontSize: 20,
+    color: SL.gold,
+    paddingRight: 14,
+  },
+  checkupAlertArrow: {
+    fontFamily: F.heading,
+    fontSize: 20,
+    color: SL.gold,
+    paddingRight: 14,
   },
 
   // ── Today's Missions ──────────────────────────────────────────────────────
 
   sectionLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 12,
+    fontSize: 15,
     color: SL.muted,
     letterSpacing: 3,
     marginBottom: 12,
@@ -315,7 +440,7 @@ const styles = StyleSheet.create({
   },
   restDaySub: {
     fontFamily: F.bodyMed,
-    fontSize: 14,
+    fontSize: 16,
     color: SL.muted,
     letterSpacing: 0.5,
     opacity: 0.7,
@@ -344,13 +469,13 @@ const styles = StyleSheet.create({
   },
   missionTitle: {
     fontFamily: F.heading,
-    fontSize: 20,
+    fontSize: 22,
     color: SL.text,
     letterSpacing: 1.5,
   },
   missionPurpose: {
     fontFamily: F.bodyMed,
-    fontSize: 13,
+    fontSize: 16,
     color: SL.muted,
     letterSpacing: 0.5,
   },
@@ -365,7 +490,7 @@ const styles = StyleSheet.create({
   },
   doneBadgeText: {
     fontFamily: F.heading,
-    fontSize: 12,
+    fontSize: 14,
     color: SL.green,
     letterSpacing: 2,
   },
@@ -380,7 +505,7 @@ const styles = StyleSheet.create({
   },
   pendingBadgeText: {
     fontFamily: F.bodyMed,
-    fontSize: 12,
+    fontSize: 14,
     color: SL.muted,
     letterSpacing: 2,
   },
@@ -396,7 +521,7 @@ const styles = StyleSheet.create({
   },
   allDoneText: {
     fontFamily: F.heading,
-    fontSize: 22,
+    fontSize: 24,
     color: SL.green,
     letterSpacing: 4,
   },
