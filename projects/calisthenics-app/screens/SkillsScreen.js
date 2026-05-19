@@ -4,6 +4,7 @@ import {
   View, Text, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { computeLvlFromData } from '../lib/computeLvl';
 import { F } from '../constants/fonts';
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
@@ -37,7 +38,7 @@ export default function SkillsScreen({ navigation }) {
 
       const { data: profileData } = await supabase
         .from('profiles')
-        .select('full_name, class_id, current_lvl, total_exp, prestige_count')
+        .select('full_name, class_id, total_exp, prestige_count')
         .eq('id', user.id)
         .single();
 
@@ -93,7 +94,7 @@ export default function SkillsScreen({ navigation }) {
     );
   }
 
-  const lvl      = profile?.current_lvl   ?? 0;
+  const lvl      = computeLvlFromData(quests, completions);
   const prestige = profile?.prestige_count ?? 0;
   const lvlPct   = Math.min(lvl / 100, 1);
 

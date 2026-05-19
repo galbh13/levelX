@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { supabase } from '../lib/supabase';
+import { computeLvl } from '../lib/computeLvl';
 import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
 
@@ -81,6 +82,9 @@ function StudentCard({ student, todayStatus, onPress }) {
         <View style={styles.cardInner}>
           <View style={styles.cardMain}>
             <Text style={styles.studentName}>{student.full_name?.toUpperCase()}</Text>
+            {student.className && (
+              <Text style={styles.classLabel}>{student.className.toUpperCase()}</Text>
+            )}
 
             {/* Today status label */}
             {todayStatus === 'missed' && (
@@ -100,8 +104,9 @@ function StudentCard({ student, todayStatus, onPress }) {
 
           <View style={styles.cardRight}>
             <View style={styles.levelBadge}>
-              <Text style={styles.levelText}>LVL {student.level ?? '—'}</Text>
+              <Text style={styles.levelText}>LVL {student.level ?? 0}</Text>
             </View>
+            <Text style={styles.expText}>EXP {student.exp ?? 0}</Text>
             <Text style={styles.chevron}>→</Text>
           </View>
         </View>
@@ -166,11 +171,32 @@ export default function CoachDashboard({ navigation }) {
             .limit(1)
             .maybeSingle();
 
+          // Per-class LVL (computed from completed quests) + class name + EXP.
+          // EXP comes from completed workouts, matching HomeScreen/WorkoutsScreen.
+          const [level, classRes, expRes, dqExpRes] = await Promise.all([
+            computeLvl(student.id, student.class_id),
+            student.class_id
+              ? supabase.from('classes').select('name').eq('id', student.class_id).maybeSingle()
+              : Promise.resolve({ data: null }),
+            supabase
+              .from('workout_override_workouts')
+              .select('*', { count: 'exact', head: true })
+              .eq('student_id', student.id)
+              .eq('completed', true),
+            supabase
+              .from('daily_quest_completions')
+              .select('*', { count: 'exact', head: true })
+              .eq('student_id', student.id),
+          ]);
+
           return {
             ...student,
             todayStatus,
             nextCheckup: nextCheckup?.scheduled_date ?? null,
             unreadCheckup: unreadCheckup ?? null,
+            level,
+            className: classRes.data?.name ?? null,
+            exp: (expRes.count ?? 0) * 5 + (dqExpRes.count ?? 0),
           };
         })
       );
@@ -191,11 +217,11 @@ export default function CoachDashboard({ navigation }) {
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerRow}>
+          <TouchableOpacity onPress={() => navigation.navigate('ExerciseGallery')}>
+            <Text style={styles.galleryLink}>← EXERCISE GALLERY</Text>
+          </TouchableOpacity>
           <TouchableOpacity onPress={() => supabase.auth.signOut()}>
             <Text style={styles.signOut}>SIGN OUT</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => navigation.navigate('ExerciseGallery')}>
-            <Text style={styles.galleryLink}>EXERCISE GALLERY →</Text>
           </TouchableOpacity>
         </View>
         <Text style={styles.subtitle}>COACH DASHBOARD</Text>
@@ -232,51 +258,53 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SL.bg },
 
   header: {
-    paddingHorizontal: 24,
-    paddingTop: 60,
-    paddingBottom: 24,
-    borderBottomWidth: 1,
+    paddingHorizontal: 28,
+    paddingTop: 72,
+    paddingBottom: 32,
+    borderBottomWidth: 2,
     borderBottomColor: SL.border,
   },
   headerRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 28,
   },
   signOut: {
-    fontFamily: F.bodyMed,
-    fontSize: 16,
+    fontFamily: F.heading,
+    fontSize: 20,
     color: SL.muted,
-    letterSpacing: 2,
+    letterSpacing: 3,
+    textTransform: 'uppercase',
   },
   galleryLink: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
+    fontFamily: F.heading,
+    fontSize: 20,
     color: SL.accent,
-    letterSpacing: 1.5,
+    letterSpacing: 2.5,
+    textTransform: 'uppercase',
   },
   subtitle: {
     fontFamily: F.bodyMed,
-    fontSize: 20,
+    fontSize: 26,
     color: SL.muted,
-    letterSpacing: 4,
+    letterSpacing: 6,
     textAlign: 'center',
     textTransform: 'uppercase',
-    marginBottom: 6,
+    marginBottom: 10,
   },
   title: {
     fontFamily: F.heading,
-    fontSize: 40,
+    fontSize: 60,
     color: SL.accent,
-    letterSpacing: 4,
+    letterSpacing: 8,
     textAlign: 'center',
     textTransform: 'uppercase',
   },
   divider: {
-    height: 1,
+    height: 2,
     backgroundColor: SL.accent,
-    marginTop: 20,
+    marginTop: 28,
     opacity: 0.4,
   },
 
@@ -304,12 +332,12 @@ const styles = StyleSheet.create({
     lineHeight: 28,
   },
 
-  list: { padding: 16, gap: 12, paddingBottom: 48 },
+  list: { padding: 22, gap: 16, paddingBottom: 60 },
 
   // Panel base
   panel: {
     backgroundColor: SL.panel,
-    borderWidth: 1.5,
+    borderWidth: 2,
     borderColor: SL.border,
     borderRadius: 4,
     overflow: 'visible',
@@ -317,19 +345,19 @@ const styles = StyleSheet.create({
   },
   corner: {
     position: 'absolute',
-    width: 14,
-    height: 14,
+    width: 18,
+    height: 18,
     zIndex: 2,
   },
 
   // Pulsing red dot
   pulseDot: {
     position: 'absolute',
-    top: 12,
-    left: -6,
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    top: 16,
+    left: -8,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
     backgroundColor: SL.danger,
     zIndex: 10,
   },
@@ -337,60 +365,73 @@ const styles = StyleSheet.create({
   cardInner: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 18,
-    gap: 12,
+    padding: 26,
+    gap: 16,
   },
-  cardMain: { flex: 1, gap: 6 },
+  cardMain: { flex: 1, gap: 8 },
   studentName: {
     fontFamily: F.heading,
-    fontSize: 28,
+    fontSize: 36,
     color: SL.text,
-    letterSpacing: 2,
+    letterSpacing: 3,
   },
   missedLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 11,
+    fontFamily: F.heading,
+    fontSize: 16,
     color: SL.danger,
-    letterSpacing: 1.5,
+    letterSpacing: 2,
   },
   completeLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 11,
+    fontFamily: F.heading,
+    fontSize: 16,
     color: SL.green,
-    letterSpacing: 1.5,
+    letterSpacing: 2,
   },
   checkupReadyLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 12,
+    fontFamily: F.heading,
+    fontSize: 17,
     color: '#FFD700',
-    letterSpacing: 1.5,
-    marginTop: 4,
+    letterSpacing: 2,
+    marginTop: 6,
   },
   checkupText: {
     fontFamily: F.bodyMed,
-    fontSize: 20,
+    fontSize: 22,
     color: SL.muted,
-    letterSpacing: 1.5,
-    marginTop: 2,
+    letterSpacing: 2,
+    marginTop: 4,
   },
   checkupValue: { color: SL.text },
-  cardRight: { alignItems: 'flex-end', gap: 8 },
+  cardRight: { alignItems: 'flex-end', gap: 12 },
   levelBadge: {
-    borderWidth: 1,
+    borderWidth: 2,
     borderColor: SL.accent,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingHorizontal: 18,
+    paddingVertical: 9,
     borderRadius: 6,
   },
   levelText: {
-    fontFamily: F.bodyMed,
-    fontSize: 20,
+    fontFamily: F.heading,
+    fontSize: 26,
     color: SL.accent,
+    letterSpacing: 2.5,
+  },
+  expText: {
+    fontFamily: F.heading,
+    fontSize: 18,
+    color: SL.muted,
     letterSpacing: 2,
   },
-  chevron: {
-    fontSize: 24,
+  classLabel: {
+    fontFamily: F.heading,
+    fontSize: 18,
     color: SL.accent,
-    fontFamily: F.bodyMed,
+    letterSpacing: 3,
+    opacity: 0.9,
+  },
+  chevron: {
+    fontSize: 34,
+    color: SL.accent,
+    fontFamily: F.heading,
   },
 });

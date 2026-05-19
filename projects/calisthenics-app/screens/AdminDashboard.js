@@ -5,7 +5,19 @@ import {
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { F } from '../constants/fonts';
-import { C } from '../constants/colors';
+
+const SL = {
+  bg:        '#050912',
+  panel:     '#070d1a',
+  panelAlt:  '#0a1424',
+  border:    '#1a3a5c',
+  accent:    '#4A9EBF',
+  text:      '#E8F4FF',
+  muted:     '#4a6a8a',
+  gold:      '#FFD700',
+  danger:    '#FF6B6B',
+  dangerBg:  '#2a1414',
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -33,7 +45,7 @@ function UnassignedCard({ student, onAssign }) {
       </View>
       <View style={styles.cardRight}>
         <LevelBadge level={student.level} />
-        <TouchableOpacity style={styles.assignBtn} onPress={() => onAssign(student)}>
+        <TouchableOpacity style={styles.assignBtn} onPress={() => onAssign(student)} activeOpacity={0.8}>
           <Text style={styles.assignBtnText}>ASSIGN</Text>
         </TouchableOpacity>
       </View>
@@ -41,7 +53,7 @@ function UnassignedCard({ student, onAssign }) {
   );
 }
 
-function CoachBlock({ coach, students, coaches, onReassign, onRemove }) {
+function CoachBlock({ coach, students, onReassign, onRemove }) {
   const [expanded, setExpanded] = useState(false);
   const myStudents = students.filter(s => s.coach_id === coach.id);
 
@@ -76,12 +88,14 @@ function CoachBlock({ coach, students, coaches, onReassign, onRemove }) {
                   <TouchableOpacity
                     style={styles.rosterBtn}
                     onPress={() => onReassign(student, coach)}
+                    activeOpacity={0.8}
                   >
                     <Text style={styles.rosterBtnText}>REASSIGN</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.rosterBtn, styles.rosterBtnDanger]}
                     onPress={() => onRemove(student)}
+                    activeOpacity={0.8}
                   >
                     <Text style={[styles.rosterBtnText, styles.rosterBtnTextDanger]}>REMOVE</Text>
                   </TouchableOpacity>
@@ -107,7 +121,7 @@ function CoachPickerModal({ visible, coaches, excludeCoachId, onSelect, onClose 
       <View style={styles.modalOverlay}>
         <View style={styles.modalBox}>
           <Text style={styles.modalTitle}>SELECT COACH</Text>
-          <ScrollView style={{ maxHeight: 320 }}>
+          <ScrollView style={{ maxHeight: 360 }}>
             {options.map(coach => (
               <TouchableOpacity
                 key={coach.id}
@@ -125,7 +139,7 @@ function CoachPickerModal({ visible, coaches, excludeCoachId, onSelect, onClose 
               <Text style={styles.emptyText}>No other coaches available.</Text>
             )}
           </ScrollView>
-          <TouchableOpacity style={styles.modalCancelBtn} onPress={onClose}>
+          <TouchableOpacity style={styles.modalCancelBtn} onPress={onClose} activeOpacity={0.8}>
             <Text style={styles.modalCancelText}>CANCEL</Text>
           </TouchableOpacity>
         </View>
@@ -138,44 +152,32 @@ function CoachPickerModal({ visible, coaches, excludeCoachId, onSelect, onClose 
 
 export default function AdminDashboard({ navigation }) {
   const [unassigned,  setUnassigned]  = useState([]);
-  const [students,    setStudents]    = useState([]);   // all students, for the roster
+  const [students,    setStudents]    = useState([]);
   const [coaches,     setCoaches]     = useState([]);
   const [loading,     setLoading]     = useState(true);
   const [refreshing,  setRefreshing]  = useState(false);
 
-  // Modal state
   const [modalVisible,   setModalVisible]   = useState(false);
-  const [targetStudent,  setTargetStudent]  = useState(null);   // student being assigned/reassigned
-  const [excludeCoach,   setExcludeCoach]   = useState(null);   // current coach to exclude (for reassign)
-
-  // ── Fetch ──────────────────────────────────────────────────────────────────
+  const [targetStudent,  setTargetStudent]  = useState(null);
+  const [excludeCoach,   setExcludeCoach]   = useState(null);
 
   const fetchData = useCallback(async () => {
     try {
-      // Unassigned students — must use .is() for NULL checks in Supabase
-      const { data: unassignedData, error: unassignedErr } = await supabase
+      const { data: unassignedData } = await supabase
         .from('profiles')
         .select('*')
         .eq('role', 'student')
         .is('coach_id', null);
-      console.log('[AdminDashboard] unassigned students:', JSON.stringify(unassignedData));
-      console.log('[AdminDashboard] unassigned error:', JSON.stringify(unassignedErr));
 
-      // All students (for the coaching roster — needs assigned ones too)
-      const { data: allStudentData, error: allStudentErr } = await supabase
+      const { data: allStudentData } = await supabase
         .from('profiles')
         .select('*')
         .eq('role', 'student');
-      console.log('[AdminDashboard] all students:', JSON.stringify(allStudentData));
-      console.log('[AdminDashboard] all students error:', JSON.stringify(allStudentErr));
 
-      // All coaches
-      const { data: coachData, error: cErr } = await supabase
+      const { data: coachData } = await supabase
         .from('profiles')
         .select('*')
         .eq('role', 'coach');
-      console.log('[AdminDashboard] coaches:', JSON.stringify(coachData));
-      console.log('[AdminDashboard] coaches error:', JSON.stringify(cErr));
 
       const studentList = allStudentData ?? [];
       const coachList   = (coachData ?? []).map(coach => ({
@@ -201,8 +203,6 @@ export default function AdminDashboard({ navigation }) {
     setRefreshing(false);
   }
 
-  // ── Assign / Reassign ──────────────────────────────────────────────────────
-
   function openAssign(student) {
     setTargetStudent(student);
     setExcludeCoach(null);
@@ -221,45 +221,35 @@ export default function AdminDashboard({ navigation }) {
     const student = targetStudent;
     setTargetStudent(null);
     try {
-      console.log('[AdminDashboard] assigning student', student.id, '→ coach', coach.id);
       const { error } = await supabase
         .from('profiles')
         .update({ coach_id: coach.id })
         .eq('id', student.id);
       if (error) {
-        console.error('[AdminDashboard] assign error:', error);
         Alert.alert('Assignment Failed', error.message ?? 'Could not assign coach.');
         return;
       }
-      // Refetch from Supabase so UI reflects real DB state
       await fetchData();
     } catch (e) {
-      console.error('[AdminDashboard] assign exception:', e);
       Alert.alert('Assignment Failed', e.message ?? 'Something went wrong.');
     }
   }
 
   async function handleRemove(student) {
     try {
-      console.log('[AdminDashboard] removing coach from student', student.id);
       const { error } = await supabase
         .from('profiles')
         .update({ coach_id: null })
         .eq('id', student.id);
       if (error) {
-        console.error('[AdminDashboard] remove error:', error);
         Alert.alert('Remove Failed', error.message ?? 'Could not remove coach assignment.');
         return;
       }
-      // Refetch from Supabase so UI reflects real DB state
       await fetchData();
     } catch (e) {
-      console.error('[AdminDashboard] remove exception:', e);
       Alert.alert('Remove Failed', e.message ?? 'Something went wrong.');
     }
   }
-
-  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <View style={styles.container}>
@@ -268,6 +258,7 @@ export default function AdminDashboard({ navigation }) {
         <TouchableOpacity
           style={styles.topBarBtn}
           onPress={() => navigation.navigate('ExerciseGallery')}
+          activeOpacity={0.8}
         >
           <Text style={styles.topBarBtnText}>GALLERY</Text>
         </TouchableOpacity>
@@ -277,6 +268,7 @@ export default function AdminDashboard({ navigation }) {
         <TouchableOpacity
           style={styles.topBarBtn}
           onPress={() => supabase.auth.signOut()}
+          activeOpacity={0.8}
         >
           <Text style={styles.topBarBtnText}>SIGN OUT</Text>
         </TouchableOpacity>
@@ -284,21 +276,25 @@ export default function AdminDashboard({ navigation }) {
 
       {loading ? (
         <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={C.iceGlow} />
+          <ActivityIndicator size="large" color={SL.accent} />
         </View>
       ) : (
         <ScrollView
           contentContainerStyle={styles.body}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={C.iceGlow} />}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={SL.accent} />}
         >
           {/* ── Section 1: Unassigned ── */}
-          <Text style={styles.sectionTitle}>UNASSIGNED STUDENTS</Text>
-          <View style={styles.sectionPill}>
-            <Text style={styles.sectionPillText}>{unassigned.length}</Text>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>UNASSIGNED STUDENTS</Text>
+            <View style={styles.sectionPill}>
+              <Text style={styles.sectionPillText}>{unassigned.length}</Text>
+            </View>
           </View>
 
           {unassigned.length === 0 ? (
-            <Text style={styles.emptyText}>All students are assigned.</Text>
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyText}>All students are assigned.</Text>
+            </View>
           ) : (
             unassigned.map(student => (
               <UnassignedCard
@@ -310,26 +306,33 @@ export default function AdminDashboard({ navigation }) {
           )}
 
           {/* ── Section 2: Coaching Roster ── */}
-          <Text style={[styles.sectionTitle, { marginTop: 32 }]}>COACHING ROSTER</Text>
+          <View style={[styles.sectionHeader, { marginTop: 36 }]}>
+            <Text style={styles.sectionTitle}>COACHING ROSTER</Text>
+            <View style={styles.sectionPill}>
+              <Text style={styles.sectionPillText}>{coaches.length}</Text>
+            </View>
+          </View>
 
           {coaches.length === 0 ? (
-            <Text style={styles.emptyText}>No coaches found.</Text>
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyText}>No coaches found.</Text>
+            </View>
           ) : (
             coaches.map(coach => (
               <CoachBlock
                 key={coach.id}
                 coach={coach}
                 students={students}
-                coaches={coaches}
                 onReassign={openReassign}
                 onRemove={handleRemove}
               />
             ))
           )}
+
+          <View style={{ height: 60 }} />
         </ScrollView>
       )}
 
-      {/* Coach picker modal */}
       <CoachPickerModal
         visible={modalVisible}
         coaches={coaches}
@@ -344,77 +347,90 @@ export default function AdminDashboard({ navigation }) {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.bg },
+  container: { flex: 1, backgroundColor: SL.bg },
 
   // Top bar
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingTop: 56,
-    paddingBottom: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: C.cardBorder,
+    paddingHorizontal: 28,
+    paddingTop: 72,
+    paddingBottom: 28,
+    borderBottomWidth: 2,
+    borderBottomColor: SL.border,
   },
   pageTitle: {
     fontFamily: F.heading,
-    fontSize: 18,
-    color: C.text,
-    letterSpacing: 4,
+    fontSize: 56,
+    color: SL.accent,
+    letterSpacing: 10,
     textTransform: 'uppercase',
   },
   topBarBtn: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 6,
+    paddingHorizontal: 22,
+    paddingVertical: 14,
+    borderWidth: 2,
+    borderColor: SL.border,
+    borderRadius: 4,
+    backgroundColor: SL.panel,
   },
   topBarBtnText: {
-    fontFamily: F.bodyMed,
-    fontSize: 10,
-    color: C.iceGlow,
-    letterSpacing: 2,
+    fontFamily: F.heading,
+    fontSize: 18,
+    color: SL.accent,
+    letterSpacing: 3,
     textTransform: 'uppercase',
   },
 
   loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
-  body: { padding: 16, paddingBottom: 56 },
+  body: { padding: 28, paddingTop: 36 },
 
   // Section headers
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    marginBottom: 22,
+  },
   sectionTitle: {
     fontFamily: F.heading,
-    fontSize: 13,
-    color: C.deepBlue,
-    letterSpacing: 3,
+    fontSize: 30,
+    color: SL.text,
+    letterSpacing: 5,
     textTransform: 'uppercase',
-    marginBottom: 4,
   },
   sectionPill: {
-    alignSelf: 'flex-start',
-    backgroundColor: C.lockedBg,
-    borderWidth: 1,
-    borderColor: C.deepBlue,
-    borderRadius: 20,
-    paddingHorizontal: 10,
-    paddingVertical: 2,
-    marginBottom: 12,
+    backgroundColor: SL.panel,
+    borderWidth: 2,
+    borderColor: SL.accent,
+    borderRadius: 4,
+    paddingHorizontal: 16,
+    paddingVertical: 4,
+    minWidth: 50,
+    alignItems: 'center',
   },
   sectionPillText: {
-    fontFamily: F.body,
-    fontSize: 11,
-    color: C.iceGlow,
+    fontFamily: F.heading,
+    fontSize: 22,
+    color: SL.accent,
     letterSpacing: 1,
   },
 
+  emptyBox: {
+    backgroundColor: SL.panel,
+    borderWidth: 2,
+    borderColor: SL.border,
+    borderRadius: 4,
+    paddingVertical: 32,
+    alignItems: 'center',
+  },
   emptyText: {
     fontFamily: F.bodyMed,
-    fontSize: 12,
-    color: C.textMuted,
-    letterSpacing: 1.5,
-    marginVertical: 12,
+    fontSize: 20,
+    color: SL.muted,
+    letterSpacing: 2,
     textAlign: 'center',
   },
 
@@ -423,203 +439,209 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 10,
-    padding: 14,
-    marginBottom: 8,
+    backgroundColor: SL.panel,
+    borderWidth: 2,
+    borderColor: SL.border,
+    borderRadius: 4,
+    padding: 22,
+    marginBottom: 14,
   },
-  cardLeft: { flex: 1, gap: 4 },
-  cardRight: { alignItems: 'flex-end', gap: 8 },
+  cardLeft: { flex: 1, gap: 6 },
+  cardRight: { alignItems: 'flex-end', gap: 14 },
 
   studentName: {
-    fontFamily: F.body,
-    fontSize: 14,
-    color: C.text,
-    letterSpacing: 1,
+    fontFamily: F.heading,
+    fontSize: 26,
+    color: SL.text,
+    letterSpacing: 2,
     textTransform: 'uppercase',
   },
   joinDate: {
     fontFamily: F.bodyMed,
-    fontSize: 11,
-    color: C.textMuted,
-    letterSpacing: 1,
+    fontSize: 16,
+    color: SL.muted,
+    letterSpacing: 1.5,
   },
 
   levelBadge: {
-    backgroundColor: C.lockedBg,
-    borderWidth: 1,
-    borderColor: C.deepBlue,
+    backgroundColor: SL.panelAlt,
+    borderWidth: 2,
+    borderColor: SL.accent,
     borderRadius: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
+    paddingHorizontal: 14,
+    paddingVertical: 5,
   },
   levelBadgeText: {
     fontFamily: F.heading,
-    fontSize: 10,
-    color: C.iceGlow,
+    fontSize: 17,
+    color: SL.accent,
     letterSpacing: 2,
   },
 
   assignBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    backgroundColor: C.deepBlue,
-    borderRadius: 6,
+    paddingHorizontal: 26,
+    paddingVertical: 13,
+    backgroundColor: SL.accent,
+    borderRadius: 4,
   },
   assignBtnText: {
     fontFamily: F.heading,
-    fontSize: 11,
-    color: '#fff',
-    letterSpacing: 2,
+    fontSize: 17,
+    color: SL.bg,
+    letterSpacing: 3,
   },
 
   // Coach block
   coachBlock: {
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 10,
-    marginBottom: 10,
+    backgroundColor: SL.panel,
+    borderWidth: 2,
+    borderColor: SL.border,
+    borderRadius: 4,
+    marginBottom: 16,
     overflow: 'hidden',
   },
   coachHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 16,
+    padding: 26,
   },
-  coachHeaderLeft: { gap: 3 },
+  coachHeaderLeft: { gap: 8 },
   coachName: {
     fontFamily: F.heading,
-    fontSize: 13,
-    color: C.text,
-    letterSpacing: 2,
+    fontSize: 30,
+    color: SL.text,
+    letterSpacing: 4,
   },
   coachCount: {
     fontFamily: F.bodyMed,
-    fontSize: 11,
-    color: C.iceGlow,
-    letterSpacing: 2,
+    fontSize: 18,
+    color: SL.accent,
+    letterSpacing: 3,
   },
   chevron: {
-    fontFamily: F.body,
-    fontSize: 11,
-    color: C.textMuted,
+    fontFamily: F.heading,
+    fontSize: 22,
+    color: SL.accent,
   },
 
   // Coach expanded student rows
   coachStudents: {
-    borderTopWidth: 1,
-    borderTopColor: C.cardBorder,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    gap: 10,
+    borderTopWidth: 2,
+    borderTopColor: SL.border,
+    paddingHorizontal: 22,
+    paddingVertical: 18,
+    gap: 16,
+    backgroundColor: SL.panelAlt,
   },
   rosterRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: 12,
   },
   rosterLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 14,
     flex: 1,
   },
   rosterName: {
-    fontFamily: F.body,
-    fontSize: 13,
-    color: C.text,
-    letterSpacing: 0.5,
+    fontFamily: F.heading,
+    fontSize: 20,
+    color: SL.text,
+    letterSpacing: 2,
     textTransform: 'uppercase',
   },
   rosterActions: {
     flexDirection: 'row',
-    gap: 6,
+    gap: 10,
   },
   rosterBtn: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 5,
+    paddingHorizontal: 18,
+    paddingVertical: 11,
+    borderWidth: 2,
+    borderColor: SL.border,
+    borderRadius: 4,
+    backgroundColor: SL.panel,
   },
   rosterBtnDanger: {
-    borderColor: '#3a1a1a',
+    borderColor: SL.danger,
+    backgroundColor: SL.dangerBg,
   },
   rosterBtnText: {
-    fontFamily: F.bodyMed,
-    fontSize: 9,
-    color: C.iceGlow,
-    letterSpacing: 1.5,
+    fontFamily: F.heading,
+    fontSize: 15,
+    color: SL.accent,
+    letterSpacing: 2,
   },
   rosterBtnTextDanger: {
-    color: '#FF6B6B',
+    color: SL.danger,
   },
 
   // Modal
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.75)',
+    backgroundColor: 'rgba(0,0,0,0.8)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 32,
   },
   modalBox: {
     width: '100%',
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 14,
-    padding: 20,
-    gap: 12,
+    maxWidth: 560,
+    backgroundColor: SL.panel,
+    borderWidth: 2,
+    borderColor: SL.accent,
+    borderRadius: 4,
+    padding: 28,
+    gap: 18,
   },
   modalTitle: {
     fontFamily: F.heading,
-    fontSize: 13,
-    color: C.text,
-    letterSpacing: 3,
+    fontSize: 28,
+    color: SL.accent,
+    letterSpacing: 5,
     textTransform: 'uppercase',
     textAlign: 'center',
-    marginBottom: 4,
+    marginBottom: 8,
   },
   coachOption: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 14,
-    paddingHorizontal: 4,
-    borderBottomWidth: 1,
-    borderBottomColor: C.cardBorder,
+    paddingVertical: 20,
+    paddingHorizontal: 8,
+    borderBottomWidth: 1.5,
+    borderBottomColor: SL.border,
   },
   coachOptionName: {
-    fontFamily: F.body,
-    fontSize: 14,
-    color: C.text,
-    letterSpacing: 1,
+    fontFamily: F.heading,
+    fontSize: 22,
+    color: SL.text,
+    letterSpacing: 2,
     textTransform: 'uppercase',
   },
   coachOptionCount: {
     fontFamily: F.bodyMed,
-    fontSize: 11,
-    color: C.textMuted,
-    letterSpacing: 1,
+    fontSize: 16,
+    color: SL.muted,
+    letterSpacing: 1.5,
   },
   modalCancelBtn: {
-    marginTop: 4,
-    paddingVertical: 12,
+    marginTop: 8,
+    paddingVertical: 18,
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: SL.border,
+    borderRadius: 4,
+    backgroundColor: SL.panelAlt,
   },
   modalCancelText: {
-    fontFamily: F.bodyMed,
-    fontSize: 12,
-    color: C.textMuted,
-    letterSpacing: 2,
+    fontFamily: F.heading,
+    fontSize: 18,
+    color: SL.muted,
+    letterSpacing: 3,
     textTransform: 'uppercase',
   },
 });

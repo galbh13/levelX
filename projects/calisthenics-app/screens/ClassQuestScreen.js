@@ -5,6 +5,7 @@ import {
   ActivityIndicator, Modal,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { computeLvlFromData } from '../lib/computeLvl';
 import { F } from '../constants/fonts';
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
@@ -45,7 +46,7 @@ export default function ClassQuestScreen({ route, navigation }) {
       const [profileRes, classesRes] = await Promise.all([
         supabase
           .from('profiles')
-          .select('class_id, current_lvl, total_exp, prestige_count')
+          .select('class_id, total_exp, prestige_count')
           .eq('id', student.id)
           .single(),
         supabase
@@ -118,18 +119,14 @@ export default function ClassQuestScreen({ route, navigation }) {
       const { error: updErr } = await supabase
         .from('profiles')
         .update({
-          current_lvl:    0,
           prestige_count: (profile?.prestige_count ?? 0) + 1,
           class_id:       nextClass?.id ?? profile?.class_id,
         })
         .eq('id', student.id);
       if (updErr) throw updErr;
 
-      const { error: delErr } = await supabase
-        .from('student_quest_completions')
-        .delete()
-        .eq('student_id', student.id);
-      if (delErr) throw delErr;
+      // Quest completions are intentionally preserved across prestige so that
+      // computed per-class LVL auto-restores if the player ever returns.
 
       setLoading(true);
       fetchData();
@@ -148,7 +145,7 @@ export default function ClassQuestScreen({ route, navigation }) {
     );
   }
 
-  const lvl      = profile?.current_lvl    ?? 0;
+  const lvl      = computeLvlFromData(quests, completedIds);
   const exp      = profile?.total_exp      ?? 0;
   const prestige = profile?.prestige_count ?? 0;
 
@@ -290,7 +287,7 @@ export default function ClassQuestScreen({ route, navigation }) {
       {showPrestige && (
         <View style={styles.confirmBar}>
           <Text style={styles.confirmText}>
-            Reset to LVL 0, advance class, clear all completions?
+            Advance to next class? Your quest history will be kept.
           </Text>
           <View style={styles.confirmButtons}>
             <TouchableOpacity

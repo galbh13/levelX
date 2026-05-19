@@ -5,6 +5,7 @@ import {
   ActivityIndicator, RefreshControl,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { computeLvl } from '../lib/computeLvl';
 import { F } from '../constants/fonts';
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
@@ -71,51 +72,6 @@ function isLocked(dateStr) {
   return diffDays >= 7;
 }
 
-function calcStreak(allOverrides) {
-  if (!allOverrides || allOverrides.length === 0) return 0;
-
-  const dateMap = {};
-  for (const o of allOverrides) {
-    if (!dateMap[o.specific_date]) {
-      dateMap[o.specific_date] = { total: 0, completed: 0 };
-    }
-    dateMap[o.specific_date].total += 1;
-    if (o.completed) dateMap[o.specific_date].completed += 1;
-  }
-
-  const completedDays = new Set(
-    Object.entries(dateMap)
-      .filter(([, v]) => v.completed > 0)
-      .map(([date]) => date)
-  );
-
-  console.log('[calcStreak] dateMap:', dateMap);
-  console.log('[calcStreak] completedDays:', [...completedDays]);
-
-  let streak = 0;
-  const cursor = new Date();
-
-  const todayStr = toDateStr(cursor);
-  if (!completedDays.has(todayStr)) {
-    cursor.setDate(cursor.getDate() - 1);
-  }
-
-  while (true) {
-    const dateStr = toDateStr(cursor);
-    if (completedDays.has(dateStr)) {
-      streak++;
-      cursor.setDate(cursor.getDate() - 1);
-    } else if (dateMap[dateStr]) {
-      break;
-    } else {
-      cursor.setDate(cursor.getDate() - 1);
-      if (Math.floor((new Date() - cursor) / 86400000) > 365) break;
-    }
-  }
-
-  return streak;
-}
-
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function WorkoutsScreen({ navigation }) {
@@ -126,9 +82,9 @@ export default function WorkoutsScreen({ navigation }) {
   const [latestCheckup,         setLatestCheckup]         = useState(null);
   const [coachResponseCheckup,  setCoachResponseCheckup]  = useState(null);
   const [coachResponseIsRead,   setCoachResponseIsRead]   = useState(true);
+  const [lvl,                   setLvl]                   = useState(0);
   const [expTotal,              setExpTotal]              = useState(0);
-  const [winStreak,             setWinStreak]             = useState(0);
-  const [allOverrides,          setAllOverrides]          = useState([]);
+  const [guidingPhrase,         setGuidingPhrase]         = useState(null);
   const [loading,               setLoading]               = useState(true);
   const [refreshing,            setRefreshing]            = useState(false);
 
@@ -148,10 +104,10 @@ export default function WorkoutsScreen({ navigation }) {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
 
-      const [profileRes, overridesRes, checkupRes, coachResponseRes, expRes, allOverridesRes] = await Promise.all([
+      const [profileRes, overridesRes, checkupRes, coachResponseRes, expRes, dqExpRes] = await Promise.all([
         supabase
           .from('profiles')
-          .select('full_name, current_lvl, class_id')
+          .select('full_name, class_id, guiding_phrase')
           .eq('id', user.id)
           .single(),
 
@@ -184,20 +140,27 @@ export default function WorkoutsScreen({ navigation }) {
           .eq('completed', true),
 
         supabase
-          .from('workout_override_workouts')
-          .select('id, specific_date, completed')
+          .from('daily_quest_completions')
+          .select('*', { count: 'exact', head: true })
           .eq('student_id', user.id),
       ]);
 
       if (profileRes.data) {
         setProfile(profileRes.data);
+        setGuidingPhrase(profileRes.data.guiding_phrase ?? null);
         if (profileRes.data.class_id) {
-          const { data: classData } = await supabase
-            .from('classes')
-            .select('name')
-            .eq('id', profileRes.data.class_id)
-            .maybeSingle();
+          const [{ data: classData }, lvlVal] = await Promise.all([
+            supabase
+              .from('classes')
+              .select('name')
+              .eq('id', profileRes.data.class_id)
+              .maybeSingle(),
+            computeLvl(user.id, profileRes.data.class_id),
+          ]);
           setClassName(classData?.name ?? null);
+          setLvl(lvlVal ?? 0);
+        } else {
+          setLvl(0);
         }
       }
       const overrides = overridesRes.data ?? [];
@@ -210,10 +173,7 @@ export default function WorkoutsScreen({ navigation }) {
       setLatestCheckup(checkupRes.data ?? null);
       setCoachResponseCheckup(coachResponseRes.data ?? null);
       setCoachResponseIsRead(coachResponseRes.data?.response_is_read ?? true);
-      const freshAllOverrides = allOverridesRes.data ?? [];
-      setExpTotal(expRes.count ?? 0);
-      setWinStreak(calcStreak(freshAllOverrides));
-      setAllOverrides(freshAllOverrides);
+      setExpTotal((expRes.count ?? 0) * 5 + (dqExpRes.count ?? 0));
     } catch (e) {
       console.error('[WorkoutsScreen] fetchData:', e);
     }
@@ -273,12 +233,7 @@ export default function WorkoutsScreen({ navigation }) {
         setOverrideWorkouts(prev =>
           prev.map(o => o.id === workout.overrideId ? { ...o, completed: true } : o)
         );
-        const updatedOverrides = allOverrides.map(o =>
-          o.id === workout.overrideId ? { ...o, completed: true } : o
-        );
-        setAllOverrides(updatedOverrides);
-        setExpTotal(prev => prev + 1);
-        setWinStreak(calcStreak(updatedOverrides));
+        setExpTotal(prev => prev + 5);
       } else {
         alert('Could not mark as done: ' + error.message);
       }
@@ -299,12 +254,7 @@ export default function WorkoutsScreen({ navigation }) {
         setOverrideWorkouts(prev =>
           prev.map(o => o.id === workout.overrideId ? { ...o, completed: false } : o)
         );
-        const updatedOverrides = allOverrides.map(o =>
-          o.id === workout.overrideId ? { ...o, completed: false } : o
-        );
-        setAllOverrides(updatedOverrides);
-        setExpTotal(prev => Math.max(0, prev - 1));
-        setWinStreak(calcStreak(updatedOverrides));
+        setExpTotal(prev => Math.max(0, prev - 5));
       } else {
         alert('Could not undo: ' + error.message);
       }
@@ -360,7 +310,7 @@ export default function WorkoutsScreen({ navigation }) {
         <Text style={styles.studentName}>
           {profile?.full_name?.toUpperCase() ?? '—'}
         </Text>
-        <Text style={styles.level}>LVL {profile?.current_lvl ?? '—'}</Text>
+        <Text style={styles.level}>LVL {lvl ?? '—'}</Text>
         {className && (
           <Text style={styles.className}>{className.toUpperCase()}</Text>
         )}
@@ -497,8 +447,17 @@ export default function WorkoutsScreen({ navigation }) {
         </View>
 
         <View style={styles.statCard}>
-          <Text style={styles.statValue}>{winStreak}</Text>
-          <Text style={styles.statLabel}>WIN STREAK</Text>
+          <Text
+            style={[
+              styles.statValue,
+              { fontSize: 14 },
+              !guidingPhrase && { color: SL.muted },
+            ]}
+            numberOfLines={3}
+          >
+            {guidingPhrase ? `"${guidingPhrase}"` : '—'}
+          </Text>
+          <Text style={styles.statLabel}>GUIDING PHRASE</Text>
         </View>
       </View>
 

@@ -25,6 +25,14 @@
 - Fonts: import from `constants/fonts.js` as `F` — never hardcode font names
 - Theme: dark navy/blue + ice-glow accents (Solo Leveling-inspired)
 
+## Folder Structure
+- `screens/` — all screen components
+- `constants/` — colors.js, fonts.js (design tokens)
+- `context/` — React contexts
+- `lib/` — utilities
+- `supabase/` — Supabase client and queries
+- `assets/` — images, icons
+
 ## Working Rules
 1. Before changing anything, read the relevant files and summarize what you 
    found. Wait for confirmation.
@@ -35,3 +43,9 @@
 5. Never modify the Supabase schema without showing the SQL first.
 6. Respect role permissions in every feature.
 7. After changes, list every file touched and what changed in each.
+
+## Database Documentation Rule
+Whenever you modify the Supabase schema (add/remove/rename a table, column,
+index, or policy), you MUST update DATABASE.md in the project root to reflect
+the change. Do this in the same task, not as a separate step. Never finish a
+schema-related task without confirming DATABASE.md is up to date.

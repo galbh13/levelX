@@ -39,6 +39,7 @@ import CoachResponseScreen     from './screens/CoachResponseScreen';
 import ClassQuestScreen        from './screens/ClassQuestScreen';
 import CoachQuestTreeScreen    from './screens/CoachQuestTreeScreen';
 import CoachSideQuestScreen    from './screens/CoachSideQuestScreen';
+import CoachDailyQuestScreen   from './screens/CoachDailyQuestScreen';
 import QuestTreeScreen         from './screens/QuestTreeScreen';
 import { CoachProvider }       from './context/CoachContext';
 
@@ -97,6 +98,7 @@ function CoachNavigator() {
         <CoachStack.Screen name="ClassQuest"      component={ClassQuestScreen} />
         <CoachStack.Screen name="CoachQuestTree"  component={CoachQuestTreeScreen} />
         <CoachStack.Screen name="CoachSideQuests" component={CoachSideQuestScreen} />
+        <CoachStack.Screen name="CoachDailyQuest" component={CoachDailyQuestScreen} />
       </CoachStack.Navigator>
     </CoachProvider>
   );

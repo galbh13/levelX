@@ -24,15 +24,14 @@ const SL = {
 // ─── Screen ───────────────────────────────────────────────────────────────────
 //
 // Flat list of side quests for `classId`. Coach taps a card → confirmation
-// bar → DB write (insert/delete completion + update profiles.current_lvl,
-// clamped at 0). Same UX as the old ClassQuestScreen confirmation flow.
+// bar → DB write (insert/delete in student_quest_completions). LVL is no
+// longer stored on profiles; it is computed per-class from completions.
 
 export default function CoachSideQuestScreen({ route, navigation }) {
   const { student, classId } = route.params;
 
   const [quests,        setQuests]        = useState([]);
   const [completedIds,  setCompletedIds]  = useState(new Set());
-  const [currentLvl,    setCurrentLvl]    = useState(0);
   const [loading,       setLoading]       = useState(true);
   const [pendingQuest,  setPendingQuest]  = useState(null);
   const [toggling,      setToggling]      = useState(false);
@@ -41,7 +40,7 @@ export default function CoachSideQuestScreen({ route, navigation }) {
 
   const fetchData = useCallback(async () => {
     try {
-      const [qRes, cRes, pRes] = await Promise.all([
+      const [qRes, cRes] = await Promise.all([
         supabase
           .from('class_quests')
           .select('*')
@@ -53,16 +52,10 @@ export default function CoachSideQuestScreen({ route, navigation }) {
           .from('student_quest_completions')
           .select('quest_id')
           .eq('student_id', student.id),
-        supabase
-          .from('profiles')
-          .select('current_lvl')
-          .eq('id', student.id)
-          .single(),
       ]);
 
       setQuests(qRes.data ?? []);
       setCompletedIds(new Set((cRes.data ?? []).map(c => c.quest_id)));
-      setCurrentLvl(pRes.data?.current_lvl ?? 0);
     } catch (e) {
       console.error('[CoachSideQuestScreen]', e);
     }
@@ -88,30 +81,14 @@ export default function CoachSideQuestScreen({ route, navigation }) {
           .eq('quest_id', quest.id);
         if (delErr) throw delErr;
 
-        const newLvl = Math.max(0, (currentLvl ?? 0) - (quest.lvl_reward ?? 0));
-        const { error: updErr } = await supabase
-          .from('profiles')
-          .update({ current_lvl: newLvl })
-          .eq('id', student.id);
-        if (updErr) throw updErr;
-
         setCompletedIds(prev => { const s = new Set(prev); s.delete(quest.id); return s; });
-        setCurrentLvl(newLvl);
       } else {
         const { error: insErr } = await supabase
           .from('student_quest_completions')
           .insert({ student_id: student.id, quest_id: quest.id });
         if (insErr) throw insErr;
 
-        const newLvl = (currentLvl ?? 0) + (quest.lvl_reward ?? 0);
-        const { error: updErr } = await supabase
-          .from('profiles')
-          .update({ current_lvl: newLvl })
-          .eq('id', student.id);
-        if (updErr) throw updErr;
-
         setCompletedIds(prev => new Set([...prev, quest.id]));
-        setCurrentLvl(newLvl);
       }
     } catch (e) {
       console.error('[CoachSideQuestScreen] toggleQuest:', e);

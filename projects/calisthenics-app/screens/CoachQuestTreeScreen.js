@@ -457,15 +457,14 @@ function computeLayout(quests) {
 //   • Reads the target student from route params (not auth.getUser()).
 //   • Tap a node → opens a confirmation bar at the bottom.
 //   • Locked nodes are disabled — coach must respect prerequisites.
-//   • Confirm writes / deletes student_quest_completions AND updates
-//     profiles.current_lvl for the student (clamped at 0).
+//   • Confirm writes / deletes a row in student_quest_completions. LVL is no
+//     longer stored on profiles; it is computed per-class from completions.
 
 export default function CoachQuestTreeScreen({ route, navigation }) {
   const { student, classId, chain, questType } = route.params;
 
   const [quests,        setQuests]        = useState([]);
   const [completions,   setCompletions]   = useState(new Set());
-  const [currentLvl,    setCurrentLvl]    = useState(0);
   const [loading,       setLoading]       = useState(true);
   const [pendingQuest,  setPendingQuest]  = useState(null);
   const [toggling,      setToggling]      = useState(false);
@@ -474,7 +473,7 @@ export default function CoachQuestTreeScreen({ route, navigation }) {
 
   const fetchData = useCallback(async () => {
     try {
-      const [qRes, cRes, pRes] = await Promise.all([
+      const [qRes, cRes] = await Promise.all([
         supabase
           .from('class_quests')
           .select('*')
@@ -486,16 +485,10 @@ export default function CoachQuestTreeScreen({ route, navigation }) {
           .from('student_quest_completions')
           .select('quest_id')
           .eq('student_id', student.id),
-        supabase
-          .from('profiles')
-          .select('current_lvl')
-          .eq('id', student.id)
-          .single(),
       ]);
 
       setQuests(qRes.data ?? []);
       setCompletions(new Set((cRes.data ?? []).map(c => c.quest_id)));
-      setCurrentLvl(pRes.data?.current_lvl ?? 0);
     } catch (e) {
       console.error('[CoachQuestTreeScreen]', e);
     }
@@ -539,30 +532,14 @@ export default function CoachQuestTreeScreen({ route, navigation }) {
           .eq('quest_id', quest.id);
         if (delErr) throw delErr;
 
-        const newLvl = Math.max(0, (currentLvl ?? 0) - (quest.lvl_reward ?? 0));
-        const { error: updErr } = await supabase
-          .from('profiles')
-          .update({ current_lvl: newLvl })
-          .eq('id', student.id);
-        if (updErr) throw updErr;
-
         setCompletions(prev => { const s = new Set(prev); s.delete(quest.id); return s; });
-        setCurrentLvl(newLvl);
       } else {
         const { error: insErr } = await supabase
           .from('student_quest_completions')
           .insert({ student_id: student.id, quest_id: quest.id });
         if (insErr) throw insErr;
 
-        const newLvl = (currentLvl ?? 0) + (quest.lvl_reward ?? 0);
-        const { error: updErr } = await supabase
-          .from('profiles')
-          .update({ current_lvl: newLvl })
-          .eq('id', student.id);
-        if (updErr) throw updErr;
-
         setCompletions(prev => new Set([...prev, quest.id]));
-        setCurrentLvl(newLvl);
       }
     } catch (e) {
       console.error('[CoachQuestTreeScreen] toggleQuest:', e);

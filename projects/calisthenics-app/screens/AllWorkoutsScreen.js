@@ -65,8 +65,6 @@ export default function AllWorkoutsScreen({ navigation }) {
         .delete()
         .eq('id', workoutId);
       if (error) { alert('Error: ' + error.message); return; }
-      await supabase.from('weekly_templates').delete().eq('workout_id', workoutId);
-      await supabase.from('workout_overrides').delete().eq('workout_id', workoutId);
       setWorkouts(prev => prev.filter(w => w.id !== workoutId));
     }
   };

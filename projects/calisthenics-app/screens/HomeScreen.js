@@ -5,6 +5,8 @@ import {
 } from 'react-native';
 import { F } from '../constants/fonts';
 import { supabase } from '../lib/supabase';
+import { computeLvl } from '../lib/computeLvl';
+import { israelToday } from '../lib/israelDate';
 
 const SL = {
   bg:     '#050912',
@@ -23,9 +25,13 @@ export default function HomeScreen({ navigation }) {
   const [profile,        setProfile]        = useState(null);
   const [className,      setClassName]      = useState(null);
   const [workouts,       setWorkouts]       = useState([]);
+  const [lvl,            setLvl]            = useState(0);
   const [expTotal,       setExpTotal]       = useState(0);
   const [pendingCheckup,      setPendingCheckup]      = useState(null);
   const [coachResponseCheckup, setCoachResponseCheckup] = useState(null);
+  const [dailyQuests,    setDailyQuests]    = useState([]);
+  const [doneTodayIds,   setDoneTodayIds]   = useState(new Set());
+  const [dqLifetime,     setDqLifetime]     = useState(0);
   const [loading,        setLoading]        = useState(true);
 
   const fetchData = useCallback(async () => {
@@ -36,14 +42,15 @@ export default function HomeScreen({ navigation }) {
 
       const { data: profileData } = await supabase
         .from('profiles')
-        .select('full_name, current_lvl, total_exp, prestige_count, class_id')
+        .select('full_name, total_exp, prestige_count, class_id')
         .eq('id', user.id)
         .single();
 
       if (!profileData) return;
       setProfile(profileData);
 
-      const [classRes, overridesRes, expRes, checkupRes, coachResponseRes] = await Promise.all([
+      const israelDay = israelToday();
+      const [classRes, overridesRes, expRes, checkupRes, coachResponseRes, lvlVal, dqRes, dqDoneRes, dqLifetimeRes] = await Promise.all([
         profileData.class_id
           ? supabase.from('classes').select('name').eq('id', profileData.class_id).single()
           : Promise.resolve({ data: null }),
@@ -73,10 +80,31 @@ export default function HomeScreen({ navigation }) {
           .order('responded_at', { ascending: false })
           .limit(1)
           .maybeSingle(),
+        computeLvl(user.id, profileData.class_id),
+        supabase
+          .from('daily_quests')
+          .select('id, title')
+          .eq('student_id', user.id)
+          .eq('active', true)
+          .order('created_at', { ascending: true }),
+        supabase
+          .from('daily_quest_completions')
+          .select('daily_quest_id')
+          .eq('student_id', user.id)
+          .eq('completion_date', israelDay),
+        supabase
+          .from('daily_quest_completions')
+          .select('*', { count: 'exact', head: true })
+          .eq('student_id', user.id),
       ]);
 
       setClassName(classRes.data?.name ?? null);
-      setExpTotal(expRes.count ?? 0);
+      setLvl(lvlVal ?? 0);
+      const dqLifetimeCount = dqLifetimeRes.count ?? 0;
+      setDqLifetime(dqLifetimeCount);
+      setExpTotal((expRes.count ?? 0) * 5 + dqLifetimeCount);
+      setDailyQuests(dqRes.data ?? []);
+      setDoneTodayIds(new Set((dqDoneRes.data ?? []).map(r => r.daily_quest_id)));
       setPendingCheckup(checkupRes.data ?? null);
       setCoachResponseCheckup(
         coachResponseRes.data?.response_is_read === false ? coachResponseRes.data : null
@@ -107,8 +135,41 @@ export default function HomeScreen({ navigation }) {
     fetchData();
   }, [fetchData]));
 
+  async function toggleDailyQuest(quest) {
+    const isDone = doneTodayIds.has(quest.id);
+    const today = israelToday();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    // Optimistic update
+    const nextDone = new Set(doneTodayIds);
+    if (isDone) nextDone.delete(quest.id); else nextDone.add(quest.id);
+    setDoneTodayIds(nextDone);
+    const nextLifetime = isDone ? Math.max(0, dqLifetime - 1) : dqLifetime + 1;
+    setDqLifetime(nextLifetime);
+    setExpTotal(prev => Math.max(0, prev + (isDone ? -1 : 1)));
+
+    if (isDone) {
+      const { error } = await supabase
+        .from('daily_quest_completions')
+        .delete()
+        .eq('daily_quest_id', quest.id)
+        .eq('student_id', user.id)
+        .eq('completion_date', today);
+      if (error) { console.error('[HomeScreen] uncheck daily quest:', error); await fetchData(); }
+    } else {
+      const { error } = await supabase
+        .from('daily_quest_completions')
+        .insert({
+          daily_quest_id: quest.id,
+          student_id: user.id,
+          completion_date: today,
+        });
+      if (error) { console.error('[HomeScreen] check daily quest:', error); await fetchData(); }
+    }
+  }
+
   const allDone  = workouts.length > 0 && workouts.every(w => w.completed);
-  const lvl      = profile?.current_lvl   ?? 0;
   const prestige = profile?.prestige_count ?? 0;
   const lvlPct   = Math.min(lvl / 100, 1);
 
@@ -233,6 +294,32 @@ export default function HomeScreen({ navigation }) {
                   <Text style={styles.allDoneText}>⚔ ALL MISSIONS COMPLETE</Text>
                 </View>
               )}
+            </>
+          )}
+
+          {/* ── Daily Quests ── */}
+          {dailyQuests.length > 0 && (
+            <>
+              <Text style={[styles.sectionLabel, { marginTop: 24 }]}>DAILY QUESTS</Text>
+              {dailyQuests.map(q => {
+                const done = doneTodayIds.has(q.id);
+                return (
+                  <TouchableOpacity
+                    key={q.id}
+                    style={[styles.dqCard, done && styles.dqCardDone]}
+                    onPress={() => toggleDailyQuest(q)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[styles.dqCheckbox, done && styles.dqCheckboxDone]}>
+                      {done && <Text style={styles.dqCheckMark}>✓</Text>}
+                    </View>
+                    <Text style={[styles.dqTitle, done && styles.dqTitleDone]}>
+                      {q.title}
+                    </Text>
+                    <Text style={[styles.dqExp, done && { color: SL.green }]}>+1 EXP</Text>
+                  </TouchableOpacity>
+                );
+              })}
             </>
           )}
         </>
@@ -508,6 +595,59 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: SL.muted,
     letterSpacing: 2,
+  },
+
+  // ── Daily Quests ──────────────────────────────────────────────────────────
+
+  dqCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderRadius: 4,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 8,
+  },
+  dqCardDone: {
+    borderColor: SL.green,
+  },
+  dqCheckbox: {
+    width: 22,
+    height: 22,
+    borderWidth: 1.5,
+    borderColor: SL.muted,
+    borderRadius: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  dqCheckboxDone: {
+    backgroundColor: SL.green,
+    borderColor: SL.green,
+  },
+  dqCheckMark: {
+    fontFamily: F.heading,
+    color: SL.bg,
+    fontSize: 14,
+  },
+  dqTitle: {
+    flex: 1,
+    fontFamily: F.bodyMed,
+    fontSize: 16,
+    color: SL.text,
+    letterSpacing: 0.5,
+  },
+  dqTitleDone: {
+    color: SL.muted,
+    textDecorationLine: 'line-through',
+  },
+  dqExp: {
+    fontFamily: F.bodyMed,
+    fontSize: 12,
+    color: SL.muted,
+    letterSpacing: 1.5,
   },
 
   allDoneBanner: {
