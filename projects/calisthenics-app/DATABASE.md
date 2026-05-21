@@ -129,9 +129,34 @@ Every quest node in the quest tree (both main and side quests) for every class.
 - Convergence nodes (`is_convergence = true`) require ALL prerequisite branches to be done.
 - Class I quests use `branch = 'main'` and linear sequential prerequisites.
 - Class II quests use multi-branch trees with cross-branch convergence nodes.
+- Class III (`order_index = 2`) introduces a **tier** concept implemented
+  **purely via `prerequisites` — no schema change, no tier column**. Each chain
+  (`front_lever`, `planche`) has Tier 1 and Tier 2 branches that share branch
+  names (e.g. `hold`, `raises`, `negative`). `order_index` is **continuous
+  within a branch across tiers** (Tier 1 = 0..N, Tier 2 = N+1..M). The **first
+  node of every Tier 2 branch is a convergence node** (`is_convergence = true`)
+  whose `prerequisites` are the **last nodes of every Tier 1 branch in the same
+  chain**. Node names collide across chains, so all prereq UPDATEs are scoped by
+  `chain` (see `supabase/migrations/20260519_class3_main_quests.sql`).
+- Class III **side quests** (`quest_type='side'`) also use tiers, gated
+  **cross-chain**: Tier 1 side chains are `vsit` + `hs_beginners`; Tier 2 side
+  chains are `isit`, `back_lever`, `hspu_90`. Side quests use **named branches**
+  (unlike Class II side quests, which had `branch = NULL`). The first node of
+  every Tier 2 side branch is a convergence node whose `prerequisites` = the last
+  (max `order_index`) node of every branch of **both** Tier 1 side chains — so a
+  Tier 2 side quest unlocks only after ALL Tier 1 side quests are done. No schema
+  change; see `supabase/migrations/20260519_class3_side_quests.sql`.
+
+**UI convention (all classes):** both main AND side quests render as one chain
+card per distinct `chain`, on SkillsScreen (player) and ClassQuestScreen (coach).
+Tapping a card opens the tree screen (`QuestTree` / `CoachQuestTree`) with
+`{ chain, questType }`; the tree fetch filters by `class_id` + `chain` +
+`quest_type`. The coach toggles completion inside the tree (same generic
+`student_quest_completions` write for main and side). The old flat-list
+`CoachSideQuestScreen` is legacy/unwired (kept as a fallback).
 
 **Used by:** CoachQuestTreeScreen, QuestTreeScreen (player view), ClassQuestScreen,
-CoachSideQuestScreen, SkillsScreen.
+SkillsScreen. (CoachSideQuestScreen is legacy — no longer wired into navigation.)
 
 ---
 

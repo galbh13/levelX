@@ -152,8 +152,7 @@ export default function ClassQuestScreen({ route, navigation }) {
   const mainQuests = quests.filter(q => q.quest_type === 'main');
   const sideQuests = quests.filter(q => q.quest_type === 'side');
   const chains     = [...new Set(mainQuests.map(q => q.chain).filter(Boolean))];
-
-  const sideDone   = sideQuests.filter(q => completedIds.has(q.id)).length;
+  const sideChains = [...new Set(sideQuests.map(q => q.chain).filter(Boolean))];
 
   const confirmBarVisible = showPrestige;
 
@@ -251,28 +250,40 @@ export default function ClassQuestScreen({ route, navigation }) {
           </>
         )}
 
-        {/* ── Side Quests — single card → opens CoachSideQuests ── */}
-        {sideQuests.length > 0 && (
+        {/* ── Side Quest chains — one card per chain → opens CoachQuestTree ── */}
+        {sideChains.length > 0 && (
           <>
             <Text style={[styles.sectionLabel, { marginTop: 24 }]}>SIDE QUESTS</Text>
-            <TouchableOpacity
-              style={styles.chainCard}
-              activeOpacity={0.8}
-              onPress={() =>
-                navigation.navigate('CoachSideQuests', {
-                  student,
-                  classId: profile.class_id,
-                })
-              }
-            >
-              <View style={{ flex: 1 }}>
-                <Text style={styles.chainCardName}>SIDE QUESTS</Text>
-                <Text style={styles.chainCardMeta}>
-                  {sideDone}/{sideQuests.length} completed
-                </Text>
-              </View>
-              <Text style={styles.chevron}>›</Text>
-            </TouchableOpacity>
+            {sideChains.map(chain => {
+              const chainQuests = sideQuests.filter(q => q.chain === chain);
+              const done        = chainQuests.filter(q => completedIds.has(q.id));
+              const earnedLvl   = done.reduce((s, q) => s + (q.lvl_reward ?? 0), 0);
+              return (
+                <TouchableOpacity
+                  key={chain}
+                  style={styles.chainCard}
+                  activeOpacity={0.8}
+                  onPress={() =>
+                    navigation.navigate('CoachQuestTree', {
+                      student,
+                      classId:   profile.class_id,
+                      chain,
+                      questType: 'side',
+                    })
+                  }
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.chainCardName}>
+                      {chain.replace(/_/g, ' ').toUpperCase()}
+                    </Text>
+                    <Text style={styles.chainCardMeta}>
+                      {done.length}/{chainQuests.length} · +{earnedLvl} LVL earned
+                    </Text>
+                  </View>
+                  <Text style={styles.chevron}>›</Text>
+                </TouchableOpacity>
+              );
+            })}
           </>
         )}
 

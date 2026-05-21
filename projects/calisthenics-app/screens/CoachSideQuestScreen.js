@@ -1,3 +1,4 @@
+// LEGACY: replaced by chain-card side-quest UI on 2026-05-20. Kept as fallback. Safe to delete once new UI is verified.
 import React, { useCallback, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {

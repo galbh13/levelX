@@ -40,6 +40,43 @@ const BRANCH_ORDER = [
   'mobility', 'active_hold', 'freestanding', 'band', 'hs_hold',
 ];
 
+// Class III (order_index 2) is the first class to use a TIER concept. Tiers are
+// detected structurally within a tier-enabled class — but the class gate below
+// prevents Class I/II (whose multi-branch convergences look identical) from
+// rendering a divider. Future tiered classes (IV+) clear this threshold too.
+const TIER_MIN_CLASS_ORDER = 2;
+
+// Tier 2 = every tier-crossing convergence node (is_convergence with prereqs
+// spanning 2+ branches) plus all of its descendants. Returns a Set of quest ids.
+function computeTier2Set(quests) {
+  const idMap = new Map(quests.map(q => [q.id, q]));
+
+  const seeds = quests.filter(q => {
+    if (q.is_convergence !== true) return false;
+    const prereqs = (q.prerequisites ?? []).filter(p => idMap.has(p));
+    const parentBranches = new Set(prereqs.map(p => idMap.get(p).branch));
+    return parentBranches.size >= 2;
+  });
+
+  const childrenOf = new Map();
+  quests.forEach(q => {
+    (q.prerequisites ?? []).forEach(pid => {
+      if (!childrenOf.has(pid)) childrenOf.set(pid, []);
+      childrenOf.get(pid).push(q.id);
+    });
+  });
+
+  const tier2 = new Set(seeds.map(s => s.id));
+  const stack = [...tier2];
+  while (stack.length) {
+    const id = stack.pop();
+    (childrenOf.get(id) ?? []).forEach(cid => {
+      if (!tier2.has(cid)) { tier2.add(cid); stack.push(cid); }
+    });
+  }
+  return tier2;
+}
+
 // Handstand-specific layout constants — narrower columns, fixed split offset
 const HS_NODE_W       = 320;
 const HS_COL_GAP      = 40;
@@ -466,6 +503,7 @@ export default function CoachQuestTreeScreen({ route, navigation }) {
   const [quests,        setQuests]        = useState([]);
   const [completions,   setCompletions]   = useState(new Set());
   const [loading,       setLoading]       = useState(true);
+  const [hasTiers,      setHasTiers]      = useState(false);
   const [pendingQuest,  setPendingQuest]  = useState(null);
   const [toggling,      setToggling]      = useState(false);
 
@@ -473,27 +511,34 @@ export default function CoachQuestTreeScreen({ route, navigation }) {
 
   const fetchData = useCallback(async () => {
     try {
-      const [qRes, cRes] = await Promise.all([
+      const [qRes, cRes, clsRes] = await Promise.all([
         supabase
           .from('class_quests')
           .select('*')
           .eq('class_id', classId)
           .eq('chain', chain)
+          .eq('quest_type', questType)
           .order('branch')
           .order('order_index'),
         supabase
           .from('student_quest_completions')
           .select('quest_id')
           .eq('student_id', student.id),
+        supabase
+          .from('classes')
+          .select('order_index')
+          .eq('id', classId)
+          .single(),
       ]);
 
       setQuests(qRes.data ?? []);
       setCompletions(new Set((cRes.data ?? []).map(c => c.quest_id)));
+      setHasTiers((clsRes.data?.order_index ?? 0) >= TIER_MIN_CLASS_ORDER);
     } catch (e) {
       console.error('[CoachQuestTreeScreen]', e);
     }
     setLoading(false);
-  }, [classId, chain, student.id]);
+  }, [classId, chain, student.id, questType]);
 
   useFocusEffect(useCallback(() => {
     setLoading(true);
@@ -509,6 +554,28 @@ export default function CoachQuestTreeScreen({ route, navigation }) {
         : computeLayout(quests),
       [quests, chain],
     );
+
+  // ── Tier divider ──────────────────────────────────────────────────────────
+  // Decorative "TIER II" rule placed in the existing inter-rank gap between the
+  // last Tier 1 row and the first Tier 2 row. Only for tier-enabled classes.
+
+  const tierDividerY = useMemo(() => {
+    if (!hasTiers) return null;
+    const tier2 = computeTier2Set(quests);
+    if (tier2.size === 0) return null;
+
+    let lastT1Bottom = -Infinity;
+    let firstT2Top   =  Infinity;
+    quests.forEach(q => {
+      const p = positions[q.id];
+      if (!p) return;
+      if (tier2.has(q.id)) firstT2Top   = Math.min(firstT2Top, p.y);
+      else                 lastT1Bottom = Math.max(lastT1Bottom, p.y + p.h);
+    });
+    if (lastT1Bottom === -Infinity || firstT2Top === Infinity) return null;
+
+    return lastT1Bottom + 14; // sits just under Tier 1, above any boundary label
+  }, [hasTiers, quests, positions]);
 
   // ── Node state ────────────────────────────────────────────────────────────
 
@@ -731,6 +798,18 @@ export default function CoachQuestTreeScreen({ route, navigation }) {
               );
             })}
 
+            {/* Tier divider — between Tier 1 and Tier 2 (tiered classes only) */}
+            {tierDividerY != null && (
+              <View
+                style={[styles.tierDivider, { top: tierDividerY - 14, width }]}
+                pointerEvents="none"
+              >
+                <View style={styles.tierLine} />
+                <Text style={styles.tierLabel}>TIER II</Text>
+                <View style={styles.tierLine} />
+              </View>
+            )}
+
             {/* Nodes */}
             {quests.map(q => {
               const p = positions[q.id];
@@ -850,6 +929,31 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     textAlign: 'center',
     opacity: 0.95,
+  },
+
+  // Tier divider — full-width rule with centered label
+  tierDivider: {
+    position: 'absolute',
+    left: 0,
+    height: 28,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    paddingHorizontal: 24,
+  },
+  tierLine: {
+    flex: 1,
+    height: 2,
+    backgroundColor: SL.accent,
+    opacity: 0.5,
+  },
+  tierLabel: {
+    fontFamily: F.heading,
+    fontSize: 22,
+    color: SL.accent,
+    letterSpacing: 6,
+    textAlign: 'center',
   },
 
   // Quest cards — fill their absolutely-positioned wrapper so the layout

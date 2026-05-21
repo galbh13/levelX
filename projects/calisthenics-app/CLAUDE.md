@@ -34,18 +34,17 @@
 - `assets/` — images, icons
 
 ## Working Rules
-1. Before changing anything, read the relevant files and summarize what you 
-   found. Wait for confirmation.
-2. Propose a plan in plain English before writing code. Wait for approval.
-3. Never break existing functionality. If a change touches shared code, list 
-   every file that imports it.
-4. Never hardcode colors, fonts, or class counts.
-5. Never modify the Supabase schema without showing the SQL first.
-6. Respect role permissions in every feature.
-7. After changes, list every file touched and what changed in each.
+1. Never hardcode colors, fonts, or class counts.
+2. Respect role permissions in every feature.
+3. After changes, list every file touched and what changed in each.
 
 ## Database Documentation Rule
 Whenever you modify the Supabase schema (add/remove/rename a table, column,
 index, or policy), you MUST update DATABASE.md in the project root to reflect
 the change. Do this in the same task, not as a separate step. Never finish a
 schema-related task without confirming DATABASE.md is up to date.
+
+## CLAUDE.MD Documentation Rule
+Whenever you modify the things worth mentioned and are critical in the CLAUDE.md(Class & Quest System, Checkups, Design System, Folder Structure)
+you MUST update CLAUDE.md in the project root to reflect changes.
+Do this in the same task, not as a separate step.
