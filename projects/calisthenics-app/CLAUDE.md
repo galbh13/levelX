@@ -14,6 +14,14 @@
 - Classes have main quests + side quests → give level-up points (cap 100)
 - At 80 points, player can prestige → advance to next class, points reset to 0
 - Class count is DYNAMIC — currently 2, more coming. Never hardcode the number.
+- TIERS (Class III+): a tier is an intentional MAIN-quest concept. The in-tree
+  "TIER II" divider renders ONLY for main quests; side-quest trees never show it
+  (their multi-branch merges look identical but are NOT tier crossings). Side
+  quests instead express tiers across CHAINS — a chain is Tier 2 when any of its
+  quests has a prerequisite in a different chain; ClassQuestScreen groups the
+  side-quest list into Tier I / Tier II accordingly. No `tier` column exists;
+  tiers are derived structurally from `is_convergence` + cross-branch/cross-chain
+  `prerequisites`.
 
 ## Checkups
 - Weekly (frequency configurable)

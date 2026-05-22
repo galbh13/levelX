@@ -146,6 +146,14 @@ Every quest node in the quest tree (both main and side quests) for every class.
   (max `order_index`) node of every branch of **both** Tier 1 side chains — so a
   Tier 2 side quest unlocks only after ALL Tier 1 side quests are done. No schema
   change; see `supabase/migrations/20260519_class3_side_quests.sql`.
+- Class I **side quests** (`quest_type='side'`) use the same cross-chain tier
+  pattern: Tier 1 side chains are `frog` (branch `main`) + `headstand` (branches
+  `disconnection`, `freestanding`); Tier 2 side chains are `lsit` + `pull_over`
+  (branch `main`). Each Tier 2 chain's first node is a convergence whose
+  `prerequisites` = the last node of every Tier 1 side branch (3 leaves: Frog
+  10 sec, 20 sec Disconnection from Wall, 20 sec Freestanding). All
+  `lvl_reward = 0`. See `supabase/migrations/20260522_class1_side_quests.sql`.
+  (Class I MAIN quests still use the simple linear `branch = 'main'` pattern.)
 
 **UI convention (all classes):** both main AND side quests render as one chain
 card per distinct `chain`, on SkillsScreen (player) and ClassQuestScreen (coach).

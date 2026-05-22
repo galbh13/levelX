@@ -1,8 +1,8 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useState, useEffect, useRef } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, Modal,
+  ActivityIndicator, Modal, Animated, Easing,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { computeLvlFromData } from '../lib/computeLvl';
@@ -21,6 +21,53 @@ const SL = {
   green:  '#4CAF50',
   gold:   '#FFD700',
 };
+
+// ─── Animated tier divider ──────────────────────────────────────────────────
+// Slides + fades in on mount, with a slow looping glow on the rules, so the
+// jump from Tier 1 to Tier 2 side quests reads as a deliberate boundary.
+
+function TierDivider({ label }) {
+  const reveal = useRef(new Animated.Value(0)).current;
+  const glow   = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(reveal, {
+      toValue: 1,
+      duration: 600,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(glow, { toValue: 1, duration: 1400, useNativeDriver: true }),
+        Animated.timing(glow, { toValue: 0, duration: 1400, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [reveal, glow]);
+
+  const ruleOpacity = glow.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.9] });
+
+  return (
+    <Animated.View
+      style={[
+        styles.tierRow,
+        {
+          opacity: reveal,
+          transform: [
+            { translateY: reveal.interpolate({ inputRange: [0, 1], outputRange: [14, 0] }) },
+          ],
+        },
+      ]}
+    >
+      <Animated.View style={[styles.tierRule, { opacity: ruleOpacity }]} />
+      <Text style={styles.tierText}>{label}</Text>
+      <Animated.View style={[styles.tierRule, { opacity: ruleOpacity }]} />
+    </Animated.View>
+  );
+}
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
@@ -154,6 +201,52 @@ export default function ClassQuestScreen({ route, navigation }) {
   const chains     = [...new Set(mainQuests.map(q => q.chain).filter(Boolean))];
   const sideChains = [...new Set(sideQuests.map(q => q.chain).filter(Boolean))];
 
+  // Classify each side-quest chain by tier. A chain is Tier 2 when any of its
+  // quests is gated by a prerequisite that lives in a DIFFERENT chain (the
+  // cross-chain convergence that unlocks Tier 2). Otherwise it's Tier 1.
+  const chainOfQuest = new Map(quests.map(q => [q.id, q.chain]));
+  const isTier2Chain = (chain) =>
+    sideQuests.some(q =>
+      q.chain === chain &&
+      (q.prerequisites ?? []).some(pid => {
+        const pc = chainOfQuest.get(pid);
+        return pc && pc !== chain;
+      }),
+    );
+  const tier1SideChains = sideChains.filter(c => !isTier2Chain(c));
+  const tier2SideChains = sideChains.filter(c =>  isTier2Chain(c));
+
+  const renderSideCard = (chain) => {
+    const chainQuests = sideQuests.filter(q => q.chain === chain);
+    const done        = chainQuests.filter(q => completedIds.has(q.id));
+    const earnedLvl   = done.reduce((s, q) => s + (q.lvl_reward ?? 0), 0);
+    return (
+      <TouchableOpacity
+        key={chain}
+        style={styles.chainCard}
+        activeOpacity={0.8}
+        onPress={() =>
+          navigation.navigate('CoachQuestTree', {
+            student,
+            classId:   profile.class_id,
+            chain,
+            questType: 'side',
+          })
+        }
+      >
+        <View style={{ flex: 1 }}>
+          <Text style={styles.chainCardName}>
+            {chain.replace(/_/g, ' ').toUpperCase()}
+          </Text>
+          <Text style={styles.chainCardMeta}>
+            {done.length}/{chainQuests.length} · +{earnedLvl} LVL earned
+          </Text>
+        </View>
+        <Text style={styles.chevron}>›</Text>
+      </TouchableOpacity>
+    );
+  };
+
   const confirmBarVisible = showPrestige;
 
   return (
@@ -250,40 +343,21 @@ export default function ClassQuestScreen({ route, navigation }) {
           </>
         )}
 
-        {/* ── Side Quest chains — one card per chain → opens CoachQuestTree ── */}
+        {/* ── Side Quest chains — grouped by tier, one card per chain ── */}
         {sideChains.length > 0 && (
           <>
             <Text style={[styles.sectionLabel, { marginTop: 24 }]}>SIDE QUESTS</Text>
-            {sideChains.map(chain => {
-              const chainQuests = sideQuests.filter(q => q.chain === chain);
-              const done        = chainQuests.filter(q => completedIds.has(q.id));
-              const earnedLvl   = done.reduce((s, q) => s + (q.lvl_reward ?? 0), 0);
-              return (
-                <TouchableOpacity
-                  key={chain}
-                  style={styles.chainCard}
-                  activeOpacity={0.8}
-                  onPress={() =>
-                    navigation.navigate('CoachQuestTree', {
-                      student,
-                      classId:   profile.class_id,
-                      chain,
-                      questType: 'side',
-                    })
-                  }
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.chainCardName}>
-                      {chain.replace(/_/g, ' ').toUpperCase()}
-                    </Text>
-                    <Text style={styles.chainCardMeta}>
-                      {done.length}/{chainQuests.length} · +{earnedLvl} LVL earned
-                    </Text>
-                  </View>
-                  <Text style={styles.chevron}>›</Text>
-                </TouchableOpacity>
-              );
-            })}
+
+            {/* When Tier 2 chains exist, label both groups and animate the split. */}
+            {tier2SideChains.length > 0 && <TierDivider label="TIER I" />}
+            {tier1SideChains.map(renderSideCard)}
+
+            {tier2SideChains.length > 0 && (
+              <>
+                <TierDivider label="TIER II" />
+                {tier2SideChains.map(renderSideCard)}
+              </>
+            )}
           </>
         )}
 
@@ -374,25 +448,25 @@ const styles = StyleSheet.create({
   },
   backText: {
     fontFamily: F.bodyMed,
-    fontSize: 20,
+    fontSize: 24,
     color: SL.accent,
     letterSpacing: 2,
-    marginBottom: 16,
+    marginBottom: 18,
   },
   title: {
     fontFamily: F.heading,
-    fontSize: 32,
+    fontSize: 54,
     color: SL.accent,
     letterSpacing: 4,
     textAlign: 'center',
   },
   subtitle: {
     fontFamily: F.bodyMed,
-    fontSize: 16,
+    fontSize: 27,
     color: SL.muted,
     letterSpacing: 2,
     textAlign: 'center',
-    marginTop: 6,
+    marginTop: 8,
   },
   divider: {
     height: 1,
@@ -416,14 +490,14 @@ const styles = StyleSheet.create({
   },
   rowLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 11,
+    fontSize: 18,
     color: SL.muted,
     letterSpacing: 2,
-    marginBottom: 4,
+    marginBottom: 6,
   },
   rowValue: {
     fontFamily: F.heading,
-    fontSize: 22,
+    fontSize: 36,
     color: SL.gold,
     letterSpacing: 2,
   },
@@ -436,7 +510,7 @@ const styles = StyleSheet.create({
   },
   assignBtnText: {
     fontFamily: F.bodyMed,
-    fontSize: 13,
+    fontSize: 21,
     color: SL.accent,
     letterSpacing: 2,
   },
@@ -461,13 +535,13 @@ const styles = StyleSheet.create({
   },
   statValue: {
     fontFamily: F.heading,
-    fontSize: 28,
+    fontSize: 50,
     color: SL.accent,
     letterSpacing: 1,
   },
   statLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 11,
+    fontSize: 19,
     color: SL.muted,
     letterSpacing: 2,
   },
@@ -487,7 +561,7 @@ const styles = StyleSheet.create({
   },
   prestigeBtnText: {
     fontFamily: F.heading,
-    fontSize: 18,
+    fontSize: 28,
     color: SL.gold,
     letterSpacing: 3,
   },
@@ -496,13 +570,37 @@ const styles = StyleSheet.create({
 
   sectionLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 12,
+    fontSize: 22,
     color: SL.muted,
     letterSpacing: 3,
     textTransform: 'uppercase',
-    marginTop: 24,
-    marginBottom: 10,
+    marginTop: 28,
+    marginBottom: 14,
     marginHorizontal: 16,
+  },
+
+  // ── Animated tier divider (side-quest tiers) ─────────────────────────────────
+
+  tierRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 16,
+    marginTop: 8,
+    marginBottom: 16,
+    gap: 16,
+  },
+  tierRule: {
+    flex: 1,
+    height: 4,
+    backgroundColor: SL.accent,
+    borderRadius: 2,
+  },
+  tierText: {
+    fontFamily: F.heading,
+    fontSize: 28,
+    color: SL.accent,
+    letterSpacing: 7,
+    textAlign: 'center',
   },
 
   // ── Chain / side-quest cards ─────────────────────────────────────────────────
@@ -516,25 +614,25 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: SL.border,
     borderRadius: 6,
-    paddingHorizontal: 18,
-    paddingVertical: 18,
+    paddingHorizontal: 20,
+    paddingVertical: 22,
   },
   chainCardName: {
     fontFamily: F.heading,
-    fontSize: 20,
+    fontSize: 36,
     color: SL.text,
     letterSpacing: 3,
-    marginBottom: 4,
+    marginBottom: 8,
   },
   chainCardMeta: {
     fontFamily: F.bodyMed,
-    fontSize: 13,
+    fontSize: 22,
     color: SL.accent,
     letterSpacing: 1,
   },
   chevron: {
     fontFamily: F.heading,
-    fontSize: 28,
+    fontSize: 50,
     color: SL.muted,
     marginLeft: 12,
   },

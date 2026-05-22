@@ -24,20 +24,42 @@ const SL = {
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
-const NODE_W       = 340;
-const NODE_H       = 60;
-const COL_GAP      = 150;
-const RANK_GAP     = 72;
+const NODE_W       = 420;
+const NODE_H       = 82;
+const COL_GAP      = 70;
+const RANK_GAP     = 76;
+const TIER_GAP     = 96;      // extra vertical room reserved around a TIER divider
 const TREE_PAD_H   = 16;
-const TREE_PAD_T   = 24;
-const LABEL_H      = 40;
-const LABEL_OFFSET = 50;
+const TREE_PAD_T   = 28;
+const LABEL_H      = 48;
+const LABEL_OFFSET = 58;
 const BEND_NEAR_CHILD = 12;   // horizontal jog sits this many px above child top
+
+// ─── Per-node height — long names grow taller instead of clipping ─────────────
+// Width is fixed by column geometry, so we can't widen a node without colliding
+// with its neighbours. Instead each node's HEIGHT is sized to how many lines its
+// name needs (up to a cap), so long text wraps fully and short nodes stay compact.
+const NODE_LINE_H    = 30;   // must match styles.questName lineHeight
+const NODE_V_PAD     = 12;   // must match styles.questCard paddingVertical
+const NODE_BADGE_H   = 32;   // reserved row for the DONE / +LVL badge + center gap
+const NODE_MAX_LINES = 3;
+
+function nodeLineCount(name, nodeW) {
+  const usable  = nodeW - 32;                       // minus horizontal padding
+  const perLine = Math.max(8, Math.floor(usable / 16)); // ~16px per bold char @27
+  const len     = (name?.length ?? 0) + 3;          // +3 buffer for the 🔒 prefix
+  return Math.min(NODE_MAX_LINES, Math.max(1, Math.ceil(len / perLine)));
+}
+
+function nodeHeightFor(name, nodeW) {
+  const lines = nodeLineCount(name, nodeW);
+  return Math.max(NODE_H, NODE_V_PAD * 2 + lines * NODE_LINE_H + NODE_BADGE_H);
+}
 
 // Branch column priority — left to right
 const BRANCH_ORDER = [
   'power', 'hspu_prog', 'negative', 'balance', 'main',
-  'mobility', 'active_hold', 'freestanding', 'band', 'hs_hold',
+  'mobility', 'active_hold', 'disconnection', 'freestanding', 'band', 'hs_hold',
 ];
 
 // Class III (order_index 2) is the first class to use a TIER concept. Tiers are
@@ -78,9 +100,9 @@ function computeTier2Set(quests) {
 }
 
 // Handstand-specific layout constants — narrower columns, fixed split offset
-const HS_NODE_W       = 320;
-const HS_COL_GAP      = 40;
-const HS_SPLIT_OFFSET = 180;
+const HS_NODE_W       = 400;
+const HS_COL_GAP      = 56;
+const HS_SPLIT_OFFSET = 230;
 
 // ─── Handstand layout — strict 3-column tree with intra-branch splits ─────────
 //
@@ -96,7 +118,7 @@ const HS_SPLIT_OFFSET = 180;
 //   • Cross-branch convergence (parents from 2+ branches) sits at its own
 //     branch column center — no offset.
 
-function computeHandstandLayout(quests) {
+function computeHandstandLayout(quests, { applyTiers = false } = {}) {
   if (quests.length === 0) {
     return {
       positions: {}, firstNodeOfBranch: {},
@@ -240,8 +262,16 @@ function computeHandstandLayout(quests) {
     });
   }
 
-  // Step 5 — build positions
-  const rankY = (r) => TREE_PAD_T + LABEL_H + r * (NODE_H + RANK_GAP);
+  // Step 5 — build positions. A tier-crossing convergence (and its descendants)
+  // get pushed down by TIER_GAP so the TIER divider has breathing room.
+  const tier2Set = applyTiers ? computeTier2Set(quests) : new Set();
+  let firstTier2Rank = Infinity;
+  quests.forEach(q => {
+    if (tier2Set.has(q.id)) firstTier2Rank = Math.min(firstTier2Rank, rankOf[q.id] ?? 0);
+  });
+  const rankY = (r) =>
+    TREE_PAD_T + LABEL_H + r * (NODE_H + RANK_GAP) +
+    (r >= firstTier2Rank ? TIER_GAP : 0);
   const positions = {};
   quests.forEach(q => {
     const r  = rankOf[q.id] ?? 0;
@@ -250,7 +280,7 @@ function computeHandstandLayout(quests) {
       x: cx - HS_NODE_W / 2,
       y: rankY(r),
       w: HS_NODE_W,
-      h: NODE_H,
+      h: nodeHeightFor(q.name, HS_NODE_W),
       rank: r,
     };
   });
@@ -271,18 +301,38 @@ function computeHandstandLayout(quests) {
     labelXOf[b] = colCenterX(b) - HS_NODE_W / 2;
   });
 
-  const height = rankY(maxRank) + NODE_H + TREE_PAD_T;
+  // Normalize horizontal extent — split children sit ±HS_SPLIT_OFFSET from their
+  // branch center and can fall outside [0, treeWidth] (even at negative x on the
+  // leftmost column). The SVG is sized to `width`, so out-of-band connector lines
+  // would be CLIPPED. Shift nodes + labels so the leftmost node sits at 0 and
+  // widen `width` to the true content box.
+  let minX = Infinity, maxX = -Infinity;
+  Object.values(positions).forEach(p => {
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x + p.w);
+  });
+  let width = treeWidth;
+  if (minX !== Infinity && (minX < 0 || maxX > treeWidth)) {
+    const shift = -minX;
+    Object.values(positions).forEach(p => { p.x += shift; });
+    Object.keys(labelXOf).forEach(b => { labelXOf[b] += shift; });
+    width = maxX - minX;
+  }
+
+  let maxBottom = 0;
+  Object.values(positions).forEach(p => { maxBottom = Math.max(maxBottom, p.y + p.h); });
+  const height = maxBottom + TREE_PAD_T;
 
   return {
     positions, firstNodeOfBranch, labelXOf,
-    width: treeWidth, height,
+    width, height,
     nodeWidth: HS_NODE_W,
   };
 }
 
 // ─── Layout engine — column-anchored, convergence-only centering ──────────────
 
-function computeLayout(quests) {
+function computeLayout(quests, { applyTiers = false } = {}) {
   if (quests.length === 0) {
     return {
       positions: {}, firstNodeOfBranch: {},
@@ -365,12 +415,34 @@ function computeLayout(quests) {
 
   // Step 3 — column slots: every distinct NON-MAIN, NON-SPLIT branch.
   const allBranches = new Set(quests.map(q => q.branch).filter(b => b != null));
-  const colBranches = [...allBranches].filter(b => b !== 'main' && !splitOnlyBranches.has(b));
+
+  // A "floating" branch is one whose nodes are ALL convergence / post-conv /
+  // split children — i.e. it never owns a plain column node. Such a branch (e.g.
+  // the hs_beginners "mixed" merge of tuck + straddle) is rendered centered on
+  // its parents, so reserving a column slot for it just leaves an empty gap.
+  // Excluding it collapses that gap.
+  const branchHasColNode = {};
+  quests.forEach(q => {
+    const eligible =
+      !q.is_convergence && !isPostConv[q.id] &&
+      !isSplitChild.has(q.id) && !splitOnlyBranches.has(q.branch);
+    if (eligible && q.branch != null) branchHasColNode[q.branch] = true;
+  });
+  const floatingBranches = new Set(
+    [...allBranches].filter(b => !branchHasColNode[b])
+  );
+
+  // 'main' gets a real column too — BRANCH_ORDER centers it among its flanking
+  // branches. Previously main floated at the tree midpoint, which dropped the
+  // (now wide) main spine into the gap between two side columns and overlapped
+  // both. As a column it is cleanly spaced like every other branch.
+  const colBranches = [...allBranches].filter(
+    b => !splitOnlyBranches.has(b) && !floatingBranches.has(b)
+  );
   const known   = BRANCH_ORDER.filter(b => colBranches.includes(b));
   const unknown = colBranches.filter(b => !BRANCH_ORDER.includes(b)).sort();
   const branches = [...known, ...unknown];
-  const usesMainAsCol = branches.length === 0;
-  if (usesMainAsCol) branches.push('main');
+  if (branches.length === 0) branches.push('main'); // pure-convergence fallback
 
   const colIndex = {};
   branches.forEach((b, i) => { colIndex[b] = i; });
@@ -378,7 +450,10 @@ function computeLayout(quests) {
 
   const numBranches  = branches.length;
   const treeWidth    = numBranches * NODE_W + Math.max(0, numBranches - 1) * COL_GAP;
-  const chainAnchorX = treeWidth / 2;
+  // Convergence sub-tracks center on the MAIN spine when one exists (so merges
+  // sit directly beneath it); otherwise on the whole tree.
+  const hasMainCol   = branches.includes('main');
+  const chainAnchorX = hasMainCol ? colCenterX('main') : treeWidth / 2;
 
   // Step 4 — place nodes rank-by-rank so parents are positioned before children.
   //
@@ -390,7 +465,68 @@ function computeLayout(quests) {
   //       - group size = 1              → centered between parent positions
   //                                        (a single-prereq node thus inherits its
   //                                        parent's x — sub-track continues straight)
-  const rankY = (r) => TREE_PAD_T + LABEL_H + r * (NODE_H + RANK_GAP);
+  // ── Tier-aware vertical spread (Tier 1 column branches) ─────────────────────
+  // Within Tier 1, distribute each column branch's chain evenly across the FULL
+  // height of the tier, so a short branch (e.g. Planche NEGATIVE / PRESS — 3
+  // nodes) spreads out to match the longest branch (HOLD) instead of bunching at
+  // the top and leaving dead space below. Only plain column nodes are spread;
+  // convergence / merge nodes keep their topological rank.
+  const tier2Set = applyTiers ? computeTier2Set(quests) : new Set();
+  const inTier2  = id => tier2Set.has(id);
+
+  let firstTier2Rank = Infinity;
+  let tier1MaxRank   = 0;
+  quests.forEach(q => {
+    const r = rankOf[q.id] ?? 0;
+    if (inTier2(q.id)) firstTier2Rank = Math.min(firstTier2Rank, r);
+    else               tier1MaxRank   = Math.max(tier1MaxRank, r);
+  });
+
+  const colBranchSet = new Set(branches);
+  const effRank = {};
+  quests.forEach(q => { effRank[q.id] = rankOf[q.id] ?? 0; });
+
+  // Child lookup — keeps spreading safe: a branch that feeds an intra-tier
+  // convergence (or the main spine) must NOT be stretched, or its leaf could
+  // slide BELOW the fixed-rank merge node and invert the connector.
+  const childrenOf = new Map();
+  quests.forEach(q => (q.prerequisites ?? []).forEach(pid => {
+    if (!childrenOf.has(pid)) childrenOf.set(pid, []);
+    childrenOf.get(pid).push(q.id);
+  }));
+
+  const spreadGroups = new Map(); // branch → tier-1 column nodes
+  quests.forEach(q => {
+    if (inTier2(q.id)) return;
+    const isCol =
+      !q.is_convergence && !isPostConv[q.id] &&
+      !isSplitChild.has(q.id) && !splitOnlyBranches.has(q.branch) &&
+      colBranchSet.has(q.branch) && q.branch !== 'main';
+    if (!isCol) return;
+    if (!spreadGroups.has(q.branch)) spreadGroups.set(q.branch, []);
+    spreadGroups.get(q.branch).push(q);
+  });
+  spreadGroups.forEach(group => {
+    // Spread ONLY an independent leaf column: every child of every node either
+    // stays within this same branch chain or crosses into Tier 2. If a node
+    // feeds anything else in Tier 1 (a merge / another branch), leave the whole
+    // branch on its natural ranks so nothing inverts.
+    const ids = new Set(group.map(n => n.id));
+    const independent = group.every(n =>
+      (childrenOf.get(n.id) ?? []).every(cid => ids.has(cid) || inTier2(cid))
+    );
+    if (!independent) return;
+
+    const sorted = group.sort((a, b) => (rankOf[a.id] ?? 0) - (rankOf[b.id] ?? 0));
+    const k = sorted.length;
+    if (k <= 1 || tier1MaxRank <= 0) return;
+    sorted.forEach((q, i) => { effRank[q.id] = (i * tier1MaxRank) / (k - 1); });
+  });
+
+  // Tier 2 nodes drop by an extra TIER_GAP to give the divider breathing room.
+  const rankY = (r) =>
+    TREE_PAD_T + LABEL_H + r * (NODE_H + RANK_GAP) +
+    (r >= firstTier2Rank ? TIER_GAP : 0);
   const positions = {};
 
   for (let r = 0; r <= maxRank; r++) {
@@ -414,12 +550,10 @@ function computeLayout(quests) {
       }
     });
 
-    // Pre-conv non-split → branch column slot
+    // Pre-conv non-split → branch column slot (main is now a column too)
     colNodes.forEach(q => {
-      const cx = (q.branch === 'main' && !usesMainAsCol)
-        ? chainAnchorX
-        : colCenterX(q.branch ?? branches[0]);
-      positions[q.id] = { x: cx - NODE_W / 2, y: rankY(r), w: NODE_W, h: NODE_H, rank: r };
+      const cx = colCenterX(q.branch ?? branches[0]);
+      positions[q.id] = { x: cx - NODE_W / 2, y: rankY(effRank[q.id]), w: NODE_W, h: nodeHeightFor(q.name, NODE_W), rank: r };
     });
 
     // Group conv / post-conv / split-child nodes by their (sorted) prereq UUID set
@@ -443,12 +577,10 @@ function computeLayout(quests) {
         let cx;
         if (parentCXs.length > 0) {
           cx = parentCXs.reduce((s, v) => s + v, 0) / parentCXs.length;
-        } else if (q.branch === 'main' && !usesMainAsCol) {
-          cx = chainAnchorX;
         } else {
           cx = colCenterX(q.branch ?? branches[0]);
         }
-        positions[q.id] = { x: cx - NODE_W / 2, y: rankY(r), w: NODE_W, h: NODE_H, rank: r };
+        positions[q.id] = { x: cx - NODE_W / 2, y: rankY(effRank[q.id]), w: NODE_W, h: nodeHeightFor(q.name, NODE_W), rank: r };
       } else {
         // Multiple nodes sharing the same prereq set:
         //   • 1 shared prereq → single-parent split → center on that parent's X
@@ -468,7 +600,7 @@ function computeLayout(quests) {
         const leftX  = anchorX - totalW / 2;
         sorted.forEach((q, i) => {
           const cx = leftX + i * (NODE_W + COL_GAP) + NODE_W / 2;
-          positions[q.id] = { x: cx - NODE_W / 2, y: rankY(r), w: NODE_W, h: NODE_H, rank: r };
+          positions[q.id] = { x: cx - NODE_W / 2, y: rankY(effRank[q.id]), w: NODE_W, h: nodeHeightFor(q.name, NODE_W), rank: r };
         });
       }
     }
@@ -483,9 +615,30 @@ function computeLayout(quests) {
     if (!cur || r < (rankOf[cur.id] ?? 0)) firstNodeOfBranch[q.branch] = q;
   });
 
-  const height = rankY(maxRank) + NODE_H + TREE_PAD_T;
+  // Normalize horizontal extent — convergence sub-tracks (and split children)
+  // can land outside the nominal [0, treeWidth] column band, even at negative x.
+  // e.g. a Tier-2 side chain whose every branch starts with a cross-chain
+  // convergence: all branches "float", treeWidth collapses to one column, yet
+  // the merge nodes spread wider. The SVG is sized to `width`, so anything past
+  // that band has its connector lines CLIPPED. Shift all nodes so the leftmost
+  // sits at 0 and widen `width` to the true content box.
+  let minX = Infinity, maxX = -Infinity;
+  Object.values(positions).forEach(p => {
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x + p.w);
+  });
+  let width = treeWidth;
+  if (minX !== Infinity && (minX < 0 || maxX > treeWidth)) {
+    const shift = -minX;
+    Object.values(positions).forEach(p => { p.x += shift; });
+    width = maxX - minX;
+  }
 
-  return { positions, firstNodeOfBranch, rankY, width: treeWidth, height };
+  let maxBottom = 0;
+  Object.values(positions).forEach(p => { maxBottom = Math.max(maxBottom, p.y + p.h); });
+  const height = maxBottom + TREE_PAD_T;
+
+  return { positions, firstNodeOfBranch, rankY, width, height };
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
@@ -541,12 +694,17 @@ export default function QuestTreeScreen({ route, navigation }) {
 
   // ── Layout ────────────────────────────────────────────────────────────────
 
+  // Tiers are an intentional MAIN-quest concept. Side quests must never render a
+  // TIER divider — their multi-branch merges (e.g. hs_beginners tuck+straddle)
+  // look identical to a tier crossing but are not one.
+  const applyTiers = hasTiers && questType === 'main';
+
   const { positions, firstNodeOfBranch, labelXOf, width, height, nodeWidth } =
     useMemo(
       () => chain === 'handstand'
-        ? computeHandstandLayout(quests)
-        : computeLayout(quests),
-      [quests, chain],
+        ? computeHandstandLayout(quests, { applyTiers })
+        : computeLayout(quests, { applyTiers }),
+      [quests, chain, applyTiers],
     );
 
   // ── Tier divider ──────────────────────────────────────────────────────────
@@ -554,7 +712,7 @@ export default function QuestTreeScreen({ route, navigation }) {
   // last Tier 1 row and the first Tier 2 row. Only for tier-enabled classes.
 
   const tierDividerY = useMemo(() => {
-    if (!hasTiers) return null;
+    if (!applyTiers) return null;
     const tier2 = computeTier2Set(quests);
     if (tier2.size === 0) return null;
 
@@ -568,8 +726,9 @@ export default function QuestTreeScreen({ route, navigation }) {
     });
     if (lastT1Bottom === -Infinity || firstT2Top === Infinity) return null;
 
-    return lastT1Bottom + 14; // sits just under Tier 1, above any boundary label
-  }, [hasTiers, quests, positions]);
+    // Centered in the (TIER_GAP-enlarged) gap → even breathing room above & below.
+    return (lastT1Bottom + firstT2Top) / 2;
+  }, [applyTiers, quests, positions]);
 
   // ── Node state ────────────────────────────────────────────────────────────
 
@@ -651,7 +810,7 @@ export default function QuestTreeScreen({ route, navigation }) {
             isDone   && styles.questNameDone,
             isLocked && styles.questNameLocked,
           ]}
-          numberOfLines={2}
+          numberOfLines={nodeLineCount(quest.name, nodeWidth ?? NODE_W)}
         >
           {isLocked ? '🔒 ' : ''}{quest.name}
         </Text>
@@ -808,29 +967,29 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: SL.border,
   },
-  backBtn:  { alignSelf: 'flex-start', marginBottom: 10 },
-  backText: { fontFamily: F.bodyMed, fontSize: 20, color: SL.accent, letterSpacing: 2 },
+  backBtn:  { alignSelf: 'flex-start', marginBottom: 12 },
+  backText: { fontFamily: F.bodyMed, fontSize: 24, color: SL.accent, letterSpacing: 2 },
   chainTitle: {
     fontFamily: F.heading,
-    fontSize: 50, 
+    fontSize: 66,
     color: SL.text,
-    letterSpacing: 4,
+    letterSpacing: 5,
     textAlign: 'center',
   },
   chainSubtitle: {
     fontFamily: F.bodyMed,
-    fontSize: 20,
+    fontSize: 26,
     color: SL.muted,
     letterSpacing: 3,
-    marginTop: 4,
+    marginTop: 6,
     textAlign: 'center',
   },
   statsText: {
     fontFamily: F.bodyMed,
-    fontSize: 24,
+    fontSize: 30,
     color: SL.muted,
     letterSpacing: 1,
-    marginTop: 6,
+    marginTop: 8,
     textAlign: 'center',
   },
   headerDivider: {
@@ -847,7 +1006,7 @@ const styles = StyleSheet.create({
   // Column label
   branchLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 26,
+    fontSize: 34,
     color: SL.accent,
     letterSpacing: 3,
     textAlign: 'center',
@@ -862,7 +1021,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 12,
+    gap: 14,
     paddingHorizontal: 24,
   },
   tierLine: {
@@ -873,7 +1032,7 @@ const styles = StyleSheet.create({
   },
   tierLabel: {
     fontFamily: F.heading,
-    fontSize: 22,
+    fontSize: 30,
     color: SL.accent,
     letterSpacing: 6,
     textAlign: 'center',
@@ -887,11 +1046,12 @@ const styles = StyleSheet.create({
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 4,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    borderRadius: 5,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
+    gap: 6,
     width: '100%',
   },
   questCardDone: {
@@ -905,10 +1065,10 @@ const styles = StyleSheet.create({
   // Node text
   questName: {
     fontFamily: F.heading,
-    fontSize: 20,
+    fontSize: 27,
     color: SL.text,
     letterSpacing: 0.6,
-    lineHeight: 17,
+    lineHeight: 30,
     textAlign: 'center',
     alignSelf: 'center',
     width: '100%',
@@ -918,7 +1078,7 @@ const styles = StyleSheet.create({
   questNameLocked: { color: SL.muted },
 
   // Badges
-  nodeBottom: { alignSelf: 'flex-start' },
+  nodeBottom: { alignSelf: 'center' },
   doneBadge: {
     backgroundColor: 'rgba(76,175,80,0.15)',
     borderWidth: 1,
@@ -929,7 +1089,7 @@ const styles = StyleSheet.create({
   },
   doneBadgeText: {
     fontFamily: F.heading,
-    fontSize: 16,
+    fontSize: 20,
     color: SL.green,
     letterSpacing: 1.5,
   },
@@ -942,7 +1102,7 @@ const styles = StyleSheet.create({
   },
   rewardText: {
     fontFamily: F.bodyMed,
-    fontSize: 16,
+    fontSize: 20,
     color: SL.accent,
     letterSpacing: 1.2,
   },

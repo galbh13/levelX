@@ -1,7 +1,8 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useState, useEffect, useRef } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   View, Text, StyleSheet, ScrollView, ActivityIndicator, TouchableOpacity,
+  Animated, Easing,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { computeLvlFromData } from '../lib/computeLvl';
@@ -20,6 +21,53 @@ const SL = {
   green:  '#4CAF50',
   gold:   '#FFD700',
 };
+
+// ─── Animated tier divider ──────────────────────────────────────────────────
+// Slides + fades in on mount with a slow looping glow, marking the Tier 1 → 2
+// boundary in the side-quest list as a deliberate gate.
+
+function TierDivider({ label }) {
+  const reveal = useRef(new Animated.Value(0)).current;
+  const glow   = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.timing(reveal, {
+      toValue: 1,
+      duration: 600,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(glow, { toValue: 1, duration: 1400, useNativeDriver: true }),
+        Animated.timing(glow, { toValue: 0, duration: 1400, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [reveal, glow]);
+
+  const ruleOpacity = glow.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.9] });
+
+  return (
+    <Animated.View
+      style={[
+        styles.tierRow,
+        {
+          opacity: reveal,
+          transform: [
+            { translateY: reveal.interpolate({ inputRange: [0, 1], outputRange: [14, 0] }) },
+          ],
+        },
+      ]}
+    >
+      <Animated.View style={[styles.tierRule, { opacity: ruleOpacity }]} />
+      <Text style={styles.tierText}>{label}</Text>
+      <Animated.View style={[styles.tierRule, { opacity: ruleOpacity }]} />
+    </Animated.View>
+  );
+}
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
@@ -106,6 +154,21 @@ export default function SkillsScreen({ navigation }) {
     quests.filter(q => q.quest_type === 'side').map(q => q.chain).filter(Boolean)
   )];
 
+  // Classify side-quest chains by tier: a chain is Tier 2 when any of its quests
+  // is gated by a prerequisite in a DIFFERENT chain (the cross-chain gate).
+  const sideQuests   = quests.filter(q => q.quest_type === 'side');
+  const chainOfQuest = new Map(quests.map(q => [q.id, q.chain]));
+  const isTier2Chain = (chain) =>
+    sideQuests.some(q =>
+      q.chain === chain &&
+      (q.prerequisites ?? []).some(pid => {
+        const pc = chainOfQuest.get(pid);
+        return pc && pc !== chain;
+      }),
+    );
+  const tier1SideChains = sideChains.filter(c => !isTier2Chain(c));
+  const tier2SideChains = sideChains.filter(c =>  isTier2Chain(c));
+
   function chainStats(chain, questType) {
     const chainQuests = quests.filter(q => q.chain === chain && q.quest_type === questType);
     const completed   = chainQuests.filter(q => completions.has(q.id));
@@ -123,6 +186,28 @@ export default function SkillsScreen({ navigation }) {
       questType,
     });
   }
+
+  const renderSideCard = (chain) => {
+    const { total, completed, earnedLvl } = chainStats(chain, 'side');
+    return (
+      <TouchableOpacity
+        key={chain}
+        style={styles.chainCard}
+        onPress={() => openTree(chain, 'side')}
+        activeOpacity={0.75}
+      >
+        <View style={styles.chainCardInner}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.chainCardTitle}>{chain.toUpperCase()}</Text>
+            <Text style={styles.chainCardMeta}>
+              {completed}/{total} unlocked · +{earnedLvl} LVL
+            </Text>
+          </View>
+          <Text style={styles.chainCardChevron}>›</Text>
+        </View>
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.body}>
@@ -214,31 +299,20 @@ export default function SkillsScreen({ navigation }) {
             </>
           )}
 
-          {/* ── Side Quest cards ── */}
+          {/* ── Side Quest cards — grouped by tier ── */}
           {sideChains.length > 0 && (
             <>
               <Text style={[styles.sectionLabel, { marginTop: 28 }]}>SIDE QUESTS</Text>
-              {sideChains.map(chain => {
-                const { total, completed, earnedLvl } = chainStats(chain, 'side');
-                return (
-                  <TouchableOpacity
-                    key={chain}
-                    style={styles.chainCard}
-                    onPress={() => openTree(chain, 'side')}
-                    activeOpacity={0.75}
-                  >
-                    <View style={styles.chainCardInner}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.chainCardTitle}>{chain.toUpperCase()}</Text>
-                        <Text style={styles.chainCardMeta}>
-                          {completed}/{total} unlocked · +{earnedLvl} LVL
-                        </Text>
-                      </View>
-                      <Text style={styles.chainCardChevron}>›</Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
+
+              {tier2SideChains.length > 0 && <TierDivider label="TIER I" />}
+              {tier1SideChains.map(renderSideCard)}
+
+              {tier2SideChains.length > 0 && (
+                <>
+                  <TierDivider label="TIER II" />
+                  {tier2SideChains.map(renderSideCard)}
+                </>
+              )}
             </>
           )}
         </>
@@ -424,6 +498,30 @@ const styles = StyleSheet.create({
     marginTop: 24,
     marginBottom: 12,
     marginHorizontal: 16,
+  },
+
+  // ── Animated tier divider (side-quest tiers) ─────────────────────────────────
+
+  tierRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 16,
+    marginTop: 8,
+    marginBottom: 16,
+    gap: 16,
+  },
+  tierRule: {
+    flex: 1,
+    height: 4,
+    backgroundColor: SL.accent,
+    borderRadius: 2,
+  },
+  tierText: {
+    fontFamily: F.heading,
+    fontSize: 28,
+    color: SL.accent,
+    letterSpacing: 7,
+    textAlign: 'center',
   },
 
   // ── Chain cards ──────────────────────────────────────────────────────────────
