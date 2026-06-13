@@ -2,11 +2,12 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, Modal, Alert, TextInput,
+  ActivityIndicator, Modal,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
+import { DAY_LABELS } from '../lib/schedule';
 
 const SL = {
   bg:     '#050912',
@@ -20,90 +21,30 @@ const SL = {
   gold:   '#FFD700',
 };
 
-// ─── Date helpers ─────────────────────────────────────────────────────────────
-
-const MONTH_ABBR = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-const DAY_LABELS = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
-const TODAY_STR  = (() => {
-  const t = new Date();
-  return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
-})();
-
-function toDateStr(date) {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
-function getWeekDays(offset = 0) {
-  const today  = new Date();
-  const dow    = today.getDay(); // 0=Sun … 6=Sat
-  const sunday = new Date(today);
-  sunday.setDate(today.getDate() - dow + offset * 7);
-  sunday.setHours(0, 0, 0, 0);
-
-  return DAY_LABELS.map((label, i) => {
-    const d = new Date(sunday);
-    d.setDate(sunday.getDate() + i);
-    const jsDay = d.getDay();
-    return {
-      label,
-      date:      d,
-      dateStr:   toDateStr(d),
-      dayIndex:  i,
-      dayOfWeek: jsDay,
-      month:     MONTH_ABBR[d.getMonth()],
-    };
-  });
-}
-
-function formatDisplayDate(dateStr) {
-  if (!dateStr) return '—';
-  const d = new Date(dateStr + 'T00:00:00');
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-function fmtWeekRange(days) {
-  const s = days[0].date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  const e = days[6].date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  return `${s} – ${e}`;
-}
+const DOW_FULL = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'];
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
+// "Manage My Training" — the recurring WEEKLY SKELETON editor. Assign default
+// workout(s) to each weekday (Sun–Sat). No dates, no completion here: those live
+// on the dated Workouts screen, which fills each real date from this skeleton and
+// lets specific days be overridden. Writes `weekly_workout_template`.
 
 export default function StudentDetailScreen({ navigation }) {
   const { selectedStudent: student, setSelectedDay: setContextDay } = useCoach();
 
   // Data
-  const [overrideWorkouts,  setOverrideWorkouts]  = useState([]);  // workout_override_workouts rows
-  const [studentWorkouts,   setStudentWorkouts]   = useState([]);  // all workouts for this student
-  const [pendingCheckup,    setPendingCheckup]    = useState(null);  // upcoming pending checkup
-  const [submittedCheckups, setSubmittedCheckups] = useState([]);    // submitted checkups (up to 2)
-  const [loading,           setLoading]           = useState(true);
+  const [templateRows,    setTemplateRows]    = useState([]);  // weekly_workout_template rows
+  const [studentWorkouts, setStudentWorkouts] = useState([]);  // all workouts for this player
+  const [loading,         setLoading]         = useState(true);
 
-  // Week navigation
-  const [weekOffset, setWeekOffset] = useState(0);
-  const weekDays = useMemo(() => getWeekDays(weekOffset), [weekOffset]);
-
-  // Calendar selection
-  const [selectedDay, setSelectedDay] = useState(
-    () => getWeekDays(0).find(d => d.dateStr === TODAY_STR) ?? getWeekDays(0)[0]
-  );
+  // Selected weekday (0=Sun … 6=Sat) — default today's weekday.
+  const [selectedDow, setSelectedDow] = useState(() => new Date().getDay());
 
   // Day editor modal
   const [editorVisible,  setEditorVisible]  = useState(false);
-  const [editingDay,     setEditingDay]     = useState(null);
-  const [pendingWorkout, setPendingWorkout] = useState(undefined);  // undefined = nothing picked
+  const [editingDow,     setEditingDow]     = useState(null);
+  const [pendingWorkout, setPendingWorkout] = useState(undefined);
   const [saving,         setSaving]         = useState(false);
-
-  // Guiding phrase
-  const [guidingPhrase,        setGuidingPhrase]        = useState('');
-  const [phraseModalVisible,   setPhraseModalVisible]   = useState(false);
-  const [phraseDraft,          setPhraseDraft]          = useState('');
-  const [phraseSaving,         setPhraseSaving]         = useState(false);
-
-  // ── Workouts lookup map ────────────────────────────────────────────────────
 
   const workoutsById = useMemo(
     () => Object.fromEntries(studentWorkouts.map(w => [w.id, w])),
@@ -113,147 +54,78 @@ export default function StudentDetailScreen({ navigation }) {
   // ── Fetch ──────────────────────────────────────────────────────────────────
 
   const fetchData = useCallback(async () => {
+    if (!student?.id) return;
     try {
-      const [overridesRes, workoutsRes, checkupRes, submittedRes, profileRes] = await Promise.all([
+      const [templateRes, workoutsRes] = await Promise.all([
         supabase
-          .from('workout_override_workouts')
-          .select('id, specific_date, workout_id, completed')
+          .from('weekly_workout_template')
+          .select('id, day_of_week, workout_id')
           .eq('student_id', student.id),
 
         supabase
           .from('workouts')
-          .select('id, title, purpose, scheduled_date, completed')
+          .select('id, title, purpose')
           .eq('assigned_to', student.id)
           .order('title', { ascending: true }),
-
-        supabase
-          .from('checkups')
-          .select('*')
-          .eq('student_id', student.id)
-          .eq('status', 'pending')
-          .order('scheduled_date', { ascending: true })
-          .limit(1)
-          .maybeSingle(),
-
-        supabase
-          .from('checkups')
-          .select('id, status, scheduled_date, is_read')
-          .eq('student_id', student.id)
-          .eq('status', 'submitted')
-          .order('created_at', { ascending: true })
-          .limit(2),
-
-        supabase
-          .from('profiles')
-          .select('guiding_phrase')
-          .eq('id', student.id)
-          .single(),
       ]);
 
-      if (overridesRes.error) console.error('[StudentDetail] overrides:', overridesRes.error);
-      if (workoutsRes.error)  console.error('[StudentDetail] workouts:', workoutsRes.error);
+      if (templateRes.error) console.error('[StudentDetail] template:', templateRes.error);
+      if (workoutsRes.error) console.error('[StudentDetail] workouts:', workoutsRes.error);
 
-      setOverrideWorkouts(overridesRes.data ?? []);
+      setTemplateRows(templateRes.data ?? []);
       setStudentWorkouts(workoutsRes.data ?? []);
-      setPendingCheckup(checkupRes.data ?? null);
-      setSubmittedCheckups(submittedRes.data ?? []);
-      setGuidingPhrase(profileRes.data?.guiding_phrase ?? '');
     } catch (e) {
       console.error('[StudentDetail] fetchData:', e);
     }
-  }, [student.id]);
+  }, [student?.id]);
 
-  useEffect(() => {
-    fetchData().finally(() => setLoading(false));
-  }, [fetchData]);
-
+  useEffect(() => { fetchData().finally(() => setLoading(false)); }, [fetchData]);
   useFocusEffect(useCallback(() => { fetchData(); }, [fetchData]));
 
-  // ── Day workout lookup (returns array) ────────────────────────────────────
+  // ── Per-weekday template lookup ───────────────────────────────────────────
 
-  function getDayWorkouts(day) {
-    // Source 1: override junction rows for this specific date
-    const dayOverrides = overrideWorkouts.filter(o => o.specific_date === day.dateStr);
-    const overrideResults = dayOverrides
-      .map(o => ({ ...workoutsById[o.workout_id], overrideId: o.id, completed: o.completed ?? false }))
-      .filter(o => o.id);
-
-    // Source 2: legacy direct workouts (scheduled_date) — for any old rows
-    const directWorkouts = studentWorkouts.filter(w => w.scheduled_date === day.dateStr);
-
-    // Merge, no duplicates
-    const result = [...overrideResults];
-    for (const w of directWorkouts) {
-      if (!result.some(r => r.id === w.id)) result.push(w);
-    }
-    return result;
+  function getDowWorkouts(dow) {
+    return templateRows
+      .filter(t => t.day_of_week === dow)
+      .map(t => ({ ...workoutsById[t.workout_id], templateId: t.id }))
+      .filter(w => w.id);
   }
 
-  const selectedDayWorkouts = useMemo(
-    () => getDayWorkouts(selectedDay),
+  const selectedWorkouts = useMemo(
+    () => getDowWorkouts(selectedDow),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedDay, overrideWorkouts, workoutsById]
+    [selectedDow, templateRows, workoutsById]
   );
 
-  // ── Remove a specific workout from a day ──────────────────────────────────
+  // ── Add / remove a workout on a weekday ───────────────────────────────────
 
-  async function handleRemoveWorkoutFromDay(day, workoutId) {
-    // Case 1: assigned via junction table → delete junction row only
-    const overrideRow = overrideWorkouts.find(
-      o => o.specific_date === day.dateStr && o.workout_id === workoutId
-    );
-    if (overrideRow) {
-      const { error } = await supabase
-        .from('workout_override_workouts')
-        .delete()
-        .eq('id', overrideRow.id);
-      if (error) { alert('Error: ' + error.message); return; }
-      await fetchData();
-      return;
-    }
-
-    // Case 2: legacy direct workout (scheduled_date) → warn and delete
-    Alert.alert(
-      'DELETE WORKOUT?',
-      'This will permanently delete the workout and all its exercises.',
-      [
-        { text: 'CANCEL', style: 'cancel' },
-        {
-          text: 'DELETE',
-          style: 'destructive',
-          onPress: async () => {
-            const { error } = await supabase
-              .from('workouts')
-              .delete()
-              .eq('id', workoutId);
-            if (error) { alert('Error: ' + error.message); return; }
-            await fetchData();
-          },
-        },
-      ]
-    );
+  async function handleRemoveFromDay(templateId) {
+    const { error } = await supabase
+      .from('weekly_workout_template')
+      .delete()
+      .eq('id', templateId);
+    if (error) { alert('Error: ' + error.message); return; }
+    await fetchData();
   }
 
-  // ── Day editor modal ──────────────────────────────────────────────────────
-
-  function openEditor(day) {
-    setEditingDay(day);
+  function openEditor(dow) {
+    setEditingDow(dow);
     setPendingWorkout(undefined);
     setEditorVisible(true);
   }
 
   async function saveDay() {
-    if (!editingDay || !pendingWorkout) return;
+    if (editingDow == null || !pendingWorkout) return;
     setSaving(true);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       const { error } = await supabase
-        .from('workout_override_workouts')
+        .from('weekly_workout_template')
         .insert({
-          student_id:    student.id,
-          coach_id:      user.id,
-          specific_date: editingDay.dateStr,
-          workout_id:    pendingWorkout.id,
+          student_id:  student.id,
+          coach_id:    user.id,
+          day_of_week: editingDow,
+          workout_id:  pendingWorkout.id,
         });
       if (error) { alert('Save failed: ' + error.message); setSaving(false); return; }
       setEditorVisible(false);
@@ -262,42 +134,6 @@ export default function StudentDetailScreen({ navigation }) {
       alert('Save failed: ' + (e.message ?? 'Something went wrong.'));
     }
     setSaving(false);
-  }
-
-  // ── Guiding phrase save ───────────────────────────────────────────────────
-
-  function openPhraseEditor() {
-    setPhraseDraft(guidingPhrase ?? '');
-    setPhraseModalVisible(true);
-  }
-
-  async function savePhrase() {
-    setPhraseSaving(true);
-    const trimmed = phraseDraft.trim();
-    const valueToSave = trimmed.length > 0 ? trimmed : null;
-    const { error } = await supabase
-      .from('profiles')
-      .update({ guiding_phrase: valueToSave })
-      .eq('id', student.id);
-    setPhraseSaving(false);
-    if (error) { alert('Save failed: ' + error.message); return; }
-    setGuidingPhrase(valueToSave ?? '');
-    setPhraseModalVisible(false);
-  }
-
-  // ── Toggle is_read on a submitted checkup ────────────────────────────────
-
-  async function handleToggleRead(checkup) {
-    const newVal = !checkup.is_read;
-    setSubmittedCheckups(prev => prev.map(c => c.id === checkup.id ? { ...c, is_read: newVal } : c));
-    const { error } = await supabase
-      .from('checkups')
-      .update({ is_read: newVal })
-      .eq('id', checkup.id);
-    if (error) {
-      setSubmittedCheckups(prev => prev.map(c => c.id === checkup.id ? { ...c, is_read: !newVal } : c));
-      alert('Failed to update: ' + error.message);
-    }
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -323,193 +159,76 @@ export default function StudentDetailScreen({ navigation }) {
           <Text style={styles.backText}>← BACK</Text>
         </TouchableOpacity>
         <Text style={styles.title}>{student.full_name?.toUpperCase()}</Text>
-        <Text style={styles.level}>LVL {student.level ?? '—'}</Text>
+        <Text style={styles.level}>WEEKLY PLAN</Text>
         <View style={styles.headerDivider} />
       </View>
 
       <ScrollView contentContainerStyle={styles.body}>
-        {/* Guiding phrase + Next checkup — side by side */}
-        <View style={styles.topInfoRow}>
-          {/* Guiding phrase cell */}
-          <View style={[styles.infoCell, styles.infoCellLeft]}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.checkupLabel}>GUIDING PHRASE</Text>
-              <Text
-                style={[styles.phraseValue, !guidingPhrase && { color: SL.muted, fontStyle: 'italic' }]}
-                numberOfLines={3}
-              >
-                {guidingPhrase ? `"${guidingPhrase}"` : 'No phrase set'}
-              </Text>
-            </View>
-            <View style={styles.checkupBtns}>
-              <TouchableOpacity style={styles.editBtn} onPress={openPhraseEditor}>
-                <Text style={styles.editBtnText}>{guidingPhrase ? 'EDIT' : '+ ADD'}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          {/* Next checkup cell */}
-          <View style={styles.infoCell}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.checkupLabel}>NEXT CHECKUP</Text>
-              <Text style={styles.checkupValue}>
-                {pendingCheckup ? formatDisplayDate(pendingCheckup.scheduled_date) : 'None scheduled'}
-              </Text>
-            </View>
-            <View style={styles.checkupBtns}>
-              {pendingCheckup && (
-                <TouchableOpacity
-                  style={styles.editBtn}
-                  onPress={() => navigation.navigate('CheckupBuilder', { student, existingCheckup: pendingCheckup })}
-                >
-                  <Text style={styles.editBtnText}>EDIT</Text>
-                </TouchableOpacity>
-              )}
-              <TouchableOpacity
-                style={styles.newCheckupBtn}
-                onPress={() => navigation.navigate('CheckupBuilder', { student })}
-              >
-                <Text style={styles.newCheckupBtnText}>+ NEW</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-
-        {/* Submitted checkups with read toggle */}
-        {submittedCheckups.map((sc, i) => (
-          <View key={sc.id} style={styles.submittedCheckupRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.checkupLabel}>SUBMITTED CHECKUP {submittedCheckups.length > 1 ? i + 1 : ''}</Text>
-              <Text style={styles.checkupValue}>{formatDisplayDate(sc.scheduled_date)}</Text>
-            </View>
-            <View style={styles.checkupBtns}>
-              <TouchableOpacity
-                style={styles.viewSubmissionBtn}
-                onPress={() => navigation.navigate('CheckupReview', { student, checkupId: sc.id })}
-              >
-                <Text style={styles.viewSubmissionBtnText}>📋 VIEW</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.readToggleBtn, sc.is_read && styles.readToggleBtnRead]}
-                onPress={() => handleToggleRead(sc)}
-                activeOpacity={0.8}
-              >
-                <Text style={[styles.readToggleBtnText, sc.is_read && styles.readToggleBtnTextRead]}>
-                  {sc.is_read ? '👁 UNREAD' : '👁 READ'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        ))}
-
-        {/* Quest buttons — side by side */}
+        {/* Daily quests */}
         <View style={styles.questRow}>
           <TouchableOpacity
-            style={styles.classQuestBtn}
-            onPress={() => navigation.navigate('ClassQuest', { student })}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.classQuestBtnText}>⚡ CLASS & QUESTS</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
             style={styles.dailyQuestBtn}
-            onPress={() => navigation.navigate('CoachDailyQuest', { student })}
+            onPress={() => navigation.navigate('DailyQuest', { student })}
             activeOpacity={0.8}
           >
-            <Text style={styles.dailyQuestBtnText}>📋 DAILY QUESTS</Text>
+            <Text style={styles.dailyQuestBtnText}>📋 MANAGE DAILY QUESTS</Text>
           </TouchableOpacity>
         </View>
 
-        {/* Calendar */}
         {loading ? (
           <ActivityIndicator color={SL.accent} style={{ marginTop: 40 }} />
         ) : (
           <>
-            {/* Week nav */}
-            <View style={styles.calendarNav}>
-              <TouchableOpacity
-                style={styles.navArrow}
-                onPress={() => setWeekOffset(o => o - 1)}
-              >
-                <Text style={styles.navArrowText}>←</Text>
-              </TouchableOpacity>
-              <View style={styles.navCenter}>
-                {weekOffset === 0 && (
-                  <Text style={styles.navCurrentBadge}>THIS WEEK</Text>
-                )}
-                <Text style={styles.navRangeText}>{fmtWeekRange(weekDays)}</Text>
-              </View>
-              <TouchableOpacity
-                style={styles.navArrow}
-                onPress={() => setWeekOffset(o => o + 1)}
-              >
-                <Text style={styles.navArrowText}>→</Text>
-              </TouchableOpacity>
-            </View>
+            <Text style={styles.skeletonHint}>
+              YOUR RECURRING WEEK · repeats every week. Edit specific dates on the Workouts tab.
+            </Text>
 
-            {/* Day nodes — full width grid */}
-            <View style={styles.calendarGrid}>
-              {weekDays.map((day) => {
-                const dayWorkouts = getDayWorkouts(day);
-                const isSelected  = day.dateStr === selectedDay?.dateStr;
-                const isToday     = day.dateStr === TODAY_STR;
-
+            {/* Weekday skeleton — SUN…SAT */}
+            <View style={styles.weekGrid}>
+              {DAY_LABELS.map((label, dow) => {
+                const dayWorkouts = getDowWorkouts(dow);
+                const isSelected  = dow === selectedDow;
                 return (
                   <TouchableOpacity
-                    key={day.dateStr}
-                    style={[
-                      styles.dayNode,
-                      isSelected && styles.dayNodeSelected,
-                      isToday && !isSelected && styles.dayNodeToday,
-                    ]}
-                    onPress={() => setSelectedDay(day)}
+                    key={label}
+                    style={[styles.dayNode, isSelected && styles.dayNodeSelected]}
+                    onPress={() => setSelectedDow(dow)}
                     activeOpacity={0.75}
                   >
-                    <Text style={[styles.dayLabel, isSelected && styles.dayLabelSel]}>
-                      {day.label}
-                    </Text>
-                    <Text style={[styles.dayNum, isSelected && styles.dayNumSel]}>
-                      {day.date.getDate()}
-                    </Text>
-                    <Text style={[styles.dayMonth, isSelected && styles.dayMonthSel]}>
-                      {day.month}
-                    </Text>
+                    <Text style={[styles.dayLabel, isSelected && styles.dayLabelSel]}>{label}</Text>
                     {dayWorkouts.length > 0 ? (
                       <>
                         <Text
                           style={[styles.dayWorkoutName, isSelected && styles.dayWorkoutNameSel]}
-                          numberOfLines={1}
+                          numberOfLines={2}
                         >
                           {dayWorkouts[0].title?.toUpperCase()}
                           {dayWorkouts.length > 1 ? ` +${dayWorkouts.length - 1}` : ''}
                         </Text>
                         <View style={styles.dotsRow}>
                           {dayWorkouts.map((_, di) => (
-                            <View key={di} style={[styles.dot, isSelected && styles.dotSel]} />
+                            <View key={di} style={styles.dot} />
                           ))}
                         </View>
                       </>
                     ) : (
-                      <Text style={[styles.dayRest, isSelected && styles.dayRestSel]}>
-                        REST
-                      </Text>
+                      <Text style={styles.dayRest}>REST</Text>
                     )}
                   </TouchableOpacity>
                 );
               })}
             </View>
 
-            {/* Selected day detail panel */}
+            {/* Selected weekday detail */}
             <View style={styles.dayCard}>
               <View style={styles.dayCardHeader}>
-                <Text style={styles.dayCardDayName}>{selectedDay?.label}</Text>
-                <Text style={styles.dayCardDate}>{formatDisplayDate(selectedDay?.dateStr)}</Text>
+                <Text style={styles.dayCardDayName}>{DOW_FULL[selectedDow]}</Text>
+                <Text style={styles.dayCardDate}>Every week</Text>
               </View>
 
-              {selectedDayWorkouts.length > 0 ? (
-                selectedDayWorkouts.map(workout => (
-                  <View key={workout.id} style={[styles.assignedWorkoutCard, workout.completed && { borderLeftWidth: 3, borderLeftColor: '#4CAF50' }]}>
+              {selectedWorkouts.length > 0 ? (
+                selectedWorkouts.map(workout => (
+                  <View key={workout.templateId} style={styles.assignedWorkoutCard}>
                     <View style={styles.assignedWorkoutCardHead}>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.workoutTitle}>{workout.title?.toUpperCase()}</Text>
@@ -517,20 +236,9 @@ export default function StudentDetailScreen({ navigation }) {
                           <Text style={styles.workoutPurpose}>{workout.purpose}</Text>
                         ) : null}
                       </View>
-                      {workout.overrideId != null && (
-                        workout.completed ? (
-                          <View style={styles.completedBadge}>
-                            <Text style={styles.completedBadgeText}>✓ DONE</Text>
-                          </View>
-                        ) : (
-                          <View style={styles.pendingBadge}>
-                            <Text style={styles.pendingBadgeText}>⏳ PENDING</Text>
-                          </View>
-                        )
-                      )}
                       <TouchableOpacity
                         style={styles.workoutRemoveBtn}
-                        onPress={() => handleRemoveWorkoutFromDay(selectedDay, workout.id)}
+                        onPress={() => handleRemoveFromDay(workout.templateId)}
                         hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                       >
                         <Text style={styles.workoutRemoveBtnText}>✕</Text>
@@ -548,27 +256,27 @@ export default function StudentDetailScreen({ navigation }) {
               ) : (
                 <View style={styles.restCard}>
                   <Text style={styles.restLabel}>REST DAY</Text>
-                  <Text style={styles.restSub}>No workout assigned yet.</Text>
+                  <Text style={styles.restSub}>No workout in the weekly plan yet.</Text>
                 </View>
               )}
             </View>
 
-            {/* Bottom actions row — assign + create + view all, side-by-side */}
+            {/* Bottom actions */}
             <View style={styles.bottomActionsRow}>
               <TouchableOpacity
                 style={styles.assignBtn}
-                onPress={() => openEditor(selectedDay)}
+                onPress={() => openEditor(selectedDow)}
                 activeOpacity={0.8}
               >
                 <Text style={styles.assignBtnText}>
-                  {selectedDayWorkouts.length > 0 ? '+ ADD ANOTHER' : '+ ASSIGN WORKOUT'}
+                  {selectedWorkouts.length > 0 ? '+ ADD ANOTHER' : '+ ASSIGN WORKOUT'}
                 </Text>
               </TouchableOpacity>
 
               <TouchableOpacity
                 style={styles.newWorkoutBtn}
                 onPress={() => {
-                  setContextDay({ label: selectedDay.label, dateStr: selectedDay.dateStr });
+                  setContextDay({ label: DAY_LABELS[selectedDow], dayOfWeek: selectedDow });
                   navigation.navigate('CreateWorkout');
                 }}
                 activeOpacity={0.8}
@@ -592,23 +300,21 @@ export default function StudentDetailScreen({ navigation }) {
       <Modal
         visible={editorVisible}
         transparent
-        animationType="slide"
+        animationType="fade"
         onRequestClose={() => setEditorVisible(false)}
       >
         <View style={styles.modalOverlay}>
           <View style={styles.editorBox}>
-            {/* Title */}
             <Text style={styles.editorTitle}>
-              {editingDay?.label} · {formatDisplayDate(editingDay?.dateStr)}
+              {editingDow != null ? DOW_FULL[editingDow] : ''} · EVERY WEEK
             </Text>
 
-            {/* Currently assigned workouts (read-only) */}
-            {editingDay && getDayWorkouts(editingDay).length > 0 && (
+            {editingDow != null && getDowWorkouts(editingDow).length > 0 && (
               <>
-                <Text style={styles.editorSectionLabel}>ALREADY ASSIGNED</Text>
+                <Text style={styles.editorSectionLabel}>ALREADY IN PLAN</Text>
                 <View style={styles.assignedChips}>
-                  {getDayWorkouts(editingDay).map(w => (
-                    <View key={w.id} style={styles.assignedChip}>
+                  {getDowWorkouts(editingDow).map(w => (
+                    <View key={w.templateId} style={styles.assignedChip}>
                       <Text style={styles.assignedChipText}>✓ {w.title?.toUpperCase()}</Text>
                     </View>
                   ))}
@@ -616,12 +322,11 @@ export default function StudentDetailScreen({ navigation }) {
               </>
             )}
 
-            {/* Workout picker — excludes already-assigned workouts */}
             <Text style={styles.editorSectionLabel}>ADD WORKOUT</Text>
             <ScrollView style={styles.workoutList} showsVerticalScrollIndicator={false}>
               {studentWorkouts
-                .filter(w => editingDay
-                  ? !getDayWorkouts(editingDay).some(dw => dw.id === w.id)
+                .filter(w => editingDow != null
+                  ? !getDowWorkouts(editingDow).some(dw => dw.id === w.id)
                   : true
                 )
                 .map(w => (
@@ -644,20 +349,17 @@ export default function StudentDetailScreen({ navigation }) {
                         <Text style={styles.workoutOptionSub}>{w.purpose}</Text>
                       ) : null}
                     </View>
-                    {pendingWorkout?.id === w.id && (
-                      <Text style={styles.checkMark}>✓</Text>
-                    )}
+                    {pendingWorkout?.id === w.id && <Text style={styles.checkMark}>✓</Text>}
                   </TouchableOpacity>
                 ))
               }
               {studentWorkouts.length === 0 && (
                 <Text style={styles.noWorkoutsText}>
-                  No workouts created for this student yet.{'\n'}Use "Create New Workout" first.
+                  No workouts yet.{'\n'}Use "Create New Workout" first.
                 </Text>
               )}
             </ScrollView>
 
-            {/* Actions */}
             <View style={styles.editorButtons}>
               <TouchableOpacity
                 style={styles.editorCancelBtn}
@@ -681,48 +383,6 @@ export default function StudentDetailScreen({ navigation }) {
         </View>
       </Modal>
 
-      {/* ── Guiding Phrase Modal ── */}
-      <Modal
-        visible={phraseModalVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setPhraseModalVisible(false)}
-      >
-        <View style={[styles.modalOverlay, { justifyContent: 'center' }]}>
-          <View style={styles.modalBox}>
-            <Text style={styles.modalTitle}>GUIDING PHRASE</Text>
-            <TextInput
-              style={styles.phraseInput}
-              value={phraseDraft}
-              onChangeText={setPhraseDraft}
-              placeholder="e.g. Stay consistent and trust the process."
-              placeholderTextColor={SL.muted}
-              multiline
-              maxLength={240}
-            />
-            <View style={styles.modalButtons}>
-              <TouchableOpacity
-                style={styles.modalCancel}
-                onPress={() => setPhraseModalVisible(false)}
-                disabled={phraseSaving}
-              >
-                <Text style={styles.modalCancelText}>CANCEL</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modalSave, phraseSaving && { opacity: 0.5 }]}
-                onPress={savePhrase}
-                disabled={phraseSaving}
-              >
-                {phraseSaving
-                  ? <ActivityIndicator color={SL.bg} size="small" />
-                  : <Text style={styles.modalSaveText}>SAVE</Text>
-                }
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
     </View>
   );
 }
@@ -733,6 +393,9 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SL.bg },
 
   header: {
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
     paddingHorizontal: 24,
     paddingTop: 60,
     paddingBottom: 20,
@@ -766,121 +429,8 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  body: { paddingBottom: 48 },
-
-  topInfoRow: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: SL.border,
-  },
-  infoCell: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-    gap: 12,
-  },
-  infoCellLeft: {
-    borderRightWidth: 1,
-    borderRightColor: SL.border,
-  },
-  checkupRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: SL.border,
-    gap: 12,
-  },
-  checkupLabel: {
-    fontFamily: F.heading,
-    fontSize: 16,
-    color: SL.muted,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
-    marginBottom: 6,
-  },
-  checkupValue: {
-    fontFamily: F.heading,
-    fontSize: 26,
-    color: SL.accent,
-    letterSpacing: 1.5,
-  },
-  phraseValue: {
-    fontFamily: F.bodyMed,
-    fontSize: 22,
-    color: SL.text,
-    letterSpacing: 0.5,
-    lineHeight: 30,
-  },
-  phraseInput: {
-    minHeight: 100,
-    backgroundColor: SL.bg,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.text,
-    textAlignVertical: 'top',
-  },
-  checkupBtns: { flexDirection: 'row', gap: 8 },
-  viewSubmissionBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 6,
-  },
-  viewSubmissionBtnText: { fontFamily: F.heading, fontSize: 17, color: SL.accent, letterSpacing: 2.5 },
-  editBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderWidth: 1.5,
-    borderColor: SL.muted,
-    borderRadius: 6,
-  },
-  editBtnText: { fontFamily: F.heading, fontSize: 17, color: SL.muted, letterSpacing: 2.5 },
-  newCheckupBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 6,
-  },
-  newCheckupBtnText: { fontFamily: F.heading, fontSize: 17, color: SL.accent, letterSpacing: 2.5 },
-  submittedCheckupRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: SL.border,
-    gap: 12,
-  },
-  readToggleBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1.5,
-    borderColor: SL.muted,
-    borderRadius: 6,
-  },
-  readToggleBtnRead: {
-    borderColor: SL.gold,
-  },
-  readToggleBtnText: {
-    fontFamily: F.bodyMed,
-    fontSize: 13,
-    color: SL.muted,
-    letterSpacing: 1.5,
-  },
-  readToggleBtnTextRead: {
-    color: SL.gold,
-  },
+  // Centered, capped width — matches the Home page so the two read consistently.
+  body: { paddingBottom: 48, width: '100%', maxWidth: 1440, alignSelf: 'center' },
 
   questRow: {
     flexDirection: 'row',
@@ -888,22 +438,6 @@ const styles = StyleSheet.create({
     marginTop: 16,
     marginBottom: 14,
     gap: 12,
-  },
-  classQuestBtn: {
-    flex: 1,
-    height: 60,
-    borderWidth: 2,
-    borderColor: '#FFD700',
-    borderRadius: 6,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255,215,0,0.08)',
-  },
-  classQuestBtnText: {
-    fontFamily: F.heading,
-    fontSize: 22,
-    color: '#FFD700',
-    letterSpacing: 4,
   },
   dailyQuestBtn: {
     flex: 1,
@@ -922,51 +456,27 @@ const styles = StyleSheet.create({
     letterSpacing: 4,
   },
 
-  // ── Week nav ──────────────────────────────────────────────────────────────
-
-  calendarNav: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingTop: 18,
-    paddingBottom: 12,
-  },
-  navArrow: {
-    width: 40,
-    height: 40,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderRadius: 4,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    backgroundColor: SL.panel,
-  },
-  navArrowText: { fontFamily: F.heading, fontSize: 22, color: SL.accent },
-  navCenter: { flex: 1, alignItems: 'center', gap: 3 },
-  navCurrentBadge: {
+  skeletonHint: {
     fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 3,
+    fontSize: 16,
+    color: SL.muted,
+    letterSpacing: 1,
+    textAlign: 'center',
+    paddingHorizontal: 16,
+    marginTop: 18,
+    marginBottom: 12,
     textTransform: 'uppercase',
   },
-  navRangeText: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.muted,
-    letterSpacing: 0.5,
-  },
 
-  // ── Calendar grid ─────────────────────────────────────────────────────────
-
-  calendarGrid: {
+  // ── Weekday grid ─────────────────────────────────────────────────────────
+  weekGrid: {
     flexDirection: 'row',
     paddingHorizontal: 8,
     gap: 4,
   },
   dayNode: {
     flex: 1,
-    minHeight: 120,
+    minHeight: 110,
     backgroundColor: SL.panel,
     borderRadius: 4,
     borderWidth: 1.5,
@@ -975,18 +485,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 10,
     paddingHorizontal: 2,
-    gap: 2,
+    gap: 4,
   },
   dayNodeSelected: {
     backgroundColor: '#0a1a2e',
     borderColor: SL.accent,
     borderWidth: 2,
   },
-  dayNodeToday: {
-    borderColor: SL.text,
-    borderWidth: 1.5,
-  },
-
   dayLabel: {
     fontFamily: F.bodyMed,
     fontSize: 16,
@@ -995,24 +500,6 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   dayLabelSel: { color: SL.accent },
-
-  dayNum: {
-    fontFamily: F.heading,
-    fontSize: 28,
-    color: SL.text,
-    lineHeight: 32,
-  },
-  dayNumSel: { color: SL.text },
-
-  dayMonth: {
-    fontFamily: F.bodyMed,
-    fontSize: 14,
-    color: SL.muted,
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  dayMonthSel: { color: SL.muted },
-
   dayWorkoutName: {
     fontFamily: F.bodyMed,
     fontSize: 14,
@@ -1023,20 +510,8 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   dayWorkoutNameSel: { color: SL.accent },
-
-  dotsRow: {
-    flexDirection: 'row',
-    gap: 3,
-    marginTop: 1,
-  },
-  dot: {
-    width: 5,
-    height: 5,
-    borderRadius: 0,
-    backgroundColor: SL.accent,
-  },
-  dotSel: { backgroundColor: SL.accent },
-
+  dotsRow: { flexDirection: 'row', gap: 3, marginTop: 1 },
+  dot: { width: 5, height: 5, backgroundColor: SL.accent },
   dayRest: {
     fontFamily: F.bodyMed,
     fontSize: 14,
@@ -1044,10 +519,8 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     textTransform: 'uppercase',
   },
-  dayRestSel: { color: SL.muted },
 
   // ── Selected day panel ────────────────────────────────────────────────────
-
   dayCard: {
     marginHorizontal: 8,
     marginTop: 14,
@@ -1072,8 +545,6 @@ const styles = StyleSheet.create({
     color: SL.muted,
     letterSpacing: 1,
   },
-
-  // Assigned workout card
   assignedWorkoutCard: {
     backgroundColor: SL.bg,
     borderWidth: 1.5,
@@ -1112,40 +583,7 @@ const styles = StyleSheet.create({
     flexShrink: 0,
     marginTop: 2,
   },
-  workoutRemoveBtnText: {
-    fontFamily: F.body,
-    fontSize: 12,
-    color: SL.danger,
-  },
-  completedBadge: {
-    backgroundColor: 'rgba(76,175,80,0.15)',
-    borderWidth: 1,
-    borderColor: '#4CAF50',
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  completedBadgeText: {
-    fontFamily: F.heading,
-    fontSize: 12,
-    color: '#4CAF50',
-    letterSpacing: 2,
-  },
-  pendingBadge: {
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: '#1a3a5c',
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  pendingBadgeText: {
-    fontFamily: F.bodyMed,
-    fontSize: 12,
-    color: '#4a6a8a',
-    letterSpacing: 2,
-  },
-
+  workoutRemoveBtnText: { fontFamily: F.body, fontSize: 12, color: SL.danger },
   viewBtn: {
     backgroundColor: SL.accent,
     borderRadius: 6,
@@ -1160,25 +598,6 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     textTransform: 'uppercase',
   },
-
-  // + ADD ANOTHER / + ASSIGN WORKOUT button
-  addAnotherBtn: {
-    height: 40,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 6,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(74,158,191,0.06)',
-  },
-  addAnotherBtnText: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-  },
-
   restCard: { alignItems: 'center', gap: 8, paddingVertical: 16 },
   restLabel: { fontFamily: F.heading, fontSize: 26, color: SL.muted, letterSpacing: 5 },
   restSub:   { fontFamily: F.bodyMed, fontSize: 20, color: SL.muted, letterSpacing: 0.5 },
@@ -1245,19 +664,29 @@ const styles = StyleSheet.create({
   },
 
   // ── Day Editor Modal ──────────────────────────────────────────────────────
-
+  // Centered system-style dialog (not a bottom sheet).
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.85)',
-    justifyContent: 'flex-end',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
   },
+  // The dialog itself — rounded, with the cool ice-glow frame.
   editorBox: {
+    width: '100%',
+    maxWidth: 560,
     backgroundColor: SL.panel,
     borderWidth: 1.5,
-    borderColor: SL.border,
+    borderColor: SL.accent,
+    borderRadius: 18,
     padding: 24,
-    paddingBottom: 40,
+    paddingBottom: 28,
     maxHeight: '85%',
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.3,
+    shadowRadius: 24,
   },
   editorTitle: {
     fontFamily: F.heading,
@@ -1268,35 +697,6 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 20,
   },
-
-  toggleRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
-  toggleBtn: {
-    flex: 1,
-    paddingVertical: 8,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 6,
-    alignItems: 'center',
-  },
-  toggleBtnActive: { backgroundColor: 'rgba(74,158,191,0.15)', borderColor: SL.accent },
-  toggleBtnText: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.muted,
-    letterSpacing: 1.5,
-    textTransform: 'uppercase',
-  },
-  toggleBtnTextActive: { color: SL.accent },
-  toggleHint: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.muted,
-    letterSpacing: 0.5,
-    textAlign: 'center',
-    marginBottom: 20,
-  },
-
-  // Assigned chips (read-only list in modal)
   assignedChips: { gap: 6, marginBottom: 16 },
   assignedChip: {
     paddingVertical: 8,
@@ -1313,7 +713,6 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     textTransform: 'uppercase',
   },
-
   editorSectionLabel: {
     fontFamily: F.bodyMed,
     fontSize: 18,
@@ -1354,12 +753,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     marginTop: 2,
   },
-  checkMark: {
-    fontFamily: F.bodyMed,
-    fontSize: 22,
-    color: SL.accent,
-    marginLeft: 8,
-  },
+  checkMark: { fontFamily: F.bodyMed, fontSize: 22, color: SL.accent, marginLeft: 8 },
   noWorkoutsText: {
     fontFamily: F.bodyMed,
     fontSize: 20,
@@ -1369,7 +763,6 @@ const styles = StyleSheet.create({
     marginVertical: 24,
     lineHeight: 28,
   },
-
   editorButtons: { flexDirection: 'row', gap: 10 },
   editorCancelBtn: {
     flex: 1,
@@ -1403,8 +796,7 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
 
-  // ── Checkup Modal ─────────────────────────────────────────────────────────
-
+  // ── Phrase Modal ──────────────────────────────────────────────────────────
   modalBox: {
     backgroundColor: SL.panel,
     borderWidth: 1.5,
@@ -1421,17 +813,6 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     textTransform: 'uppercase',
     textAlign: 'center',
-  },
-  modalInput: {
-    height: 48,
-    backgroundColor: SL.bg,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 6,
-    paddingHorizontal: 16,
-    fontFamily: F.bodyMed,
-    fontSize: 20,
-    color: SL.text,
   },
   modalButtons: { flexDirection: 'row', gap: 10 },
   modalCancel: {

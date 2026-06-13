@@ -396,6 +396,9 @@ const styles = StyleSheet.create({
   // ── Header ──────────────────────────────────────────────────────────────────
 
   header: {
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
     paddingHorizontal: 24,
     paddingTop: 60,
     paddingBottom: 24,
@@ -426,7 +429,24 @@ const styles = StyleSheet.create({
 
   // ── Form ────────────────────────────────────────────────────────────────────
 
-  form: { padding: 20, paddingBottom: 24 },
+  // Cool ice-glow frame wrapping the whole form, matching the Skills page.
+  form: {
+    padding: 20,
+    paddingBottom: 24,
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
+    marginTop: 16,
+    marginBottom: 28,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 18,
+    backgroundColor: SL.bg,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.2,
+    shadowRadius: 20,
+  },
 
   inputLabel: {
     fontFamily: F.bodyMed,

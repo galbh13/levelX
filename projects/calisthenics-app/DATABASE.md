@@ -11,12 +11,21 @@ Only three tables have `CREATE TABLE` statements in the repo:
 - `profiles`, `workouts`, `exercises` — defined in [lib/schema.sql](lib/schema.sql).
 
 Everything else (`classes`, `class_quests`, `student_quest_completions`,
-`exercises_gallery`, `workout_override_workouts`, `checkups`,
-`checkup_questions`, `checkup_answers`, `checkup_exercises`, `checkup_uploads`,
+`exercises_gallery`, `workout_override_workouts`,
 `daily_quests`, `daily_quest_completions`)
 was created directly in the Supabase dashboard with no migration file. The
-extended `profiles` columns (`current_lvl`, `total_exp`, `prestige_count`,
-`class_id`) were also added via dashboard.
+extended `profiles` columns (`current_lvl`, `prestige_count`, `class_id`) were
+also added via dashboard. (`total_exp` was dropped 2026-06-05 when EXP was
+removed from the app — see `migrations/20260605_drop_total_exp.sql`.)
+
+> **Self-coach refactor (2026-05-22):** the `coach` and `student` roles were
+> collapsed into a single `player` role, and the entire Checkup system
+> (`checkups`, `checkup_questions`, `checkup_answers`, `checkup_exercises`,
+> `checkup_uploads` + the `checkup-videos` storage bucket) was dropped. See
+> [supabase/migrations/20260522_self_coach_refactor.sql](supabase/migrations/20260522_self_coach_refactor.sql).
+> Each player now authors their own content, so `workouts.created_by`,
+> `daily_quests.coach_id`, and `workout_override_workouts.coach_id` all equal the
+> player's own id. `profiles.coach_id` is kept but unused (always NULL).
 
 The [supabase/migrations/](supabase/migrations/) folder only contains
 `class_quests` data/structure fixes — it is **not** a complete schema history.
@@ -38,12 +47,12 @@ no longer used by the app. Safe to delete manually from the dashboard:
 - **Provider:** Supabase Auth (email/password)
 - **Client:** `lib/supabase.js` — imported as `supabase` across all screens
 - **Session routing:** `App.js` reads `supabase.auth.getSession()` on mount,
-  then fetches `profiles.role` to route the user to the correct navigator
-  (`admin` → AdminNavigator, `coach` → CoachNavigator, `student` → StudentApp)
+  then fetches `profiles.role` to route the user (`admin` → AdminNavigator;
+  everyone else → PlayerApp, the self-coaching app).
 - **New user trigger:** A Postgres function `handle_new_user()` auto-inserts a
   row into `profiles` whenever a new `auth.users` row is created (trigger:
-  `on_auth_user_created`). It copies `id` and `email`. All other fields
-  (full_name, role, coach_id, etc.) must be set manually after sign-up.
+  `on_auth_user_created`). It sets `id`, `email`, and `role = 'player'`.
+  `full_name` / `class_id` are set later in-app.
 
 ---
 
@@ -51,17 +60,19 @@ no longer used by the app. Safe to delete manually from the dashboard:
 
 RLS is **enabled** on all tables. The base policies defined in `lib/schema.sql`
 are conservative starting points — the app often bypasses them in practice by
-using service-role or by relying on coach/admin flows that were built before
-full RLS hardening. Key policies:
+using service-role or by relying on flows built before full RLS hardening.
+Since the self-coach refactor, `assigned_to` and `created_by` are the same
+player, so both workout policies resolve to "the player sees their own work."
+Key policies:
 
 | Table       | Policy | Rule |
 |-------------|--------|------|
 | `profiles`  | Users can view own profile | `auth.uid() = id` |
-| `workouts`  | Students see own workouts | `auth.uid() = assigned_to` |
-| `workouts`  | Coaches see workouts they created | `auth.uid() = created_by` |
+| `workouts`  | Players see workouts assigned to them | `auth.uid() = assigned_to` |
+| `workouts`  | Players see workouts they created | `auth.uid() = created_by` |
 | `exercises` | Visible with parent workout | workout's `assigned_to` or `created_by` = `auth.uid()` |
 
-> **Note:** Many newer tables (checkups, class_quests, etc.) were added via
+> **Note:** Many newer tables (class_quests, daily_quests, etc.) were added via
 > migrations and may have broader or no RLS policies. Always check before
 > adding queries that touch sensitive data.
 
@@ -77,17 +88,23 @@ The central user table. One row per auth user.
 | `id` | uuid PK | References `auth.users(id)` |
 | `email` | text | Copied from auth on sign-up |
 | `full_name` | text | Set manually |
-| `role` | text | `'admin'`, `'coach'`, or `'student'` |
-| `coach_id` | uuid | FK → `profiles(id)`. NULL = unassigned |
-| `current_lvl` | integer | Player's current level (0–100) |
-| `total_exp` | integer | Total EXP earned (used for display) |
+| `role` | text | `'admin'` or `'player'` (default `'player'`). Coach/student roles removed in self-coach refactor. |
+| `coach_id` | uuid | FK → `profiles(id)`. **Legacy / unused** since self-coach refactor — always NULL. |
+| `current_lvl` | integer | **Legacy / unused** — LVL is computed from completions, not stored (see [lib/computeLvl.js](lib/computeLvl.js)) |
 | `prestige_count` | integer | How many times the player has prestiged |
 | `class_id` | uuid | FK → `classes(id)`. NULL = no class assigned |
-| `guiding_phrase` | text | Coach-authored motivational sentence shown on the student's Workouts screen. NULL = none set |
+| `nickname` | text | Short display handle, separate from `full_name`. Set on the Profile tab. NULL = none. Added in `migrations/20260607_profile_fields.sql`. |
+| `bio` | text | One-sentence profile tagline. Set on the Profile tab. NULL = none. Added in `migrations/20260607_profile_fields.sql`. (Replaced the removed `guiding_phrase` column.) |
+| `avatar_url` | text | Public URL of the player's uploaded profile picture (in the `avatar` storage bucket). NULL = none. Added in `migrations/20260607_profile_fields.sql`. |
 | `created_at` | timestamptz | Auto |
 
-**Used by:** Every screen. AdminDashboard reads all profiles to build roster.
-Coach reads student profiles. Player reads own profile for HUD.
+> **`guiding_phrase` removed (2026-06-07)** in `migrations/20260607_profile_fields.sql`.
+> The profile "sentence" now lives in the new `bio` column, edited on the Profile tab.
+
+**Used by:** Every screen. AdminDashboard reads all `player` profiles for the
+read-only roster. Each player reads/writes their own profile (class_id,
+prestige_count) for the HUD and self class management. ProfileScreen (Profile
+tab) reads/writes the player's own `full_name`, `nickname`, `bio`, `avatar_url`.
 
 ---
 
@@ -100,9 +117,12 @@ Defines the class tiers (Class I, Class II, etc.). Dynamic — never hardcode co
 | `name` | text | e.g. `'Class I'`, `'Class II'` |
 | `order_index` | integer | 0 = first class, 1 = second, etc. |
 | `description` | text | Flavor text for the class |
+| `prestige_at` | integer | LVL gate for prestige (85/100/160 for Class I/II/III; default 80 for any class predating the value). This is ONLY the level gate — the full prestige check (main quests + 1 Tier II skill) lives in [lib/prestige.js](lib/prestige.js), not the DB. The bar's MAX is **derived** — sum of all `lvl_reward` in the class — so only this threshold is stored. |
 
-**Used by:** ClassQuestScreen, SkillsScreen, CoachSideQuestScreen,
-QuestTreeScreen. Always fetched dynamically — never hardcode class names or count.
+**Used by:** SkillsScreen, QuestTreeScreen, HomeScreen. Always fetched
+dynamically — never hardcode class names or count. The progress bar scales each
+class to its own max (Σ `lvl_reward`) and draws the prestige marker at
+`prestige_at`.
 
 ---
 
@@ -156,15 +176,13 @@ Every quest node in the quest tree (both main and side quests) for every class.
   (Class I MAIN quests still use the simple linear `branch = 'main'` pattern.)
 
 **UI convention (all classes):** both main AND side quests render as one chain
-card per distinct `chain`, on SkillsScreen (player) and ClassQuestScreen (coach).
-Tapping a card opens the tree screen (`QuestTree` / `CoachQuestTree`) with
-`{ chain, questType }`; the tree fetch filters by `class_id` + `chain` +
-`quest_type`. The coach toggles completion inside the tree (same generic
-`student_quest_completions` write for main and side). The old flat-list
-`CoachSideQuestScreen` is legacy/unwired (kept as a fallback).
+card per distinct `chain`, on SkillsScreen. Tapping a card opens `QuestTree` with
+`{ classId, chain, questType }`; the tree fetch filters by `class_id` + `chain` +
+`quest_type`. Since the self-coach refactor `QuestTreeScreen` is **interactive** —
+the player taps a node to toggle their own completion (same generic
+`student_quest_completions` write for main and side, `student_id` = self).
 
-**Used by:** CoachQuestTreeScreen, QuestTreeScreen (player view), ClassQuestScreen,
-SkillsScreen. (CoachSideQuestScreen is legacy — no longer wired into navigation.)
+**Used by:** QuestTreeScreen + SkillsScreen (both player-facing, self-scoped).
 
 ---
 
@@ -178,16 +196,18 @@ Junction table — records which quests each student has completed.
 | `quest_id` | uuid | FK → `class_quests(id)` |
 | `completed_at` | timestamptz | Auto (presumably) |
 
-**Written by:** Coach screens (ClassQuestScreen, CoachQuestTreeScreen,
-CoachSideQuestScreen) when toggling quest completion. Also updates
-`profiles.current_lvl` in the same operation.
+**Written by:** QuestTreeScreen when the player toggles their own quest
+completion. LVL is **computed** from these rows per class (see
+[lib/computeLvl.js](lib/computeLvl.js)) — `profiles.current_lvl` is no longer
+read or written.
 
-**Read by:** QuestTreeScreen, SkillsScreen (player view) to show node states.
+**Read by:** QuestTreeScreen, SkillsScreen, HomeScreen, WorkoutsScreen (to
+compute and show LVL / node states).
 
 ---
 
 ### `workouts`
-Workout templates created by coaches and assigned to players.
+Workout templates a player creates for themselves (`assigned_to` = `created_by` = self).
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -195,12 +215,12 @@ Workout templates created by coaches and assigned to players.
 | `title` | text | e.g. `'PULL DAY A'` |
 | `purpose` | text | Optional goal description |
 | `assigned_to` | uuid | FK → `profiles(id)` — the student |
-| `created_by` | uuid | FK → `profiles(id)` — the coach |
+| `created_by` | uuid | FK → `profiles(id)` — the author (= the player, same as `assigned_to`) |
 | `scheduled_date` | date | Original scheduled date (mostly legacy) |
 | `created_at` | timestamptz | Auto |
 
 **Used by:** WorkoutsScreen, WorkoutDetailScreen, WorkoutEditScreen,
-CreateWorkoutScreen, StudentDetailScreen, CoachDashboard.
+CreateWorkoutScreen, StudentDetailScreen (the self Manage hub).
 
 ---
 
@@ -223,145 +243,117 @@ CreateWorkoutScreen.
 ---
 
 ### `exercises_gallery`
-Master library of all exercises. Used as the source when coaches build workouts
-or checkups.
+Master library of all exercises. Used as the source when players build workouts.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | uuid PK | |
 | `name` | text | Exercise name |
-| `movement_type` | text | `'Strength'`, `'Skill'`, `'Mobility'`, `'Conditioning'` |
+| `movement_type` | text | See valid values below. CHECK constraint `exercises_gallery_movement_type_check`. |
 | `youtube_url` | text | Full YouTube URL (optional) |
 | `description` | text | Optional description |
-| `coaching_cues` | text | Newline-separated coaching cues |
+| `coaching_cues` | text | Newline-separated coaching cues. (Re)added to the live table in migration `20260604_gallery_add_exercise_fixes.sql`. |
+| `min_class_order` | integer | Which class level this exercise targets: `0`=Class I, `1`=Class II, `2`=Class III, `NULL`=all classes. Added in migration `20260604_gallery_class_field.sql`. |
+| `video_url` | text | Public URL of a video uploaded to the `exercise-videos` Supabase Storage bucket. Takes priority over `youtube_url` in detail view. Added in migration `20260604_gallery_video_url.sql`. |
 | `created_by` | uuid | FK → `profiles(id)` |
 
+**movement_type values (current):** `'Pull'`, `'Push'`, `'Balance'`, `'Legs'`, `'Mobility'`, `'Flexibility'`  
+*(Old values `Strength`, `Skill`, `Conditioning` are no longer used in the UI but remain
+permitted by the CHECK constraint so legacy rows still validate.)*
+
+**RLS:** INSERT is admin-only via policy `Admin insert exercises`
+(`WITH CHECK (public.is_admin())`). `is_admin()` is a `SECURITY DEFINER` helper that
+checks `profiles.role = 'admin'` without being blocked by `profiles`' own RLS. Both
+the policy and the movement_type constraint were added/corrected in migration
+`20260604_gallery_add_exercise_fixes.sql`.
+
+**Storage:** exercise demo videos are stored in the `exercise-videos` Supabase Storage bucket (must be created as **public** in the Supabase dashboard).
+
 **Used by:** ExerciseGalleryScreen, ExerciseDetailScreen, AddExerciseScreen,
-WorkoutEditScreen, CheckupBuilderScreen, WorkoutDetailScreen (for YouTube links).
+WorkoutEditScreen, WorkoutDetailScreen (for YouTube links).
+
+---
+
+### Scheduling model — skeleton + per-date overrides (2026-06-06)
+Two layers resolved at read time by [lib/schedule.js](lib/schedule.js):
+- **`weekly_workout_template`** — the recurring weekly SKELETON, keyed by
+  `day_of_week`. Edited in the Manage hub (StudentDetailScreen). The default plan
+  that repeats every week.
+- **`workout_override_workouts`** — per-SPECIFIC-DATE rows. An override for a date
+  **wins** over the skeleton for that date, and carries the `completed` flag.
+
+**Resolution for a date:** if any `workout_override_workouts` rows exist for that
+exact date, use them; otherwise show the `weekly_workout_template` rows for that
+weekday (virtual, not stored). The first time a template-derived date is completed
+or edited, the day is **materialized** — its weekday template is copied into
+`workout_override_workouts` rows for that date — so completion/edits attach to the
+date. "Reset to weekly plan" deletes a date's override rows so it follows the
+skeleton again. Resolution lives in `resolveDayWorkouts` / `materializeDay`.
+
+### `weekly_workout_template`
+The recurring weekly skeleton. Migration:
+`migrations/20260606_weekly_workout_template.sql`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | uuid PK | |
+| `student_id` | uuid | FK → `profiles(id)` ON DELETE CASCADE (the player) |
+| `coach_id` | uuid | FK → `profiles(id)` — equals the player's own id (self) |
+| `day_of_week` | smallint | 0=Sun … 6=Sat, CHECK 0..6 |
+| `workout_id` | uuid | FK → `workouts(id)` ON DELETE CASCADE |
+| `created_at` | timestamptz | Auto |
+| UNIQUE (`student_id`, `day_of_week`, `workout_id`) | | no dup per weekday |
+
+**Index:** `(student_id)`. **RLS:** owner CRUD (`auth.uid() = student_id`).
+
+**Used by:** StudentDetailScreen (skeleton editor), WorkoutsScreen + HomeScreen
+(read-time resolution), CreateWorkoutScreen (assign a new workout to a weekday).
 
 ---
 
 ### `workout_override_workouts`
-The scheduling layer. Instead of using `workouts.scheduled_date` directly,
-the coach assigns workouts to specific calendar dates for a specific student here.
-This is what drives the weekly calendar view.
+Per-specific-date scheduling — a **date override** on top of the weekly skeleton
+(see Scheduling model above). Edited per date on the Workouts screen (EDIT DAY);
+also written by `materializeDay` when a template day is first completed/edited.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | uuid PK | |
-| `student_id` | uuid | FK → `profiles(id)` |
+| `student_id` | uuid | FK → `profiles(id)` (the player) |
 | `workout_id` | uuid | FK → `workouts(id)` |
 | `specific_date` | date | The actual date this workout is scheduled |
-| `completed` | boolean | Student has marked this done |
-| `coach_feedback` | text | Coach's text feedback on this specific session |
-| `feedback_is_read` | boolean | Player has read the feedback |
+| `completed` | boolean | Player has marked this done |
+| `coach_feedback` | text | Legacy per-session note (unused since self-coach refactor) |
+| `feedback_is_read` | boolean | Legacy read flag (unused) |
 | `created_at` | timestamptz | Auto |
 
-**Used by:** WorkoutsScreen (player's weekly calendar), HomeScreen (today's missions),
-StudentDetailScreen (coach's view of student calendar), WorkoutDetailScreen.
+**Used by:** WorkoutsScreen (per-date overrides + completion), HomeScreen (today's
+missions), WorkoutDetailScreen.
 
 ---
 
-### `checkups`
-One checkup per student per cycle. Created by coach, submitted by student,
-reviewed by coach.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | uuid PK | |
-| `student_id` | uuid | FK → `profiles(id)` |
-| `coach_id` | uuid | FK → `profiles(id)` |
-| `scheduled_date` | date | When the checkup is due |
-| `status` | text | `'pending'` → `'submitted'` → (reviewed) |
-| `coach_response` | text | Coach's written response after review |
-| `responded_at` | timestamptz | When coach submitted their response |
-| `response_is_read` | boolean | Player has read the coach response |
-| `coach_read` | boolean | Coach has opened the submitted checkup |
-| `is_read` | boolean | General read flag (legacy/redundant with coach_read) |
-| `created_at` | timestamptz | Auto |
-
-**Business rules:**
-- Max 2 checkups per student at any time (enforced in CheckupBuilderScreen).
-- Checkup expires 10 days after `created_at` (shown as countdown in CheckupReviewScreen).
-- When coach opens a submitted checkup, `coach_read` is set to `true`.
-- When player reads coach response, `response_is_read` is set to `true`.
-
-**Used by:** CheckupBuilderScreen, CheckupReviewScreen, CheckupScreen,
-StudentDetailScreen, HomeScreen, WorkoutsScreen.
-
----
-
-### `checkup_questions`
-The questions the coach defines for a checkup.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | uuid PK | |
-| `checkup_id` | uuid | FK → `checkups(id)` |
-| `order_index` | integer | Display order |
-| `question` | text | The question text |
-
----
-
-### `checkup_answers`
-Player's answers to each question.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | uuid PK | |
-| `checkup_id` | uuid | FK → `checkups(id)` |
-| `question_id` | uuid | FK → `checkup_questions(id)` |
-| `answer` | text | Player's free-text answer |
-
----
-
-### `checkup_exercises`
-The exercises the coach wants the player to record video for.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | uuid PK | |
-| `checkup_id` | uuid | FK → `checkups(id)` |
-| `order_index` | integer | Display order |
-| `exercise_name` | text | Display name |
-| `exercise_gallery_id` | uuid | FK → `exercises_gallery(id)` (nullable) |
-
----
-
-### `checkup_uploads`
-Video uploads linked to a specific checkup exercise.
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | uuid PK | |
-| `checkup_id` | uuid | FK → `checkups(id)` |
-| `checkup_exercise_id` | uuid | FK → `checkup_exercises(id)` |
-| `video_url` | text | Public URL from Supabase Storage |
-| `uploaded_at` | timestamptz | Auto or set on upload |
-
-**Storage bucket:** `checkup-videos`
-Path pattern: `{checkup_id}/{exercise_id}/{timestamp}.{ext}`
-Uploaded via `supabase.storage.from('checkup-videos').upload(...)` with `upsert: true`.
-
----
+> **Checkup tables removed (2026-05-22).** `checkups`, `checkup_questions`,
+> `checkup_answers`, `checkup_exercises`, and `checkup_uploads` were dropped in
+> the self-coach refactor, along with the `checkup-videos` storage bucket.
 
 ### `daily_quests`
-Coach-authored daily checklist items, one row per quest per student. Soft-deleted
-via `active = false` so existing completion history (and the EXP it represents)
-is preserved when a coach removes a quest.
+Self-authored daily checklist items, one row per quest per player. Soft-deleted
+via `active = false` so existing completion history is preserved when the player
+removes a quest.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `id` | uuid PK | |
-| `student_id` | uuid | FK → `profiles(id)` ON DELETE CASCADE |
-| `coach_id` | uuid | FK → `profiles(id)` ON DELETE CASCADE |
+| `student_id` | uuid | FK → `profiles(id)` ON DELETE CASCADE (the player) |
+| `coach_id` | uuid | FK → `profiles(id)` ON DELETE CASCADE — now equals the player's own id (self-authored) |
 | `title` | text | Quest text, CHECK `char_length(title) <= 100` |
 | `active` | boolean | Soft-delete flag, default `true` |
 | `created_at` | timestamptz | Auto |
 
 **Index:** `(student_id, active)`
 
-**Used by:** HomeScreen (player today's list), CoachDailyQuestScreen (manage).
+**Used by:** HomeScreen (player today's list), DailyQuestScreen
+(`CoachDailyQuestScreen.js`, self-manage from the Workouts → Manage hub).
 
 ---
 
@@ -381,18 +373,59 @@ player. Yesterday's rows stay as history, today starts empty — no cron needed.
 
 **Index:** `(student_id, completion_date)`
 
-**Player EXP rule:** each completed workout = +5 EXP, each daily-quest
-completion row = +1 EXP. These are the only two sources of EXP. Every EXP
-display (HomeScreen, WorkoutsScreen, CoachDashboard student cards) uses the
-same formula:
-`completed_workouts_count * 5 + daily_quest_completions_lifetime_count`.
-There is no separate EXP column — counts are derived on read.
+> **EXP removed (2026-06-05).** EXP was deleted from the app — no LEVEL/EXP card,
+> no "+1 EXP" daily-quest reward, no EXP stat on Workouts, and the unused
+> `profiles.total_exp` column was dropped. Daily-quest completions are still
+> recorded (they drive the "done today" state), they just no longer award EXP.
 
 **Timezone:** all `completion_date` values use `israelToday()` from
 [lib/israelDate.js](lib/israelDate.js), which is
 `new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jerusalem' })`.
 Workout dates still use UTC (`new Date().toISOString().split('T')[0]`) —
 these two systems are intentionally separate for now.
+
+---
+
+### `gallery_example_workouts`
+Admin-authored example workout templates shown in the gallery's "Example Workouts" tab.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | uuid PK | |
+| `title` | text | Workout name, stored uppercase |
+| `description` | text | Optional one-liner describing the workout's goal |
+| `class_order` | integer | Which class this targets: `0`=Class I, `1`=Class II, `2`=Class III |
+| `exercises` | jsonb | Array of `{name, sets, reps, notes}` objects |
+| `created_at` | timestamptz | Auto |
+
+**RLS:** Authenticated users can read; only `admin` role can insert/delete.
+
+**Used by:** ExerciseGalleryScreen (Example Workouts tab — fetch + delete), AddExampleWorkoutScreen (create). Added in migration `20260604_gallery_example_workouts.sql`.
+
+---
+
+### `challenges`
+Admin-authored challenges shown to every player on the **Challenges** tab
+(`screens/ChallengesScreen.js`, which replaced the old placeholder Chat screen).
+Added in `migrations/20260607_challenges.sql`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `title` | text | Challenge name (required) |
+| `description` | text | What the challenge is. NULL = none |
+| `reward` | text | Optional reward shown as a gold badge. NULL = none |
+| `active` | boolean | Visibility flag, default `true`. Queries filter `active = true` |
+| `created_by` | uuid | FK → `profiles(id)` — the admin who posted it |
+| `created_at` | timestamptz | Auto |
+
+**RLS:** any authenticated user can `SELECT`; only admins can `INSERT`/`UPDATE`/
+`DELETE`, gated by the `public.is_admin()` SECURITY DEFINER helper (same helper the
+`exercises_gallery` insert policy uses).
+
+**Used by:** ChallengesScreen — role-aware (read-only list for players; inline
+create + delete for admins). Reached as the player **Challenges** tab and from the
+Admin dashboard top bar (a `Challenges` screen in `AdminNavigator`).
 
 ---
 
@@ -416,48 +449,47 @@ All screens use `Promise.all([...])` for parallel queries to avoid waterfalls:
 const [qRes, cRes, pRes] = await Promise.all([
   supabase.from('class_quests').select('*')...,
   supabase.from('student_quest_completions').select('quest_id')...,
-  supabase.from('profiles').select('current_lvl')...,
+  supabase.from('profiles').select('class_id, prestige_count')...,
 ]);
 ```
 
 ### Level update pattern (quest toggle)
-When completing/un-completing a quest, two writes always happen together:
-1. Insert/delete from `student_quest_completions`
-2. Update `profiles.current_lvl` by adding/subtracting `quest.lvl_reward`
-Level is clamped to minimum 0: `Math.max(0, currentLvl - reward)`
+The player toggles their own quest in QuestTreeScreen, which only ever
+inserts/deletes a row in `student_quest_completions` (`student_id` = self). LVL
+is **not stored** — it is recomputed from those rows per class via
+[lib/computeLvl.js](lib/computeLvl.js). `profiles.current_lvl` is dead.
 
 ### Prestige pattern
-When coach triggers prestige on a student:
+Prestige is **gated** by [lib/prestige.js](lib/prestige.js) `evaluatePrestige()` —
+ALL of: reach `classes.prestige_at`, complete the class's required main quests,
+and fully complete ≥1 Tier-2 side chain (see CLAUDE.md "Class & Quest System").
+SkillsScreen shows a live requirements checklist; the PRESTIGE NOW button appears
+only once every gate passes. The action itself:
 1. Advance `profiles.class_id` to the next class (by `order_index`)
-2. Reset `profiles.current_lvl` to 0
-3. Increment `profiles.prestige_count` by 1
-4. Delete all rows from `student_quest_completions` for that student
+2. Increment `profiles.prestige_count` by 1
 
-### Checkup flow
-```
-Coach creates checkup (status: 'pending')
-  → Player sees alert on HomeScreen/WorkoutsScreen
-  → Player fills answers + uploads videos in CheckupScreen
-  → Player submits → status: 'submitted'
-  → Coach sees badge on StudentDetailScreen
-  → Coach opens CheckupReviewScreen → coach_read: true
-  → Coach writes response → coach_response saved, responded_at set
-  → Player sees alert → reads it → response_is_read: true
-```
+Quest completions are **preserved** across prestige (not deleted), so computed
+per-class LVL auto-restores if the player returns to a class. No `current_lvl`
+write — LVL is always derived from completions for the current class.
 
 ### Workout scheduling pattern
-Workouts are not scheduled via `workouts.scheduled_date`.
-The coach uses `workout_override_workouts` to pin a workout to a specific
-date for a specific student. The weekly calendar in WorkoutsScreen and
-StudentDetailScreen queries this table filtered by `student_id`.
+Workouts are not scheduled via `workouts.scheduled_date`. Two layers (see
+"Scheduling model" above): the Manage hub (StudentDetailScreen) defines the
+recurring **`weekly_workout_template`** skeleton (by weekday); WorkoutsScreen and
+HomeScreen resolve each real date as **override-if-any-else-skeleton** via
+[lib/schedule.js](lib/schedule.js). Per-date edits/completion live in
+`workout_override_workouts` (materialized on first touch).
 
 ---
 
 ## Storage Buckets
 
-| Bucket | Used for | Path pattern |
-|--------|----------|--------------|
-| `checkup-videos` | Player video uploads in checkups | `{checkup_id}/{exercise_id}/{timestamp}.ext` |
+- **`avatar`** (public) — player profile pictures. Uploaded from ProfileScreen
+  (Profile tab) to path `<user_id>/<timestamp>.<ext>`; the public URL is stored in
+  `profiles.avatar_url`. Must be created as **public** in the Supabase dashboard,
+  with an INSERT policy for the `authenticated` role (mirror the `exercise-videos`
+  bucket). See `migrations/20260607_profile_fields.sql`.
+- **`exercise-videos`** (public) — exercise demo videos (`exercises_gallery.video_url`).
 
 ---
 

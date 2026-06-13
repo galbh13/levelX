@@ -7,6 +7,8 @@ import {
 import Svg, { Path } from 'react-native-svg';
 import { supabase } from '../lib/supabase';
 import { F } from '../constants/fonts';
+import { ShimmerFrame, BORDEAUX } from '../components/Shimmer';
+import { requiredMainQuestIds } from '../lib/prestige';
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
@@ -20,6 +22,7 @@ const SL = {
   danger: '#FF4444',
   green:  '#4CAF50',
   gold:   '#FFD700',
+  wine:   '#E11D48',
 };
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
@@ -41,7 +44,10 @@ const BEND_NEAR_CHILD = 12;   // horizontal jog sits this many px above child to
 // name needs (up to a cap), so long text wraps fully and short nodes stay compact.
 const NODE_LINE_H    = 30;   // must match styles.questName lineHeight
 const NODE_V_PAD     = 12;   // must match styles.questCard paddingVertical
-const NODE_BADGE_H   = 32;   // reserved row for the DONE / +LVL badge + center gap
+// Reserved row for the DONE / +LVL badge + the gap above it. Must comfortably
+// cover the badge's real rendered height (text lineHeight 22 + 4 padding = 26)
+// plus styles.questCard gap (6) plus slack so the title is never clipped.
+const NODE_BADGE_H   = 42;
 const NODE_MAX_LINES = 3;
 
 function nodeLineCount(name, nodeW) {
@@ -61,6 +67,56 @@ const BRANCH_ORDER = [
   'power', 'hspu_prog', 'negative', 'balance', 'main',
   'mobility', 'active_hold', 'disconnection', 'freestanding', 'band', 'hs_hold',
 ];
+
+// ─── Per-branch vertical layout (DESIGN CONSTANT, same for every player) ───────
+// Controls where a branch's nodes START and END vertically. Two ways to express
+// each bound (use whichever reads clearest):
+//   • startFrac / endFrac : fraction of tier height (0 = top, 1 = bottom)
+//   • startRank / endRank : ABSOLUTE row, aligns to another branch's node at that
+//                           rank. Takes precedence over the *Frac form when set.
+// The spread between start and end is even. Key = `${chain}.${branch}`. Any
+// branch not listed defaults to full spread { startFrac: 0, endFrac: 1 }, so
+// adding entries only changes the branches named.
+//
+// Behaviour depends on the branch:
+//   • Independent leaf branch (feeds no merge) → spread evenly across
+//     [start, end]; both bounds honoured.
+//   • Branch that feeds a convergence/merge → rigidly shifted DOWN to `start`
+//     (end ignored), clamped so it can't drop onto its merge and invert a
+//     connector. This is how REQUIREMENT aligns under "3 HSPU Wall".
+//   • Floating branch (no fixed column — every node is convergence/post-conv,
+//     e.g. HSPU's MAIN) → rigidly shifted DOWN to `start`, taking the whole
+//     chain with it. Used to add breathing room before a merge in an untiered
+//     chain (substitutes for the absent TIER divider).
+const BRANCH_LAYOUT = {
+  // Planche: NEGATIVE & PRESS start level with HOLD's "15 sec Tuck" (rank 2),
+  // still spanning down to the bottom of Tier 1.
+  'planche.negative': { startRank: 2 },
+  'planche.press':    { startRank: 2 },
+
+  // HSPU: REQUIREMENT branch starts level with "3 HSPU Wall" (rank 3) instead of
+  // at the top. It feeds the MAIN convergence, so it's rigidly shifted down (and
+  // clamped to stay above the merge) rather than spread. (Keys are matched
+  // case-insensitively, so 'requirement' covers Requirement/REQUIREMENT too.)
+  'hspu.requirement': { startRank: 3 },
+
+  // HSPU: MAIN is a floating branch that begins with the multi-branch merge.
+  // HSPU isn't tiered, so there's no TIER divider giving the merge breathing
+  // room. Shifting MAIN to startRank 6 drops the whole branch (merge + chain
+  // below it) by ~1 row, creating a tier-divider-like gap before MAIN.
+  'hspu.main': { startRank: 6 },
+
+  // OAPU: BAND is an independent leaf branch — without a bound it auto-spreads
+  // to fill the full tier height, dragging "3 OAPU with light band" all the way
+  // down to row 7. Capping endRank at 4 lines its last node up with the other
+  // side branches' last nodes (12 sec Active Hold / 3 Negative OAPU x5 sec).
+  'oapu.band': { endRank: 4 },
+
+  // OAPU: MAIN floating branch — same treatment as HSPU. Push it down so the
+  // "MAIN" label isn't overlapping the row-4 endings of NEGATIVE / ACTIVE HOLD.
+  'oapu.main': { startRank: 6 },
+};
+const DEFAULT_BRANCH_LAYOUT = { startFrac: 0, endFrac: 1 };
 
 // Class III (order_index 2) is the first class to use a TIER concept. Tiers are
 // detected structurally within a tier-enabled class — but the class gate below
@@ -332,7 +388,7 @@ function computeHandstandLayout(quests, { applyTiers = false } = {}) {
 
 // ─── Layout engine — column-anchored, convergence-only centering ──────────────
 
-function computeLayout(quests, { applyTiers = false } = {}) {
+function computeLayout(quests, { applyTiers = false, chain = null } = {}) {
   if (quests.length === 0) {
     return {
       positions: {}, firstNodeOfBranch: {},
@@ -400,6 +456,32 @@ function computeLayout(quests, { applyTiers = false } = {}) {
       .map(q => q.id)
   );
 
+  // Step 2c — split DESCENDANTS: a sole-child chain hanging off a split child.
+  //   These must keep floating on their parent's X (staying in the split lane)
+  //   instead of snapping back to the branch column center. Without this, two
+  //   lanes' tips (e.g. PULL's "16 Pull-ups" and "12 Mix Grip") both collapse to
+  //   the shared branch center and render on top of each other. Mirrors the
+  //   handstand layout, which already propagates split offsets to descendants.
+  //   Chain stops at a convergence / post-conv node (those re-center on merge).
+  const isSplitDescendant = new Set();
+  {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      quests.forEach(q => {
+        if (isSplitChild.has(q.id) || isSplitDescendant.has(q.id)) return;
+        if (q.is_convergence || isPostConv[q.id]) return;
+        const prereqs = (q.prerequisites ?? []).filter(p => idMap.has(p));
+        if (prereqs.length !== 1) return;
+        const p = prereqs[0];
+        if (isSplitChild.has(p) || isSplitDescendant.has(p)) {
+          isSplitDescendant.add(q.id);
+          changed = true;
+        }
+      });
+    }
+  }
+
   // Branches that START with a split child — the whole branch floats on parent X
   // rather than occupying a fixed column slot. Determined by the lowest-rank node.
   const splitOnlyBranches = new Set(
@@ -425,7 +507,8 @@ function computeLayout(quests, { applyTiers = false } = {}) {
   quests.forEach(q => {
     const eligible =
       !q.is_convergence && !isPostConv[q.id] &&
-      !isSplitChild.has(q.id) && !splitOnlyBranches.has(q.branch);
+      !isSplitChild.has(q.id) && !isSplitDescendant.has(q.id) &&
+      !splitOnlyBranches.has(q.branch);
     if (eligible && q.branch != null) branchHasColNode[q.branch] = true;
   });
   const floatingBranches = new Set(
@@ -486,6 +569,17 @@ function computeLayout(quests, { applyTiers = false } = {}) {
   const effRank = {};
   quests.forEach(q => { effRank[q.id] = rankOf[q.id] ?? 0; });
 
+  // TEMP DIAG — remove once branch-layout matching is confirmed.
+  if (typeof console !== 'undefined') {
+    console.log('[QuestTreeScreen] chain =', JSON.stringify(chain));
+    console.log('[QuestTreeScreen] branches =', JSON.stringify(branches));
+    console.log('[QuestTreeScreen] floating =', JSON.stringify([...floatingBranches]));
+    [...new Set(quests.map(q => q.branch))].forEach(b => {
+      const key = `${chain}.${b}`.toLowerCase();
+      console.log('[QuestTreeScreen] cfg', JSON.stringify(key), '→', JSON.stringify(BRANCH_LAYOUT[key] ?? null));
+    });
+  }
+
   // Child lookup — keeps spreading safe: a branch that feeds an intra-tier
   // convergence (or the main spine) must NOT be stretched, or its leaf could
   // slide BELOW the fixed-rank merge node and invert the connector.
@@ -500,27 +594,102 @@ function computeLayout(quests, { applyTiers = false } = {}) {
     if (inTier2(q.id)) return;
     const isCol =
       !q.is_convergence && !isPostConv[q.id] &&
-      !isSplitChild.has(q.id) && !splitOnlyBranches.has(q.branch) &&
+      !isSplitChild.has(q.id) && !isSplitDescendant.has(q.id) &&
+      !splitOnlyBranches.has(q.branch) &&
       colBranchSet.has(q.branch) && q.branch !== 'main';
     if (!isCol) return;
     if (!spreadGroups.has(q.branch)) spreadGroups.set(q.branch, []);
     spreadGroups.get(q.branch).push(q);
   });
-  spreadGroups.forEach(group => {
-    // Spread ONLY an independent leaf column: every child of every node either
-    // stays within this same branch chain or crosses into Tier 2. If a node
-    // feeds anything else in Tier 1 (a merge / another branch), leave the whole
-    // branch on its natural ranks so nothing inverts.
-    const ids = new Set(group.map(n => n.id));
+  spreadGroups.forEach((group, branch) => {
+    if (tier1MaxRank <= 0) return;
+
+    const ids    = new Set(group.map(n => n.id));
+    const sorted = group.sort((a, b) => (rankOf[a.id] ?? 0) - (rankOf[b.id] ?? 0));
+    const k      = sorted.length;
+
+    // A branch is an "independent leaf" when every child of every node stays in
+    // this same branch or crosses into Tier 2 — i.e. it feeds no merge. Only such
+    // branches can be freely spread; a branch that feeds a convergence must stay
+    // near its natural ranks so its connector can't invert.
     const independent = group.every(n =>
       (childrenOf.get(n.id) ?? []).every(cid => ids.has(cid) || inTier2(cid))
     );
-    if (!independent) return;
 
-    const sorted = group.sort((a, b) => (rankOf[a.id] ?? 0) - (rankOf[b.id] ?? 0));
-    const k = sorted.length;
-    if (k <= 1 || tier1MaxRank <= 0) return;
-    sorted.forEach((q, i) => { effRank[q.id] = (i * tier1MaxRank) / (k - 1); });
+    const cfg = BRANCH_LAYOUT[`${chain}.${branch}`.toLowerCase()];
+    // Absolute *Rank wins over *Frac; both resolve to an effRank in [0, max].
+    const resolve = (rank, frac, fracDflt) =>
+      rank != null
+        ? Math.max(0, Math.min(tier1MaxRank, rank))
+        : Math.max(0, Math.min(1, frac ?? fracDflt)) * tier1MaxRank;
+
+    if (independent && k > 1) {
+      // Spread evenly across [start, end] of the tier (default = full height),
+      // ordered so a bad config can't invert.
+      const c = cfg ?? DEFAULT_BRANCH_LAYOUT;
+      let startR = resolve(c.startRank, c.startFrac, 0);
+      let endR   = resolve(c.endRank,   c.endFrac,   1);
+      if (endR < startR) [startR, endR] = [endR, startR];
+      sorted.forEach((q, i) => { effRank[q.id] = startR + (i * (endR - startR)) / (k - 1); });
+      return;
+    }
+
+    // Rank-locked branch (feeds a merge): move it ONLY if explicitly configured.
+    // Rigid downward shift so the first node lands at `start` while internal
+    // spacing is preserved; `end` is ignored. Clamped so the last node can't
+    // reach an external child's row (which would invert that connector).
+    if (!cfg) return;
+    const startR       = resolve(cfg.startRank, cfg.startFrac, 0);
+    const firstNatural = rankOf[sorted[0].id] ?? 0;
+    let   shift        = startR - firstNatural;
+
+    let maxLastRank = Infinity;
+    sorted.forEach(n => (childrenOf.get(n.id) ?? []).forEach(cid => {
+      if (!ids.has(cid)) maxLastRank = Math.min(maxLastRank, (rankOf[cid] ?? Infinity) - 1);
+    }));
+    const lastNatural = rankOf[sorted[k - 1].id] ?? 0;
+    if (maxLastRank !== Infinity) shift = Math.min(shift, maxLastRank - lastNatural);
+    if (shift <= 0) return;
+
+    sorted.forEach(n => { effRank[n.id] = (rankOf[n.id] ?? 0) + shift; });
+  });
+
+  // ── Floating branches (no fixed column) — rigid shift only ─────────────────
+  // A floating branch is one whose every node is a convergence / post-conv (so
+  // it never owns a plain column slot — e.g. HSPU's MAIN, which begins with the
+  // multi-branch merge). It's not in spreadGroups, so handle it separately: shift
+  // every node by the same delta so the whole branch (merge + chain below it)
+  // drops to the requested start row. Useful for adding breathing room before
+  // a merge in an untiered chain (HSPU has no TIER divider).
+  const maxAnyRank = Math.max(0, ...Object.values(rankOf));
+  floatingBranches.forEach(branch => {
+    if (branch == null) return;
+    const cfg = BRANCH_LAYOUT[`${chain}.${branch}`.toLowerCase()];
+    if (!cfg) return;
+
+    const group = quests.filter(q => q.branch === branch);
+    if (group.length === 0) return;
+    const sorted = [...group].sort((a, b) => (rankOf[a.id] ?? 0) - (rankOf[b.id] ?? 0));
+    const ids = new Set(sorted.map(n => n.id));
+
+    const startR = cfg.startRank != null
+      ? Math.max(0, Math.min(maxAnyRank, cfg.startRank))
+      : Math.max(0, Math.min(1, cfg.startFrac ?? 0)) * maxAnyRank;
+    const firstNatural = rankOf[sorted[0].id] ?? 0;
+    let shift = startR - firstNatural;
+
+    // Clamp against any external child (uncommon for floating branches since
+    // they typically end the chain, but keep the guard so a bad config can't
+    // invert a downstream connector).
+    let maxLastRank = Infinity;
+    sorted.forEach(n => (childrenOf.get(n.id) ?? []).forEach(cid => {
+      if (!ids.has(cid)) maxLastRank = Math.min(maxLastRank, (rankOf[cid] ?? Infinity) - 1);
+    }));
+    const lastNatural = rankOf[sorted[sorted.length - 1].id] ?? 0;
+    if (maxLastRank !== Infinity) shift = Math.min(shift, maxLastRank - lastNatural);
+    if (shift <= 0) return;
+
+    sorted.forEach(n => { effRank[n.id] = (rankOf[n.id] ?? 0) + shift; });
   });
 
   // Tier 2 nodes drop by an extra TIER_GAP to give the divider breathing room.
@@ -542,6 +711,7 @@ function computeLayout(quests, { applyTiers = false } = {}) {
         !q.is_convergence &&
         !isPostConv[q.id] &&
         !isSplitChild.has(q.id) &&
+        !isSplitDescendant.has(q.id) &&
         !splitOnlyBranches.has(q.branch)
       ) {
         colNodes.push(q);
@@ -650,6 +820,10 @@ export default function QuestTreeScreen({ route, navigation }) {
   const [completions, setCompletions] = useState(new Set());
   const [loading,     setLoading]     = useState(true);
   const [hasTiers,    setHasTiers]    = useState(false);
+  const [classOrder,  setClassOrder]  = useState(0);
+  const [studentId,   setStudentId]   = useState(null);
+  const [pendingQuest, setPendingQuest] = useState(null);
+  const [toggling,     setToggling]     = useState(false);
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
 
@@ -657,6 +831,7 @@ export default function QuestTreeScreen({ route, navigation }) {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
+      setStudentId(user.id);
 
       const [qRes, cRes, clsRes] = await Promise.all([
         supabase
@@ -680,7 +855,9 @@ export default function QuestTreeScreen({ route, navigation }) {
 
       setQuests(qRes.data ?? []);
       setCompletions(new Set((cRes.data ?? []).map(c => c.quest_id)));
-      setHasTiers((clsRes.data?.order_index ?? 0) >= TIER_MIN_CLASS_ORDER);
+      const order = clsRes.data?.order_index ?? 0;
+      setClassOrder(order);
+      setHasTiers(order >= TIER_MIN_CLASS_ORDER);
     } catch (e) {
       console.error('[QuestTreeScreen]', e);
     }
@@ -699,11 +876,18 @@ export default function QuestTreeScreen({ route, navigation }) {
   // look identical to a tier crossing but are not one.
   const applyTiers = hasTiers && questType === 'main';
 
+  // Nodes that are MAIN-quest prestige requirements for this class — highlighted
+  // with a live animated frame (blue while unmet, gold once completed).
+  const requiredIds = useMemo(
+    () => requiredMainQuestIds(classOrder, quests),
+    [classOrder, quests],
+  );
+
   const { positions, firstNodeOfBranch, labelXOf, width, height, nodeWidth } =
     useMemo(
       () => chain === 'handstand'
         ? computeHandstandLayout(quests, { applyTiers })
-        : computeLayout(quests, { applyTiers }),
+        : computeLayout(quests, { applyTiers, chain }),
       [quests, chain, applyTiers],
     );
 
@@ -738,6 +922,34 @@ export default function QuestTreeScreen({ route, navigation }) {
     return pre.every(id => completions.has(id)) ? 'unlocked' : 'locked';
   }
 
+  // ── Toggle (self-coach: the player controls their own level) ────────────────
+
+  async function toggleQuest(quest) {
+    if (!studentId) return;
+    setToggling(true);
+    const done = completions.has(quest.id);
+    try {
+      if (done) {
+        const { error: delErr } = await supabase
+          .from('student_quest_completions')
+          .delete()
+          .eq('student_id', studentId)
+          .eq('quest_id', quest.id);
+        if (delErr) throw delErr;
+        setCompletions(prev => { const s = new Set(prev); s.delete(quest.id); return s; });
+      } else {
+        const { error: insErr } = await supabase
+          .from('student_quest_completions')
+          .insert({ student_id: studentId, quest_id: quest.id });
+        if (insErr) throw insErr;
+        setCompletions(prev => new Set([...prev, quest.id]));
+      }
+    } catch (e) {
+      console.error('[QuestTreeScreen] toggleQuest:', e);
+    }
+    setToggling(false);
+  }
+
   // ── Stats ─────────────────────────────────────────────────────────────────
 
   const doneCount = quests.filter(q => completions.has(q.id)).length;
@@ -757,7 +969,7 @@ export default function QuestTreeScreen({ route, navigation }) {
 
         const done  = completions.has(q.id) && completions.has(pid);
         const state = nodeState(q);
-        const color = done ? SL.green : state === 'unlocked' ? SL.accent : SL.muted;
+        const color = (done || state === 'unlocked') ? SL.accent : SL.muted;
 
         const px = parent.x + parent.w / 2;
         const py = parent.y + parent.h;
@@ -792,18 +1004,30 @@ export default function QuestTreeScreen({ route, navigation }) {
   // ── Node ──────────────────────────────────────────────────────────────────
 
   function renderNode(quest) {
-    const state    = nodeState(quest);
-    const isDone   = state === 'done';
-    const isLocked = state === 'locked';
+    const state      = nodeState(quest);
+    const isDone     = state === 'done';
+    const isLocked   = state === 'locked';
+    const isRequired = requiredIds.has(quest.id);
 
     return (
-      <View
+      <TouchableOpacity
         style={[
           styles.questCard,
-          isDone   && styles.questCardDone,
-          isLocked && styles.questCardLocked,
+          isDone     && styles.questCardDone,
+          isLocked   && styles.questCardLocked,
+          isRequired && styles.questCardRequired,
         ]}
+        disabled={isLocked || toggling}
+        activeOpacity={isLocked ? 1 : 0.75}
+        onPress={() => { if (!isLocked) setPendingQuest(quest); }}
       >
+        {isRequired && (
+          <ShimmerFrame
+            style={[styles.questFrame, { shadowColor: SL.wine }]}
+            colors={BORDEAUX}
+            active
+          />
+        )}
         <Text
           style={[
             styles.questName,
@@ -828,7 +1052,7 @@ export default function QuestTreeScreen({ route, navigation }) {
             </View>
           ) : null}
         </View>
-      </View>
+      </TouchableOpacity>
     );
   }
 
@@ -843,6 +1067,8 @@ export default function QuestTreeScreen({ route, navigation }) {
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
+
+  const confirmBarVisible = pendingQuest !== null;
 
   return (
     <View style={styles.container}>
@@ -865,7 +1091,10 @@ export default function QuestTreeScreen({ route, navigation }) {
       </View>
 
       {/* Tree */}
-      <ScrollView contentContainerStyle={styles.scrollBody}>
+      <ScrollView contentContainerStyle={[
+        styles.scrollBody,
+        confirmBarVisible && { paddingBottom: 160 },
+      ]}>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -875,6 +1104,7 @@ export default function QuestTreeScreen({ route, navigation }) {
             paddingHorizontal: TREE_PAD_H,
           }}
         >
+          <View style={styles.treeFrame}>
           <View style={{ width, height, position: 'relative' }}>
 
             {/* SVG connector lines (under nodes) */}
@@ -947,8 +1177,43 @@ export default function QuestTreeScreen({ route, navigation }) {
             })}
 
           </View>
+          </View>
         </ScrollView>
       </ScrollView>
+
+      {/* ── Confirmation bar ── */}
+      {pendingQuest && (
+        <View style={styles.confirmBar}>
+          <Text style={styles.confirmText}>
+            {completions.has(pendingQuest.id)
+              ? `Remove "${pendingQuest.name}"? (−${pendingQuest.lvl_reward ?? 0} LVL)`
+              : `Mark "${pendingQuest.name}" done? (+${pendingQuest.lvl_reward ?? 0} LVL)`
+            }
+          </Text>
+          <View style={styles.confirmButtons}>
+            <TouchableOpacity
+              style={styles.confirmCancel}
+              onPress={() => setPendingQuest(null)}
+              disabled={toggling}
+            >
+              <Text style={styles.confirmCancelText}>CANCEL</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.confirmOk}
+              disabled={toggling}
+              onPress={() => {
+                const q = pendingQuest;
+                setPendingQuest(null);
+                toggleQuest(q);
+              }}
+            >
+              {toggling
+                ? <ActivityIndicator color={SL.bg} size="small" />
+                : <Text style={styles.confirmOkText}>CONFIRM</Text>}
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -956,7 +1221,7 @@ export default function QuestTreeScreen({ route, navigation }) {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
+  container: { flex: 1, backgroundColor: SL.bg, position: 'relative' },
 
   // Header
   header: {
@@ -975,6 +1240,10 @@ const styles = StyleSheet.create({
     color: SL.text,
     letterSpacing: 5,
     textAlign: 'center',
+    // Ice-glow halo, matching the Home hero.
+    textShadowColor: 'rgba(74,158,191,0.5)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 22,
   },
   chainSubtitle: {
     fontFamily: F.bodyMed,
@@ -1003,6 +1272,20 @@ const styles = StyleSheet.create({
   // Tree
   scrollBody: { paddingBottom: 60 },
 
+  // Cool ice-glow frame wrapping the whole skill tree.
+  treeFrame: {
+    padding: 24,
+    marginVertical: 18,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 20,
+    backgroundColor: SL.bg,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.22,
+    shadowRadius: 22,
+  },
+
   // Column label
   branchLabel: {
     fontFamily: F.bodyMed,
@@ -1011,6 +1294,10 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     textAlign: 'center',
     opacity: 0.95,
+    // Ice-glow so the branch headings pop.
+    textShadowColor: 'rgba(74,158,191,0.6)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 12,
   },
 
   // Tier divider — full-width rule with centered label
@@ -1036,6 +1323,9 @@ const styles = StyleSheet.create({
     color: SL.accent,
     letterSpacing: 6,
     textAlign: 'center',
+    textShadowColor: 'rgba(74,158,191,0.6)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 12,
   },
 
   // Quest cards — fill their absolutely-positioned wrapper so the layout
@@ -1046,20 +1336,43 @@ const styles = StyleSheet.create({
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 5,
+    borderRadius: 10,
     paddingHorizontal: 16,
     paddingVertical: 12,
     alignItems: 'center',
     justifyContent: 'center',
     gap: 6,
     width: '100%',
+    // Subtle ice-glow on every node.
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
   },
   questCardDone: {
-    backgroundColor: 'rgba(76,175,80,0.08)',
-    borderColor: SL.green,
+    backgroundColor: 'rgba(74,158,191,0.10)',
+    borderColor: SL.accent,
+    // Brighter glow on completed nodes — feels earned.
+    shadowOpacity: 0.32,
+    shadowRadius: 12,
+  },
+  // Live animated frame over prestige-requirement nodes — the BORDEAUX color
+  // sweeps clockwise around the border (segments owned by ShimmerFrame; the
+  // border here is drawn by that component via `thickness`, not borderWidth).
+  questFrame: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 5,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.9,
+    shadowRadius: 8,
   },
   questCardLocked: {
     opacity: 0.45,
+  },
+  // Requirement nodes hand their border over to the bordeaux ShimmerFrame, so
+  // the card's own blue border doesn't show through underneath it.
+  questCardRequired: {
+    borderColor: 'transparent',
   },
 
   // Node text
@@ -1074,15 +1387,15 @@ const styles = StyleSheet.create({
     width: '100%',
     paddingHorizontal: 8,
   },
-  questNameDone:   { color: SL.green },
+  questNameDone:   { color: SL.accent },
   questNameLocked: { color: SL.muted },
 
   // Badges
   nodeBottom: { alignSelf: 'center' },
   doneBadge: {
-    backgroundColor: 'rgba(76,175,80,0.15)',
+    backgroundColor: 'rgba(74,158,191,0.15)',
     borderWidth: 1,
-    borderColor: SL.green,
+    borderColor: SL.accent,
     borderRadius: 3,
     paddingHorizontal: 6,
     paddingVertical: 2,
@@ -1090,7 +1403,8 @@ const styles = StyleSheet.create({
   doneBadgeText: {
     fontFamily: F.heading,
     fontSize: 20,
-    color: SL.green,
+    lineHeight: 22,
+    color: SL.accent,
     letterSpacing: 1.5,
   },
   rewardBadge: {
@@ -1103,7 +1417,62 @@ const styles = StyleSheet.create({
   rewardText: {
     fontFamily: F.bodyMed,
     fontSize: 20,
+    lineHeight: 22,
     color: SL.accent,
     letterSpacing: 1.2,
+  },
+
+  // ── Confirmation bar ──────────────────────────────────────────────────────────
+
+  confirmBar: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: SL.panel,
+    borderTopWidth: 2,
+    borderTopColor: SL.accent,
+    padding: 16,
+    gap: 12,
+  },
+  confirmText: {
+    fontFamily: F.bodyMed,
+    fontSize: 16,
+    color: SL.text,
+    letterSpacing: 0.5,
+    textAlign: 'center',
+  },
+  confirmButtons: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  confirmCancel: {
+    flex: 1,
+    height: 40,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderRadius: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  confirmCancelText: {
+    fontFamily: F.bodyMed,
+    fontSize: 14,
+    color: SL.muted,
+    letterSpacing: 2,
+  },
+  confirmOk: {
+    flex: 1,
+    height: 40,
+    backgroundColor: SL.accent,
+    borderRadius: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  confirmOkText: {
+    fontFamily: F.heading,
+    fontSize: 14,
+    color: SL.bg,
+    letterSpacing: 2,
   },
 });

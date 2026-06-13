@@ -1,10 +1,18 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Modal, ActivityIndicator, RefreshControl, Alert,
+  ActivityIndicator, RefreshControl,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { prestigeStars } from '../lib/prestige';
 import { F } from '../constants/fonts';
+import ScreenFrame from '../components/ScreenFrame';
+import { ShimmerFrame } from '../components/Shimmer';
+
+// Fiery wine→ember ramp for the live CHALLENGES button — crimson rising into
+// orange/amber so the sweep reads like glowing fire. The hues are analogous
+// (all warm), so the gradient transitions are smooth rather than jumpy.
+const FIRE = ['#8B1538', '#C81E45', '#FF1E3C', '#FF5C2A', '#FF9A2E'];
 
 const SL = {
   bg:        '#050912',
@@ -15,8 +23,6 @@ const SL = {
   text:      '#E8F4FF',
   muted:     '#4a6a8a',
   gold:      '#FFD700',
-  danger:    '#FF6B6B',
-  dangerBg:  '#2a1414',
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -26,168 +32,38 @@ function formatJoinDate(ts) {
   return new Date(ts).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
-
-function LevelBadge({ level }) {
-  return (
-    <View style={styles.levelBadge}>
-      <Text style={styles.levelBadgeText}>LVL {level ?? '—'}</Text>
-    </View>
-  );
-}
-
-function UnassignedCard({ student, onAssign }) {
-  return (
-    <View style={styles.studentCard}>
-      <View style={styles.cardLeft}>
-        <Text style={styles.studentName}>{student.full_name}</Text>
-        <Text style={styles.joinDate}>Joined {formatJoinDate(student.created_at)}</Text>
-      </View>
-      <View style={styles.cardRight}>
-        <LevelBadge level={student.level} />
-        <TouchableOpacity style={styles.assignBtn} onPress={() => onAssign(student)} activeOpacity={0.8}>
-          <Text style={styles.assignBtnText}>ASSIGN</Text>
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
-}
-
-function CoachBlock({ coach, students, onReassign, onRemove }) {
-  const [expanded, setExpanded] = useState(false);
-  const myStudents = students.filter(s => s.coach_id === coach.id);
-
-  return (
-    <View style={styles.coachBlock}>
-      <TouchableOpacity
-        style={styles.coachHeader}
-        onPress={() => setExpanded(e => !e)}
-        activeOpacity={0.7}
-      >
-        <View style={styles.coachHeaderLeft}>
-          <Text style={styles.coachName}>{coach.full_name?.toUpperCase()}</Text>
-          <Text style={styles.coachCount}>
-            {myStudents.length} {myStudents.length === 1 ? 'STUDENT' : 'STUDENTS'}
-          </Text>
-        </View>
-        <Text style={styles.chevron}>{expanded ? '▲' : '▼'}</Text>
-      </TouchableOpacity>
-
-      {expanded && (
-        <View style={styles.coachStudents}>
-          {myStudents.length === 0 ? (
-            <Text style={styles.emptyText}>No students assigned.</Text>
-          ) : (
-            myStudents.map(student => (
-              <View key={student.id} style={styles.rosterRow}>
-                <View style={styles.rosterLeft}>
-                  <Text style={styles.rosterName}>{student.full_name}</Text>
-                  <LevelBadge level={student.level} />
-                </View>
-                <View style={styles.rosterActions}>
-                  <TouchableOpacity
-                    style={styles.rosterBtn}
-                    onPress={() => onReassign(student, coach)}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={styles.rosterBtnText}>REASSIGN</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.rosterBtn, styles.rosterBtnDanger]}
-                    onPress={() => onRemove(student)}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={[styles.rosterBtnText, styles.rosterBtnTextDanger]}>REMOVE</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ))
-          )}
-        </View>
-      )}
-    </View>
-  );
-}
-
-// ─── Coach Picker Modal ───────────────────────────────────────────────────────
-
-function CoachPickerModal({ visible, coaches, excludeCoachId, onSelect, onClose }) {
-  const options = excludeCoachId
-    ? coaches.filter(c => c.id !== excludeCoachId)
-    : coaches;
-
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalBox}>
-          <Text style={styles.modalTitle}>SELECT COACH</Text>
-          <ScrollView style={{ maxHeight: 360 }}>
-            {options.map(coach => (
-              <TouchableOpacity
-                key={coach.id}
-                style={styles.coachOption}
-                onPress={() => onSelect(coach)}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.coachOptionName}>{coach.full_name}</Text>
-                <Text style={styles.coachOptionCount}>
-                  {coach._studentCount} students
-                </Text>
-              </TouchableOpacity>
-            ))}
-            {options.length === 0 && (
-              <Text style={styles.emptyText}>No other coaches available.</Text>
-            )}
-          </ScrollView>
-          <TouchableOpacity style={styles.modalCancelBtn} onPress={onClose} activeOpacity={0.8}>
-            <Text style={styles.modalCancelText}>CANCEL</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
-  );
-}
-
-// ─── Main Screen ──────────────────────────────────────────────────────────────
+// ─── Screen ───────────────────────────────────────────────────────────────────
+//
+// Since the self-coach refactor there is no coach role and no player→coach
+// assignment to manage. Admin is now a lightweight overview: a read-only roster
+// of all players plus access to the shared exercise gallery.
 
 export default function AdminDashboard({ navigation }) {
-  const [unassigned,  setUnassigned]  = useState([]);
-  const [students,    setStudents]    = useState([]);
-  const [coaches,     setCoaches]     = useState([]);
-  const [loading,     setLoading]     = useState(true);
-  const [refreshing,  setRefreshing]  = useState(false);
-
-  const [modalVisible,   setModalVisible]   = useState(false);
-  const [targetStudent,  setTargetStudent]  = useState(null);
-  const [excludeCoach,   setExcludeCoach]   = useState(null);
+  const [players,    setPlayers]    = useState([]);
+  const [classNames, setClassNames] = useState({}); // class_id → name
+  const [classOrder, setClassOrder] = useState({}); // class_id → order_index
+  const [classCount, setClassCount] = useState(null);
+  const [loading,    setLoading]    = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   const fetchData = useCallback(async () => {
     try {
-      const { data: unassignedData } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('role', 'student')
-        .is('coach_id', null);
+      const [playersRes, classesRes] = await Promise.all([
+        supabase
+          .from('profiles')
+          .select('id, full_name, class_id, prestige_count, created_at')
+          .eq('role', 'player')
+          .order('created_at', { ascending: true }),
+        supabase
+          .from('classes')
+          .select('id, name, order_index'),
+      ]);
 
-      const { data: allStudentData } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('role', 'student');
-
-      const { data: coachData } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('role', 'coach');
-
-      const studentList = allStudentData ?? [];
-      const coachList   = (coachData ?? []).map(coach => ({
-        ...coach,
-        _studentCount: studentList.filter(s => s.coach_id === coach.id).length,
-      }));
-
-      setUnassigned(unassignedData ?? []);
-      setStudents(studentList);
-      setCoaches(coachList);
+      const classes = classesRes.data ?? [];
+      setPlayers(playersRes.data ?? []);
+      setClassNames(Object.fromEntries(classes.map(c => [c.id, c.name])));
+      setClassOrder(Object.fromEntries(classes.map(c => [c.id, c.order_index])));
+      setClassCount(classes.length || null);
     } catch (e) {
       console.error('[AdminDashboard] fetchData exception:', e);
     }
@@ -203,144 +79,94 @@ export default function AdminDashboard({ navigation }) {
     setRefreshing(false);
   }
 
-  function openAssign(student) {
-    setTargetStudent(student);
-    setExcludeCoach(null);
-    setModalVisible(true);
-  }
-
-  function openReassign(student, currentCoach) {
-    setTargetStudent(student);
-    setExcludeCoach(currentCoach.id);
-    setModalVisible(true);
-  }
-
-  async function handleCoachSelected(coach) {
-    setModalVisible(false);
-    if (!targetStudent) return;
-    const student = targetStudent;
-    setTargetStudent(null);
-    try {
-      const { error } = await supabase
-        .from('profiles')
-        .update({ coach_id: coach.id })
-        .eq('id', student.id);
-      if (error) {
-        Alert.alert('Assignment Failed', error.message ?? 'Could not assign coach.');
-        return;
-      }
-      await fetchData();
-    } catch (e) {
-      Alert.alert('Assignment Failed', e.message ?? 'Something went wrong.');
-    }
-  }
-
-  async function handleRemove(student) {
-    try {
-      const { error } = await supabase
-        .from('profiles')
-        .update({ coach_id: null })
-        .eq('id', student.id);
-      if (error) {
-        Alert.alert('Remove Failed', error.message ?? 'Could not remove coach assignment.');
-        return;
-      }
-      await fetchData();
-    } catch (e) {
-      Alert.alert('Remove Failed', e.message ?? 'Something went wrong.');
-    }
-  }
-
   return (
-    <View style={styles.container}>
+    <ScreenFrame maxWidth={1100} duration={5200} ready={!loading}>
       {/* Top bar */}
       <View style={styles.topBar}>
-        <TouchableOpacity
-          style={styles.topBarBtn}
-          onPress={() => navigation.navigate('ExerciseGallery')}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.topBarBtnText}>GALLERY</Text>
-        </TouchableOpacity>
+        <View style={styles.topBarLeft}>
+          <TouchableOpacity
+            style={styles.topBarBtn}
+            onPress={() => navigation.navigate('ExerciseGallery')}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.topBarBtnText}>GALLERY</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.challengesBtn}
+            onPress={() => navigation.navigate('Challenges')}
+            activeOpacity={0.85}
+          >
+            <ShimmerFrame
+              style={styles.challengesFrame}
+              colors={FIRE}
+              radius={22}
+              thickness={3}
+              duration={5200}
+              active
+            />
+            <Text style={styles.challengesText}>CHALLENGES</Text>
+          </TouchableOpacity>
+        </View>
 
         <Text style={styles.pageTitle}>ADMIN</Text>
 
-        <TouchableOpacity
-          style={styles.topBarBtn}
-          onPress={() => supabase.auth.signOut()}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.topBarBtnText}>SIGN OUT</Text>
-        </TouchableOpacity>
+        <View style={styles.topBarRight}>
+          <TouchableOpacity
+            style={styles.topBarBtn}
+            onPress={() => supabase.auth.signOut()}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.topBarBtnText}>SIGN OUT</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
-      {loading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={SL.accent} />
+      {/* Body is always the same height (section header + fixed-height list area)
+          so the card never resizes when the player data loads — the roster just
+          scrolls inside its fixed region. */}
+      <View style={styles.body}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>PLAYERS</Text>
+          <View style={styles.sectionPill}>
+            <Text style={styles.sectionPillText}>{loading ? '—' : players.length}</Text>
+          </View>
         </View>
-      ) : (
-        <ScrollView
-          contentContainerStyle={styles.body}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={SL.accent} />}
-        >
-          {/* ── Section 1: Unassigned ── */}
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>UNASSIGNED STUDENTS</Text>
-            <View style={styles.sectionPill}>
-              <Text style={styles.sectionPillText}>{unassigned.length}</Text>
-            </View>
-          </View>
 
-          {unassigned.length === 0 ? (
+        <View style={styles.listArea}>
+          {loading ? (
+            <View style={styles.listCenter}>
+              <ActivityIndicator size="large" color={SL.accent} />
+            </View>
+          ) : players.length === 0 ? (
             <View style={styles.emptyBox}>
-              <Text style={styles.emptyText}>All students are assigned.</Text>
+              <Text style={styles.emptyText}>No players yet.</Text>
             </View>
           ) : (
-            unassigned.map(student => (
-              <UnassignedCard
-                key={student.id}
-                student={student}
-                onAssign={openAssign}
-              />
-            ))
+            <ScrollView showsVerticalScrollIndicator={false}>
+              {players.map(player => {
+                const stars = prestigeStars({ orderIndex: classOrder[player.class_id] ?? 0, classCount });
+                return (
+                <View key={player.id} style={styles.playerCard}>
+                  <View style={styles.cardLeft}>
+                    <Text style={styles.playerName}>
+                      {player.full_name || '(no name)'}
+                      {stars > 0 ? ` ${'★'.repeat(stars)}` : ''}
+                    </Text>
+                    <Text style={styles.joinDate}>Joined {formatJoinDate(player.created_at)}</Text>
+                  </View>
+                  <View style={styles.classBadge}>
+                    <Text style={styles.classBadgeText}>
+                      {classNames[player.class_id] ?? 'NO CLASS'}
+                    </Text>
+                  </View>
+                </View>
+                );
+              })}
+            </ScrollView>
           )}
-
-          {/* ── Section 2: Coaching Roster ── */}
-          <View style={[styles.sectionHeader, { marginTop: 36 }]}>
-            <Text style={styles.sectionTitle}>COACHING ROSTER</Text>
-            <View style={styles.sectionPill}>
-              <Text style={styles.sectionPillText}>{coaches.length}</Text>
-            </View>
-          </View>
-
-          {coaches.length === 0 ? (
-            <View style={styles.emptyBox}>
-              <Text style={styles.emptyText}>No coaches found.</Text>
-            </View>
-          ) : (
-            coaches.map(coach => (
-              <CoachBlock
-                key={coach.id}
-                coach={coach}
-                students={students}
-                onReassign={openReassign}
-                onRemove={handleRemove}
-              />
-            ))
-          )}
-
-          <View style={{ height: 60 }} />
-        </ScrollView>
-      )}
-
-      <CoachPickerModal
-        visible={modalVisible}
-        coaches={coaches}
-        excludeCoachId={excludeCoach}
-        onSelect={handleCoachSelected}
-        onClose={() => { setModalVisible(false); setTargetStudent(null); }}
-      />
-    </View>
+        </View>
+      </View>
+    </ScreenFrame>
   );
 }
 
@@ -354,12 +180,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: 28,
     paddingHorizontal: 28,
-    paddingTop: 72,
-    paddingBottom: 28,
+    paddingTop: 30,
+    paddingBottom: 26,
     borderBottomWidth: 2,
     borderBottomColor: SL.border,
   },
+  // Both sides flex equally so the centered title is truly centered regardless of
+  // how wide each side's buttons are.
+  topBarLeft: { flex: 1, flexDirection: 'row', gap: 12, justifyContent: 'flex-start' },
+  topBarRight: { flex: 1, flexDirection: 'row', justifyContent: 'flex-end' },
   pageTitle: {
     fontFamily: F.heading,
     fontSize: 56,
@@ -369,11 +200,12 @@ const styles = StyleSheet.create({
   },
   topBarBtn: {
     paddingHorizontal: 22,
-    paddingVertical: 14,
-    borderWidth: 2,
-    borderColor: SL.border,
-    borderRadius: 4,
-    backgroundColor: SL.panel,
+    paddingVertical: 12,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 24,
+    backgroundColor: 'rgba(74,158,191,0.10)',
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.45, shadowRadius: 10,
   },
   topBarBtnText: {
     fontFamily: F.heading,
@@ -383,9 +215,35 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
 
-  loadingContainer: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  // ── CHALLENGES button — fire-gradient sweep on the border + ember glow ──
+  challengesBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    paddingHorizontal: 22,
+    paddingVertical: 12,
+    borderRadius: 22,
+    borderColor: 'transparent',
+    overflow: 'hidden',
+    backgroundColor: 'rgba(255,70,40,0.12)',
+    shadowColor: '#FF4D2A', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.7, shadowRadius: 16,
+  },
+  challengesFrame: { ...StyleSheet.absoluteFillObject, borderRadius: 22 },
+  challengesText: {
+    fontFamily: F.heading,
+    fontSize: 18,
+    color: '#FF9A52',
+    letterSpacing: 3,
+    textTransform: 'uppercase',
+  },
 
-  body: { padding: 28, paddingTop: 36 },
+  body: { paddingHorizontal: 28, paddingTop: 30, paddingBottom: 30 },
+
+  // Fixed-height list region → the card is always the same size regardless of
+  // how many players load (spinner / empty / roster all occupy this same box;
+  // longer rosters scroll inside it). Keeps the hologram-build box from resizing.
+  listArea: { height: 520 },
+  listCenter: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
   // Section headers
   sectionHeader: {
@@ -402,14 +260,15 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   sectionPill: {
-    backgroundColor: SL.panel,
-    borderWidth: 2,
+    backgroundColor: 'rgba(74,158,191,0.12)',
+    borderWidth: 1.5,
     borderColor: SL.accent,
-    borderRadius: 4,
+    borderRadius: 10,
     paddingHorizontal: 16,
     paddingVertical: 4,
     minWidth: 50,
     alignItems: 'center',
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.4, shadowRadius: 8,
   },
   sectionPillText: {
     fontFamily: F.heading,
@@ -434,22 +293,21 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
 
-  // Unassigned student card
-  studentCard: {
+  // Player card
+  playerCard: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     backgroundColor: SL.panel,
-    borderWidth: 2,
+    borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 4,
+    borderRadius: 12,
     padding: 22,
     marginBottom: 14,
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.18, shadowRadius: 12,
   },
   cardLeft: { flex: 1, gap: 6 },
-  cardRight: { alignItems: 'flex-end', gap: 14 },
-
-  studentName: {
+  playerName: {
     fontFamily: F.heading,
     fontSize: 26,
     color: SL.text,
@@ -462,186 +320,19 @@ const styles = StyleSheet.create({
     color: SL.muted,
     letterSpacing: 1.5,
   },
-
-  levelBadge: {
-    backgroundColor: SL.panelAlt,
-    borderWidth: 2,
-    borderColor: SL.accent,
-    borderRadius: 4,
-    paddingHorizontal: 14,
-    paddingVertical: 5,
+  classBadge: {
+    backgroundColor: 'rgba(255,215,0,0.08)',
+    borderWidth: 1.5,
+    borderColor: SL.gold,
+    borderRadius: 999,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    shadowColor: SL.gold, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.35, shadowRadius: 8,
   },
-  levelBadgeText: {
+  classBadgeText: {
     fontFamily: F.heading,
     fontSize: 17,
-    color: SL.accent,
+    color: SL.gold,
     letterSpacing: 2,
-  },
-
-  assignBtn: {
-    paddingHorizontal: 26,
-    paddingVertical: 13,
-    backgroundColor: SL.accent,
-    borderRadius: 4,
-  },
-  assignBtnText: {
-    fontFamily: F.heading,
-    fontSize: 17,
-    color: SL.bg,
-    letterSpacing: 3,
-  },
-
-  // Coach block
-  coachBlock: {
-    backgroundColor: SL.panel,
-    borderWidth: 2,
-    borderColor: SL.border,
-    borderRadius: 4,
-    marginBottom: 16,
-    overflow: 'hidden',
-  },
-  coachHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 26,
-  },
-  coachHeaderLeft: { gap: 8 },
-  coachName: {
-    fontFamily: F.heading,
-    fontSize: 30,
-    color: SL.text,
-    letterSpacing: 4,
-  },
-  coachCount: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 3,
-  },
-  chevron: {
-    fontFamily: F.heading,
-    fontSize: 22,
-    color: SL.accent,
-  },
-
-  // Coach expanded student rows
-  coachStudents: {
-    borderTopWidth: 2,
-    borderTopColor: SL.border,
-    paddingHorizontal: 22,
-    paddingVertical: 18,
-    gap: 16,
-    backgroundColor: SL.panelAlt,
-  },
-  rosterRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
-  rosterLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-    flex: 1,
-  },
-  rosterName: {
-    fontFamily: F.heading,
-    fontSize: 20,
-    color: SL.text,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-  },
-  rosterActions: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  rosterBtn: {
-    paddingHorizontal: 18,
-    paddingVertical: 11,
-    borderWidth: 2,
-    borderColor: SL.border,
-    borderRadius: 4,
-    backgroundColor: SL.panel,
-  },
-  rosterBtnDanger: {
-    borderColor: SL.danger,
-    backgroundColor: SL.dangerBg,
-  },
-  rosterBtnText: {
-    fontFamily: F.heading,
-    fontSize: 15,
-    color: SL.accent,
-    letterSpacing: 2,
-  },
-  rosterBtnTextDanger: {
-    color: SL.danger,
-  },
-
-  // Modal
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.8)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 32,
-  },
-  modalBox: {
-    width: '100%',
-    maxWidth: 560,
-    backgroundColor: SL.panel,
-    borderWidth: 2,
-    borderColor: SL.accent,
-    borderRadius: 4,
-    padding: 28,
-    gap: 18,
-  },
-  modalTitle: {
-    fontFamily: F.heading,
-    fontSize: 28,
-    color: SL.accent,
-    letterSpacing: 5,
-    textTransform: 'uppercase',
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  coachOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 20,
-    paddingHorizontal: 8,
-    borderBottomWidth: 1.5,
-    borderBottomColor: SL.border,
-  },
-  coachOptionName: {
-    fontFamily: F.heading,
-    fontSize: 22,
-    color: SL.text,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-  },
-  coachOptionCount: {
-    fontFamily: F.bodyMed,
-    fontSize: 16,
-    color: SL.muted,
-    letterSpacing: 1.5,
-  },
-  modalCancelBtn: {
-    marginTop: 8,
-    paddingVertical: 18,
-    alignItems: 'center',
-    borderWidth: 2,
-    borderColor: SL.border,
-    borderRadius: 4,
-    backgroundColor: SL.panelAlt,
-  },
-  modalCancelText: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.muted,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
   },
 });

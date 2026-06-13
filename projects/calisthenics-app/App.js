@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Text, View } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import { Platform, Text, View } from 'react-native';
+import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { C } from './constants/colors';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -18,43 +18,49 @@ import HomeScreen        from './screens/HomeScreen';
 import SkillsScreen      from './screens/SkillsScreen';
 import SkillTreeScreen   from './screens/SkillTreeScreen';
 import WorkoutsScreen    from './screens/WorkoutsScreen';
-import CommunityScreen   from './screens/CommunityScreen';
-import ChatScreen        from './screens/ChatScreen';
+import ProfileScreen     from './screens/ProfileScreen';
+import ChallengesScreen  from './screens/ChallengesScreen';
 import LoginScreen           from './screens/LoginScreen';
 import AdminDashboard        from './screens/AdminDashboard';
-import CoachDashboard        from './screens/CoachDashboard';
 import StudentDetailScreen   from './screens/StudentDetailScreen';
 import WorkoutDetailScreen   from './screens/WorkoutDetailScreen';
 import AddWorkoutScreen      from './screens/AddWorkoutScreen';
-import ExerciseGalleryScreen from './screens/ExerciseGalleryScreen';
-import ExerciseDetailScreen  from './screens/ExerciseDetailScreen';
-import AddExerciseScreen     from './screens/AddExerciseScreen';
+import ExerciseGalleryScreen    from './screens/ExerciseGalleryScreen';
+import ExerciseDetailScreen     from './screens/ExerciseDetailScreen';
+import AddExerciseScreen        from './screens/AddExerciseScreen';
+import AddExampleWorkoutScreen  from './screens/AddExampleWorkoutScreen';
 import CreateWorkoutScreen   from './screens/CreateWorkoutScreen';
 import WorkoutEditScreen       from './screens/WorkoutEditScreen';
 import AllWorkoutsScreen       from './screens/AllWorkoutsScreen';
-import CheckupBuilderScreen    from './screens/CheckupBuilderScreen';
-import CheckupScreen           from './screens/CheckupScreen';
-import CheckupReviewScreen     from './screens/CheckupReviewScreen';
-import CoachResponseScreen     from './screens/CoachResponseScreen';
-import ClassQuestScreen        from './screens/ClassQuestScreen';
-import CoachQuestTreeScreen    from './screens/CoachQuestTreeScreen';
-import CoachSideQuestScreen    from './screens/CoachSideQuestScreen';
-import CoachDailyQuestScreen   from './screens/CoachDailyQuestScreen';
+import DailyQuestScreen        from './screens/CoachDailyQuestScreen';
 import QuestTreeScreen         from './screens/QuestTreeScreen';
-import { CoachProvider }       from './context/CoachContext';
+import { CoachProvider, useCoach } from './context/CoachContext';
+import { armHoloEntry } from './lib/holoEntry';
 
 SplashScreen.preventAutoHideAsync();
+
+// React Navigation defaults to a WHITE scene background, which flashes white on
+// mount/transitions. Force our dark navy everywhere.
+const NAV_THEME = {
+  ...DefaultTheme,
+  colors: { ...DefaultTheme.colors, background: C.bg },
+};
+
+// The screens' font sizes are tuned for a phone, so the web build renders huge on
+// a desktop monitor. Bake in a zoom-out (what you'd otherwise do by hand in the
+// browser) so it opens at a comfortable size. Web only — native devices are
+// unaffected. Lower = smaller; tweak to taste.
+const WEB_ZOOM = 0.7;
 
 const Tab           = createBottomTabNavigator();
 const SkillsStack   = createNativeStackNavigator();
 const WorkoutsStack = createNativeStackNavigator();
-const CoachStack    = createNativeStackNavigator();
 const AdminStack    = createNativeStackNavigator();
 
 function TabIcon({ label, focused }) {
-  const icons = { Skills: '⚡', Chat: '💬', Workouts: '🏋', Community: '👥' };
+  const icons = { Skills: '⚡', Challenges: '🏆', Workouts: '🏋', Profile: '👤' };
   return (
-    <Text style={{ fontSize: 20, opacity: focused ? 1 : 0.4 }}>{icons[label]}</Text>
+    <Text style={{ fontSize: 38, opacity: focused ? 1 : 0.4 }}>{icons[label]}</Text>
   );
 }
 
@@ -68,54 +74,64 @@ function SkillsNavigator() {
   );
 }
 
+// Workouts stack now carries the full self-coaching authoring flow: the player
+// schedules / creates / edits their own workouts (Manage = StudentDetailScreen
+// scoped to self) and manages their own daily quests.
 function WorkoutsNavigator() {
   return (
     <WorkoutsStack.Navigator screenOptions={{ headerShown: false }}>
-      <WorkoutsStack.Screen name="WorkoutsList"  component={WorkoutsScreen} />
-      <WorkoutsStack.Screen name="WorkoutDetail"   component={WorkoutDetailScreen} />
-      <WorkoutsStack.Screen name="Checkup"         component={CheckupScreen} />
-      <WorkoutsStack.Screen name="CoachResponse"   component={CoachResponseScreen} />
+      <WorkoutsStack.Screen name="WorkoutsList"   component={WorkoutsScreen} />
+      <WorkoutsStack.Screen name="WorkoutDetail"  component={WorkoutDetailScreen} />
+      <WorkoutsStack.Screen name="Manage"         component={StudentDetailScreen} />
+      <WorkoutsStack.Screen name="CreateWorkout"  component={CreateWorkoutScreen} />
+      <WorkoutsStack.Screen name="AddWorkout"     component={AddWorkoutScreen} />
+      <WorkoutsStack.Screen name="WorkoutEdit"    component={WorkoutEditScreen} />
+      <WorkoutsStack.Screen name="ExerciseGallery" component={ExerciseGalleryScreen} />
+      <WorkoutsStack.Screen name="ExerciseDetail"  component={ExerciseDetailScreen} />
+      <WorkoutsStack.Screen name="AddExercise"     component={AddExerciseScreen} />
+      <WorkoutsStack.Screen name="AllWorkouts"     component={AllWorkoutsScreen} />
+      <WorkoutsStack.Screen name="DailyQuest"      component={DailyQuestScreen} />
     </WorkoutsStack.Navigator>
-  );
-}
-
-function CoachNavigator() {
-  return (
-    <CoachProvider>
-      <CoachStack.Navigator screenOptions={{ headerShown: false }}>
-        <CoachStack.Screen name="CoachDashboard"   component={CoachDashboard} />
-        <CoachStack.Screen name="StudentDetail"    component={StudentDetailScreen} />
-        <CoachStack.Screen name="WorkoutDetail"    component={WorkoutDetailScreen} />
-        <CoachStack.Screen name="WorkoutEdit"      component={WorkoutEditScreen} />
-        <CoachStack.Screen name="AddWorkout"       component={AddWorkoutScreen} />
-        <CoachStack.Screen name="CreateWorkout"    component={CreateWorkoutScreen} />
-        <CoachStack.Screen name="ExerciseGallery"  component={ExerciseGalleryScreen} />
-        <CoachStack.Screen name="ExerciseDetail"   component={ExerciseDetailScreen} />
-        <CoachStack.Screen name="AddExercise"      component={AddExerciseScreen} />
-        <CoachStack.Screen name="AllWorkouts"      component={AllWorkoutsScreen} />
-        <CoachStack.Screen name="CheckupBuilder"  component={CheckupBuilderScreen} />
-        <CoachStack.Screen name="CheckupReview"   component={CheckupReviewScreen} />
-        <CoachStack.Screen name="ClassQuest"      component={ClassQuestScreen} />
-        <CoachStack.Screen name="CoachQuestTree"  component={CoachQuestTreeScreen} />
-        <CoachStack.Screen name="CoachSideQuests" component={CoachSideQuestScreen} />
-        <CoachStack.Screen name="CoachDailyQuest" component={CoachDailyQuestScreen} />
-      </CoachStack.Navigator>
-    </CoachProvider>
   );
 }
 
 function AdminNavigator() {
   return (
-    <AdminStack.Navigator screenOptions={{ headerShown: false }}>
-      <AdminStack.Screen name="AdminDashboard"  component={AdminDashboard} />
-      <AdminStack.Screen name="ExerciseGallery" component={ExerciseGalleryScreen} />
-      <AdminStack.Screen name="ExerciseDetail"  component={ExerciseDetailScreen} />
-      <AdminStack.Screen name="AddExercise"     component={AddExerciseScreen} />
-    </AdminStack.Navigator>
+    <CoachProvider>
+      <AdminStack.Navigator screenOptions={{ headerShown: false }}>
+        <AdminStack.Screen name="AdminDashboard"     component={AdminDashboard} />
+        <AdminStack.Screen name="Challenges"         component={ChallengesScreen} />
+        <AdminStack.Screen name="ExerciseGallery"    component={ExerciseGalleryScreen} />
+        <AdminStack.Screen name="ExerciseDetail"     component={ExerciseDetailScreen} />
+        <AdminStack.Screen name="AddExercise"        component={AddExerciseScreen} />
+        <AdminStack.Screen name="AddExampleWorkout"  component={AddExampleWorkoutScreen} />
+      </AdminStack.Navigator>
+    </CoachProvider>
   );
 }
 
-function StudentApp() {
+// Seeds the shared "selected student" context with the logged-in player's own
+// profile. Self-coaching screens (CreateWorkout, StudentDetail/Manage, DailyQuest)
+// were originally written for a coach acting on a student; pointing that subject
+// at the player themselves makes the player their own coach with zero rewrites.
+function SelfStudentSync() {
+  const { setSelectedStudent } = useCoach();
+  useEffect(() => {
+    (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data } = await supabase
+        .from('profiles')
+        .select('id, full_name')
+        .eq('id', user.id)
+        .single();
+      if (data) setSelectedStudent(data);
+    })();
+  }, [setSelectedStudent]);
+  return null;
+}
+
+function PlayerTabs() {
   return (
     <Tab.Navigator
       initialRouteName="Home"
@@ -125,15 +141,15 @@ function StudentApp() {
           backgroundColor: C.navBg,
           borderTopColor: C.cardBorder,
           borderTopWidth: 1,
-          height: 64,
-          paddingBottom: 10,
-          paddingTop: 8,
+          height: 124,
+          paddingBottom: 22,
+          paddingTop: 16,
         },
         tabBarActiveTintColor: C.iceGlow,
         tabBarInactiveTintColor: C.textMuted,
         tabBarLabelStyle: {
           fontFamily: F.body,
-          fontSize: 10,
+          fontSize: 18,
           letterSpacing: 0.5,
         },
       }}
@@ -144,16 +160,16 @@ function StudentApp() {
         options={{ tabBarIcon: ({ focused }) => <TabIcon label="Skills" focused={focused} /> }}
       />
       <Tab.Screen
-        name="Chat"
-        component={ChatScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon label="Chat" focused={focused} /> }}
+        name="Challenges"
+        component={ChallengesScreen}
+        options={{ tabBarIcon: ({ focused }) => <TabIcon label="Challenges" focused={focused} /> }}
       />
       <Tab.Screen
         name="Home"
         component={HomeScreen}
         options={{
           tabBarIcon: ({ focused }) => (
-            <Text style={{ fontSize: 22, opacity: focused ? 1 : 0.4 }}>⚔</Text>
+            <Text style={{ fontSize: 42, opacity: focused ? 1 : 0.4 }}>⚔</Text>
           ),
         }}
       />
@@ -163,11 +179,22 @@ function StudentApp() {
         options={{ tabBarIcon: ({ focused }) => <TabIcon label="Workouts" focused={focused} /> }}
       />
       <Tab.Screen
-        name="Community"
-        component={CommunityScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon label="Community" focused={focused} /> }}
+        name="Profile"
+        component={ProfileScreen}
+        options={{ tabBarIcon: ({ focused }) => <TabIcon label="Profile" focused={focused} /> }}
       />
     </Tab.Navigator>
+  );
+}
+
+// The full player experience: their consumption tabs + self-coaching authoring,
+// all sharing one CoachProvider seeded with the player's own profile.
+function PlayerApp() {
+  return (
+    <CoachProvider>
+      <SelfStudentSync />
+      <PlayerTabs />
+    </CoachProvider>
   );
 }
 
@@ -181,17 +208,34 @@ export default function App() {
   const [session, setSession] = useState(undefined); // undefined = loading
   const [role, setRole]       = useState(null);
 
+  // Apply the baked-in zoom-out on web so the app opens at a comfortable size,
+  // and paint the document dark so no white page background flashes through when
+  // the React tree remounts (e.g. login → app).
+  useEffect(() => {
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      document.documentElement.style.zoom = String(WEB_ZOOM);
+      document.documentElement.style.backgroundColor = C.bg;
+      document.body.style.backgroundColor = C.bg;
+      const root = document.getElementById('root');
+      if (root) root.style.backgroundColor = C.bg;
+    }
+  }, []);
+
   // Listen to auth state changes
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
-      if (session) fetchRole(session.user.id);
+      if (session) { armHoloEntry(); fetchRole(session.user.id); } // play build on app open
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setSession(session);
-      if (session) fetchRole(session.user.id);
-      else         setRole(null);
+      if (session) {
+        if (event === 'SIGNED_IN') armHoloEntry();   // play build right after login
+        fetchRole(session.user.id);
+      } else {
+        setRole(null);
+      }
     });
 
     return () => subscription.unsubscribe();
@@ -218,7 +262,7 @@ export default function App() {
   // Not logged in
   if (!session) {
     return (
-      <NavigationContainer onReady={onReady}>
+      <NavigationContainer theme={NAV_THEME} onReady={onReady}>
         <LoginScreen />
       </NavigationContainer>
     );
@@ -229,11 +273,10 @@ export default function App() {
     return <View style={{ flex: 1, backgroundColor: C.bg }} />;
   }
 
+  // Only two roles remain: admin and player. Everyone else is treated as a player.
   return (
-    <NavigationContainer onReady={onReady}>
-      {role === 'admin'   && <AdminNavigator />}
-      {role === 'coach'   && <CoachNavigator />}
-      {role === 'student' && <StudentApp />}
+    <NavigationContainer theme={NAV_THEME} onReady={onReady}>
+      {role === 'admin' ? <AdminNavigator /> : <PlayerApp />}
     </NavigationContainer>
   );
 }

@@ -84,6 +84,7 @@ export default function CreateWorkoutScreen({ navigation }) {
       if (workoutError) throw workoutError;
 
       if (selectedDay?.dateStr) {
+        // Specific date → per-date override row.
         const { error: assignError } = await supabase
           .from('workout_override_workouts')
           .insert({
@@ -93,6 +94,17 @@ export default function CreateWorkoutScreen({ navigation }) {
             workout_id:    workout.id,
           });
         if (assignError) throw assignError;
+      } else if (selectedDay?.dayOfWeek != null) {
+        // Weekday (from the skeleton editor) → recurring weekly_workout_template row.
+        const { error: tmplError } = await supabase
+          .from('weekly_workout_template')
+          .insert({
+            student_id:  selectedStudent.id,
+            coach_id:    user.id,
+            day_of_week: selectedDay.dayOfWeek,
+            workout_id:  workout.id,
+          });
+        if (tmplError) throw tmplError;
       }
 
       for (let i = 0; i < pendingExercises.length; i++) {
@@ -134,7 +146,9 @@ export default function CreateWorkoutScreen({ navigation }) {
           </Text>
         )}
         {selectedDay && (
-          <Text style={styles.dayCtx}>{selectedDay.label} · {selectedDay.dateStr}</Text>
+          <Text style={styles.dayCtx}>
+            {selectedDay.label}{selectedDay.dateStr ? ` · ${selectedDay.dateStr}` : ' · EVERY WEEK'}
+          </Text>
         )}
         <View style={styles.divider} />
       </View>
@@ -282,6 +296,9 @@ const styles = StyleSheet.create({
   // ── Header ──────────────────────────────────────────────────────────────────
 
   header: {
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
     paddingHorizontal: 24,
     paddingTop: 60,
     paddingBottom: 24,
@@ -329,7 +346,25 @@ const styles = StyleSheet.create({
 
   // ── Form ────────────────────────────────────────────────────────────────────
 
-  form: { padding: 20, gap: 0, paddingBottom: 24 },
+  // Cool ice-glow frame wrapping the whole form, matching the Skills page.
+  form: {
+    padding: 20,
+    gap: 0,
+    paddingBottom: 24,
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
+    marginTop: 16,
+    marginBottom: 28,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 18,
+    backgroundColor: SL.bg,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.2,
+    shadowRadius: 20,
+  },
 
   inputLabel: {
     fontFamily: F.bodyMed,

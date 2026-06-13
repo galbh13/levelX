@@ -3,17 +3,17 @@ create table profiles (
   id         uuid primary key references auth.users(id) on delete cascade,
   email      text not null,
   full_name  text,
-  role       text not null check (role in ('admin', 'coach', 'student')),
-  coach_id   uuid references profiles(id) on delete set null,
+  role       text not null default 'player' check (role in ('admin', 'player')),
+  coach_id   uuid references profiles(id) on delete set null,  -- legacy/unused since self-coach refactor
   created_at timestamptz default now()
 );
 
--- Auto-insert a profile row when a new auth user is created
+-- Auto-insert a profile row when a new auth user is created (defaults to player)
 create or replace function handle_new_user()
 returns trigger as $$
 begin
-  insert into profiles (id, email)
-  values (new.id, new.email);
+  insert into profiles (id, email, role)
+  values (new.id, new.email, 'player');
   return new;
 end;
 $$ language plpgsql security definer;
@@ -49,17 +49,17 @@ alter table profiles  enable row level security;
 alter table workouts  enable row level security;
 alter table exercises enable row level security;
 
--- Profiles: users can read their own row; admins/coaches can read all
+-- Profiles: users can read their own row
 create policy "Users can view own profile"
   on profiles for select
   using (auth.uid() = id);
 
--- Workouts: students see their own; coaches see workouts they created
-create policy "Students see own workouts"
+-- Workouts: players own their workouts (assigned_to = created_by = self)
+create policy "Players see workouts assigned to them"
   on workouts for select
   using (auth.uid() = assigned_to);
 
-create policy "Coaches see workouts they created"
+create policy "Players see workouts they created"
   on workouts for select
   using (auth.uid() = created_by);
 

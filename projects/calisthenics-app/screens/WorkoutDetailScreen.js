@@ -20,13 +20,6 @@ const SL = {
   gold:   '#FFD700',
 };
 
-function Corner({ pos }) {
-  const s = pos === 'TL'
-    ? { top: -1, left: -1, borderTopWidth: 1.5, borderLeftWidth: 1.5 }
-    : { bottom: -1, right: -1, borderBottomWidth: 1.5, borderRightWidth: 1.5 };
-  return <View style={[styles.corner, s]} pointerEvents="none" />;
-}
-
 export default function WorkoutDetailScreen({ route, navigation }) {
   const { workout, studentView } = route.params;
 
@@ -145,32 +138,31 @@ export default function WorkoutDetailScreen({ route, navigation }) {
           {/* Exercise list */}
           {exercises.map((ex) => (
             <View key={ex.id} style={styles.exCard}>
-              <Corner pos="TL" />
-              <Corner pos="BR" />
-              <View style={styles.exCardInner}>
-                <View style={styles.letterBadge}>
-                  <Text style={styles.letterText}>{ex.letter}</Text>
-                </View>
-                <View style={styles.exBody}>
-                  <Text style={styles.exName}>{ex.name?.toUpperCase()}</Text>
-                  <View style={styles.metaRow}>
-                    {ex.sets ? <Text style={styles.metaItem}>{ex.sets} SETS</Text> : null}
-                    {ex.sets && ex.reps ? <Text style={styles.metaDot}>·</Text> : null}
-                    {ex.reps ? <Text style={styles.metaItem}>{ex.reps} REPS</Text> : null}
-                  </View>
-                  {ex.notes ? (
-                    <Text style={styles.exNotes}>{ex.notes}</Text>
+              <View style={styles.letterBadge}>
+                <Text style={styles.letterText}>{ex.letter}</Text>
+              </View>
+              <View style={styles.exBody}>
+                <Text style={styles.exName}>{ex.name?.toUpperCase()}</Text>
+                <View style={styles.metaRow}>
+                  {ex.sets ? (
+                    <View style={styles.metaChip}><Text style={styles.metaChipText}>{ex.sets} SETS</Text></View>
                   ) : null}
-                  {ex.youtube_url ? (
-                    <TouchableOpacity
-                      style={styles.videoBtn}
-                      onPress={() => Linking.openURL(ex.youtube_url)}
-                      activeOpacity={0.8}
-                    >
-                      <Text style={styles.videoBtnText}>▶ WATCH VIDEO</Text>
-                    </TouchableOpacity>
+                  {ex.reps ? (
+                    <View style={styles.metaChip}><Text style={styles.metaChipText}>{ex.reps} REPS</Text></View>
                   ) : null}
                 </View>
+                {ex.notes ? (
+                  <Text style={styles.exNotes}>{ex.notes}</Text>
+                ) : null}
+                {ex.youtube_url ? (
+                  <TouchableOpacity
+                    style={styles.videoBtn}
+                    onPress={() => Linking.openURL(ex.youtube_url)}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.videoBtnText}>▶ WATCH VIDEO</Text>
+                  </TouchableOpacity>
+                ) : null}
               </View>
             </View>
           ))}
@@ -255,15 +247,10 @@ export default function WorkoutDetailScreen({ route, navigation }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SL.bg },
 
-  corner: {
-    position: 'absolute',
-    width: 14,
-    height: 14,
-    borderColor: SL.accent,
-    zIndex: 2,
-  },
-
   header: {
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
     paddingHorizontal: 24,
     paddingTop: 60,
     paddingBottom: 24,
@@ -279,9 +266,9 @@ const styles = StyleSheet.create({
   },
   workoutTitle: {
     fontFamily: F.heading,
-    fontSize: 32,
+    fontSize: 44,
     color: SL.accent,
-    letterSpacing: 3,
+    letterSpacing: 4,
     textAlign: 'center',
     textTransform: 'uppercase',
   },
@@ -289,7 +276,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    marginTop: 12,
+    marginTop: 14,
+    justifyContent: 'center',
   },
   purposeAccent: {
     width: 3,
@@ -299,52 +287,81 @@ const styles = StyleSheet.create({
   },
   purposeText: {
     fontFamily: F.body,
-    fontSize: 22,
-    color: SL.text,
+    fontSize: 20,
+    color: SL.muted,
     letterSpacing: 0.5,
-    flex: 1,
   },
   divider: {
-    height: 1,
+    height: 2,
     backgroundColor: SL.accent,
-    opacity: 0.3,
+    opacity: 0.4,
     marginTop: 20,
+    borderRadius: 1,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 6,
   },
 
-  list: { paddingHorizontal: 16, paddingTop: 20, gap: 10 },
+  // Cool ice-glow frame wrapping the body, matching the Skills page.
+  list: {
+    paddingHorizontal: 16,
+    paddingTop: 20,
+    paddingBottom: 20,
+    gap: 12,
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
+    marginTop: 16,
+    marginBottom: 28,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 18,
+    backgroundColor: SL.bg,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.2,
+    shadowRadius: 20,
+  },
 
   exCard: {
-    backgroundColor: SL.panel,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    overflow: 'visible',
-    position: 'relative',
-  },
-  exCardInner: {
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 16,
     padding: 16,
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderLeftWidth: 4,
+    borderLeftColor: SL.accent,
+    borderRadius: 10,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
   },
   letterBadge: {
-    width: 40,
-    height: 40,
+    width: 46,
+    height: 46,
     borderWidth: 1.5,
     borderColor: SL.accent,
-    borderRadius: 4,
+    borderRadius: 10,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(74,158,191,0.08)',
+    backgroundColor: 'rgba(74,158,191,0.1)',
     flexShrink: 0,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
   },
   letterText: {
     fontFamily: F.heading,
-    fontSize: 20,
+    fontSize: 24,
     color: SL.accent,
     letterSpacing: 1,
   },
-  exBody: { flex: 1, gap: 6 },
+  exBody: { flex: 1, gap: 8 },
   exName: {
     fontFamily: F.heading,
     fontSize: 26,
@@ -352,17 +369,24 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     textTransform: 'uppercase',
   },
-  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
-  metaItem: {
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  metaChip: {
+    borderWidth: 1,
+    borderColor: SL.border,
+    borderRadius: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    backgroundColor: 'rgba(74,158,191,0.06)',
+  },
+  metaChipText: {
     fontFamily: F.bodyMed,
-    fontSize: 20,
-    color: SL.muted,
+    fontSize: 16,
+    color: SL.accent,
     letterSpacing: 1,
   },
-  metaDot: { color: SL.border, fontSize: 20 },
   exNotes: {
     fontFamily: F.bodyMed,
-    fontSize: 20,
+    fontSize: 18,
     color: SL.muted,
     letterSpacing: 0.5,
     fontStyle: 'italic',
@@ -370,18 +394,20 @@ const styles = StyleSheet.create({
   },
 
   videoBtn: {
-    marginTop: 6,
-    height: 34,
+    marginTop: 8,
+    alignSelf: 'flex-start',
+    height: 38,
+    paddingHorizontal: 16,
     borderWidth: 1.5,
     borderColor: SL.accent,
-    borderRadius: 4,
+    borderRadius: 8,
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: 'rgba(74,158,191,0.08)',
   },
   videoBtnText: {
     fontFamily: F.bodyMed,
-    fontSize: 13,
+    fontSize: 14,
     color: SL.accent,
     letterSpacing: 2,
   },
@@ -447,29 +473,35 @@ const styles = StyleSheet.create({
 
   // Buttons
   primaryBtn: {
-    height: 44,
+    height: 54,
+    marginTop: 8,
     backgroundColor: SL.accent,
-    borderRadius: 6,
+    borderRadius: 10,
     justifyContent: 'center',
     alignItems: 'center',
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 14,
   },
   primaryBtnText: {
     fontFamily: F.heading,
-    fontSize: 22,
+    fontSize: 24,
     color: SL.bg,
     letterSpacing: 3,
     textTransform: 'uppercase',
   },
   secondaryBtn: {
-    height: 36,
+    height: 48,
+    marginTop: 8,
     borderWidth: 1.5,
     borderColor: SL.accent,
-    borderRadius: 6,
-    paddingHorizontal: 20,
+    borderRadius: 10,
+    paddingHorizontal: 24,
     justifyContent: 'center',
     alignItems: 'center',
     alignSelf: 'center',
-    backgroundColor: 'transparent',
+    backgroundColor: 'rgba(74,158,191,0.06)',
   },
   secondaryBtnText: {
     fontFamily: F.heading,
@@ -478,17 +510,22 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
   },
   completedBanner: {
-    height: 44,
+    height: 54,
+    marginTop: 8,
     borderWidth: 1.5,
     borderColor: '#4CAF50',
-    borderRadius: 6,
+    borderRadius: 10,
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: 'rgba(76,175,80,0.08)',
+    shadowColor: '#4CAF50',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
   },
   completedText: {
     fontFamily: F.heading,
-    fontSize: 22,
+    fontSize: 24,
     color: '#4CAF50',
     letterSpacing: 3,
   },

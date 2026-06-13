@@ -172,6 +172,9 @@ const styles = StyleSheet.create({
   },
 
   header: {
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
     paddingHorizontal: 24,
     paddingTop: 60,
     paddingBottom: 24,
@@ -208,17 +211,40 @@ const styles = StyleSheet.create({
     marginTop: 20,
   },
 
-  list: { padding: 16, gap: 12, paddingBottom: 48 },
+  // Cool ice-glow frame wrapping the body, matching the Skills page.
+  list: {
+    padding: 16,
+    gap: 12,
+    paddingBottom: 48,
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
+    marginTop: 16,
+    marginBottom: 28,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 18,
+    backgroundColor: SL.bg,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.2,
+    shadowRadius: 20,
+  },
 
   card: {
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 4,
+    borderRadius: 10,
     padding: 18,
     gap: 8,
     overflow: 'visible',
     position: 'relative',
+    // Soft ice-glow frame, matching the Home / Skills cards.
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
   },
   cardTop: {
     flexDirection: 'row',

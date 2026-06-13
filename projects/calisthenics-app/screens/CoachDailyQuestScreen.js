@@ -108,7 +108,7 @@ export default function CoachDailyQuestScreen({ route, navigation }) {
   function confirmDelete(quest) {
     Alert.alert(
       'REMOVE DAILY QUEST?',
-      `"${quest.title}" will be removed from the student's list. Past completions and EXP are kept.`,
+      `"${quest.title}" will be removed from your list. Past completions are kept.`,
       [
         { text: 'CANCEL', style: 'cancel' },
         {
@@ -268,6 +268,9 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SL.bg },
 
   header: {
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
     paddingHorizontal: 24,
     paddingTop: 60,
     paddingBottom: 20,
@@ -299,7 +302,25 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
 
-  body: { padding: 20, gap: 12, paddingBottom: 60 },
+  // Cool ice-glow frame wrapping the body, matching the Skills / Workouts pages.
+  body: {
+    padding: 20,
+    gap: 12,
+    paddingBottom: 60,
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
+    marginTop: 16,
+    marginBottom: 28,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 18,
+    backgroundColor: SL.bg,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.2,
+    shadowRadius: 20,
+  },
 
   sectionLabel: {
     fontFamily: F.bodyMed,
@@ -334,9 +355,14 @@ const styles = StyleSheet.create({
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 4,
+    borderRadius: 10,
     paddingVertical: 12,
     paddingHorizontal: 14,
+    // Soft ice-glow frame, matching the Home / Skills cards.
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
   },
   questCardDone: { borderColor: SL.green },
   statusDot: {
