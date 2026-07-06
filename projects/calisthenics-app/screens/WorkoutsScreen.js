@@ -1,13 +1,29 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, RefreshControl, Modal,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Pressable,
+  ActivityIndicator, RefreshControl, Modal, Animated, Easing, Dimensions,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { computeLvl } from '../lib/computeLvl';
 import { materializeDay, isDateOverridden } from '../lib/schedule';
+import { categoryMeta } from '../lib/workouts';
 import { F } from '../constants/fonts';
+
+// Off-program ACCESSORIES / LEGS workouts get their type's signature glow; the
+// dated program (main/side/untyped) keeps the default ice theme. Returns a color
+// or null (= use default styling).
+const accentFor = (category) =>
+  (category === 'accessory' || category === 'legs') ? categoryMeta(category).color : null;
+
+// Full window width — how far the body slides off-screen during the swipe exit.
+const WIN_W = Dimensions.get('window').width;
+// Shared swipe duration so the Workouts ↔ Manage transition has one consistent pace.
+const SWIPE_MS = 300;
+import ScreenFrame from '../components/ScreenFrame';
+import PillButton from '../components/PillButton';
+import { ShimmerText, ShimmerFrame, BLUE } from '../components/Shimmer';
+import { CARD_H, CARD_W } from '../constants/layout';
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
@@ -73,15 +89,60 @@ function isLocked(dateStr) {
   return diffDays >= 7;
 }
 
+// ─── Calendar window / retention ───────────────────────────────────────────────
+// The week ruler only travels 4 weeks back … 4 weeks forward from the current
+// week (9 weeks total). Per-date rows outside this window are pruned from the DB
+// on load so storage stays small — only the visible 9 weeks are ever kept.
+const WEEKS_BACK = 4;
+const WEEKS_FWD  = 4;
+
+function windowBounds() {
+  return {
+    start: getWeekDays(-WEEKS_BACK)[0].dateStr,
+    end:   getWeekDays(WEEKS_FWD)[6].dateStr,
+  };
+}
+
+// Delete the player's own per-date rows that fall outside the 9-week window.
+// Only touches transient per-date data (override workouts + daily-quest
+// completions); permanent progress (student_quest_completions, workouts,
+// templates) is never affected.
+async function pruneOutOfWindow(studentId, { start, end }) {
+  const outside = (col) => `${col}.lt.${start},${col}.gt.${end}`;
+  try {
+    await Promise.all([
+      supabase.from('workout_override_workouts').delete()
+        .eq('student_id', studentId).or(outside('specific_date')),
+      supabase.from('daily_quest_completions').delete()
+        .eq('student_id', studentId).or(outside('completion_date')),
+    ]);
+  } catch (e) {
+    console.warn('[WorkoutsScreen] prune:', e?.message ?? e);
+  }
+}
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
-export default function WorkoutsScreen({ navigation }) {
+export default function WorkoutsScreen({ navigation, route }) {
+  // Admin-as-coach: with a `studentId` param this shows THAT player's actual week
+  // — their per-date overrides, completions and edits. No param = the signed-in
+  // player's own Workouts tab, unchanged.
+  const overrideStudentId = route?.params?.studentId ?? null;
+  const adminMode = !!overrideStudentId;
+  const resolveTargetId = useCallback(async () => {
+    if (overrideStudentId) return overrideStudentId;
+    const { data: { user } } = await supabase.auth.getUser();
+    return user?.id ?? null;
+  }, [overrideStudentId]);
+
   const [profile,               setProfile]               = useState(null);
   const [className,             setClassName]             = useState(null);
   const [workoutsById,          setWorkoutsById]          = useState({});
   const [allWorkouts,           setAllWorkouts]           = useState([]);   // for the edit picker
   const [overrideWorkouts,      setOverrideWorkouts]      = useState([]);
   const [templateRows,          setTemplateRows]          = useState([]);   // weekly skeleton
+  const [dailyQuestIds,         setDailyQuestIds]         = useState([]);   // active daily-quest ids
+  const [dailyDoneByDate,       setDailyDoneByDate]       = useState({});   // dateStr → Set(quest ids)
   const [lvl,                   setLvl]                   = useState(0);
   const [loading,               setLoading]               = useState(true);
   const [refreshing,            setRefreshing]            = useState(false);
@@ -100,35 +161,138 @@ export default function WorkoutsScreen({ navigation }) {
 
   const [marking, setMarking] = useState({});
 
+  // ── Training Forge press juice ──
+  // `forgePress` (0→1) is held while the finger is down → scale punch, chip pop,
+  // chevron dart. `forgeSweep` is a one-shot light streak fired on press-in.
+  const forgePress = useRef(new Animated.Value(0)).current;
+  const forgeSweep = useRef(new Animated.Value(0)).current;
+  const [forgeW, setForgeW] = useState(0);
+
+  const onForgeIn = useCallback(() => {
+    Animated.spring(forgePress, {
+      toValue: 1, useNativeDriver: true, speed: 50, bounciness: 0,
+    }).start();
+    forgeSweep.setValue(0);
+    Animated.timing(forgeSweep, {
+      toValue: 1, duration: 600, easing: Easing.out(Easing.cubic), useNativeDriver: true,
+    }).start();
+  }, [forgePress, forgeSweep]);
+
+  const onForgeOut = useCallback(() => {
+    // Spring back with a little overshoot for that satisfying "release" pop.
+    Animated.spring(forgePress, {
+      toValue: 0, useNativeDriver: true, speed: 18, bounciness: 14,
+    }).start();
+  }, [forgePress]);
+
+  const forgeScale  = forgePress.interpolate({ inputRange: [0, 1], outputRange: [1, 0.955] });
+  const forgeChipS  = forgePress.interpolate({ inputRange: [0, 1], outputRange: [1, 1.14] });
+  const forgeChevX  = forgePress.interpolate({ inputRange: [0, 1], outputRange: [0, 5] });
+  const forgeSweepX = forgeSweep.interpolate({ inputRange: [0, 1], outputRange: [-70, forgeW + 70] });
+  const forgeSweepO = forgeSweep.interpolate({ inputRange: [0, 0.12, 0.85, 1], outputRange: [0, 0.55, 0.4, 0] });
+
+  // ── Forge → Manage "System seal" exit ──
+  // Pressing TRAINING FORGE swipes the BODY off to the left while the headline
+  // (name + LVL · CLASS + divider) stays put — Manage then slides its identical
+  // body in from the right, so the header reads as one continuous, unmoved element.
+  const exitAnim   = useRef(new Animated.Value(0)).current;
+  const exitingRef = useRef(false);
+  const exitedRef  = useRef(false);   // did we leave via the Forge swipe?
+
+  const onForgePress = useCallback(() => {
+    if (exitingRef.current) return;
+    exitingRef.current = true;
+    exitedRef.current  = true;
+    Animated.timing(exitAnim, {
+      toValue: 1, duration: SWIPE_MS, easing: Easing.in(Easing.cubic), useNativeDriver: true,
+    }).start(({ finished }) => {
+      // `fromForge` triggers the matching slide-in; pass lvl/class we already have
+      // so Manage's header renders instantly with no refetch flash.
+      if (finished) navigation.navigate('Manage', { fromForge: true, lvl, className });
+    });
+  }, [exitAnim, navigation, lvl, className]);
+
+  // ── HUD chrome (entrance removed) ──
+  // The staggered boot-up was retired when tab swiping landed: the neighbouring
+  // page is VISIBLE mid-drag (before focus fires), so the chrome must sit fully
+  // built at all times — values live at 1 and never replay. The Animated.Values
+  // are kept (at rest) because the layout binds to them for the Forge exit slide.
+  const boot = useRef({
+    header:  new Animated.Value(1),
+    divider: new Animated.Value(1),
+    forge:   new Animated.Value(1),
+    nav:     new Animated.Value(1),
+    cells:   Array.from({ length: 7 }, () => new Animated.Value(1)),
+    panel:   new Animated.Value(1),
+  }).current;
+
+  // On return: if we left via the Forge swipe, swipe the body back IN from the left
+  // (completing the page swipe, same pace). Otherwise just sit in place.
+  useFocusEffect(useCallback(() => {
+    exitingRef.current = false;
+    if (exitedRef.current) {
+      exitedRef.current = false;
+      exitAnim.setValue(1);               // start off-screen left
+      Animated.timing(exitAnim, {
+        toValue: 0, duration: SWIPE_MS, easing: Easing.out(Easing.cubic), useNativeDriver: true,
+      }).start();
+    } else {
+      exitAnim.setValue(0);
+    }
+  }, [exitAnim]));
+
+  const exitBodyX = exitAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -WIN_W] });
+  const exitBodyO = exitAnim.interpolate({ inputRange: [0, 0.7, 1], outputRange: [1, 1, 0] });
+
   // ── Fetch week data ────────────────────────────────────────────────────────
 
   const fetchData = useCallback(async () => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      const tid = await resolveTargetId();
+      if (!tid) return;
 
-      const [profileRes, overridesRes, templateRes, workoutsRes] = await Promise.all([
+      const win = windowBounds();
+      // Trim anything outside the 9-week window before reading.
+      await pruneOutOfWindow(tid, win);
+
+      const [profileRes, overridesRes, templateRes, workoutsRes, dqRes, dqcRes] = await Promise.all([
         supabase
           .from('profiles')
           .select('full_name, class_id')
-          .eq('id', user.id)
+          .eq('id', tid)
           .single(),
 
         supabase
           .from('workout_override_workouts')
           .select('id, specific_date, workout_id, completed, coach_feedback, feedback_is_read')
-          .eq('student_id', user.id),
+          .eq('student_id', tid),
 
         supabase
           .from('weekly_workout_template')
           .select('id, day_of_week, workout_id')
-          .eq('student_id', user.id),
+          .eq('student_id', tid),
 
         supabase
           .from('workouts')
-          .select('id, title, purpose, scheduled_date')
-          .eq('assigned_to', user.id)
+          .select('id, title, purpose, scheduled_date, category')
+          .eq('assigned_to', tid)
           .order('title', { ascending: true }),
+
+        // Active daily quests — a rest day counts as "done" when all of these are
+        // checked off for that date.
+        supabase
+          .from('daily_quests')
+          .select('id')
+          .eq('student_id', tid)
+          .eq('active', true),
+
+        // Daily-quest completions inside the visible window.
+        supabase
+          .from('daily_quest_completions')
+          .select('daily_quest_id, completion_date')
+          .eq('student_id', tid)
+          .gte('completion_date', win.start)
+          .lte('completion_date', win.end),
       ]);
 
       if (profileRes.data) {
@@ -140,7 +304,7 @@ export default function WorkoutsScreen({ navigation }) {
               .select('name')
               .eq('id', profileRes.data.class_id)
               .maybeSingle(),
-            computeLvl(user.id, profileRes.data.class_id),
+            computeLvl(tid, profileRes.data.class_id),
           ]);
           setClassName(classData?.name ?? null);
           setLvl(lvlVal ?? 0);
@@ -153,10 +317,17 @@ export default function WorkoutsScreen({ navigation }) {
       setWorkoutsById(Object.fromEntries(workouts.map(w => [w.id, w])));
       setOverrideWorkouts(overridesRes.data ?? []);
       setTemplateRows(templateRes.data ?? []);
+
+      setDailyQuestIds((dqRes.data ?? []).map(q => q.id));
+      const byDate = {};
+      (dqcRes.data ?? []).forEach(r => {
+        (byDate[r.completion_date] ??= new Set()).add(r.daily_quest_id);
+      });
+      setDailyDoneByDate(byDate);
     } catch (e) {
       console.error('[WorkoutsScreen] fetchData:', e);
     }
-  }, [weekOffset]);
+  }, [weekOffset, resolveTargetId]);
 
   useEffect(() => {
     fetchData().finally(() => setLoading(false));
@@ -185,6 +356,7 @@ export default function WorkoutsScreen({ navigation }) {
             title:          w.title,
             purpose:        w.purpose,
             scheduled_date: w.scheduled_date,
+            category:       w.category,
             overrideId:     o.id,
             completed:      o.completed ?? false,
             specific_date:  o.specific_date,
@@ -207,6 +379,7 @@ export default function WorkoutsScreen({ navigation }) {
           title:          w.title,
           purpose:        w.purpose,
           scheduled_date: w.scheduled_date,
+          category:       w.category,
           overrideId:     null,
           completed:      false,
           specific_date:  day.dateStr,
@@ -224,6 +397,8 @@ export default function WorkoutsScreen({ navigation }) {
     [selectedDay, overrideWorkouts, templateRows, workoutsById]
   );
 
+  const activeDailyIds = useMemo(() => new Set(dailyQuestIds), [dailyQuestIds]);
+
   // ── Mark a workout as done ─────────────────────────────────────────────────
 
   const mkKey = (w) => w.overrideId ?? `t:${w.id}`;
@@ -232,16 +407,16 @@ export default function WorkoutsScreen({ navigation }) {
   // first time it's touched), so completion / edits can attach to that date.
   async function ensureMaterialized(dateStr) {
     if (isDateOverridden(dateStr, overrideWorkouts)) return;
-    const { data: { user } } = await supabase.auth.getUser();
+    const tid = await resolveTargetId();
     const dow = new Date(dateStr + 'T00:00:00').getDay();
     const ids = templateRows.filter(t => t.day_of_week === dow).map(t => t.workout_id);
-    await materializeDay({ studentId: user.id, coachId: user.id, dateStr, templateWorkoutIds: ids });
+    await materializeDay({ studentId: tid, coachId: tid, dateStr, templateWorkoutIds: ids });
   }
 
   async function handleMarkDone(workout) {
     setMarking(prev => ({ ...prev, [mkKey(workout)]: true }));
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const tid = await resolveTargetId();
       if (workout.overrideId) {
         const { error } = await supabase
           .from('workout_override_workouts')
@@ -254,7 +429,7 @@ export default function WorkoutsScreen({ navigation }) {
         const { error } = await supabase
           .from('workout_override_workouts')
           .update({ completed: true })
-          .eq('student_id', user.id)
+          .eq('student_id', tid)
           .eq('specific_date', workout.specific_date)
           .eq('workout_id', workout.id);
         if (error) { alert('Could not mark as done: ' + error.message); }
@@ -291,11 +466,11 @@ export default function WorkoutsScreen({ navigation }) {
   async function addWorkoutToDate(dateStr, workoutId) {
     setEditSaving(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const tid = await resolveTargetId();
       await ensureMaterialized(dateStr);  // copy skeleton first so siblings are kept
       const { error } = await supabase
         .from('workout_override_workouts')
-        .insert({ student_id: user.id, coach_id: user.id, specific_date: dateStr, workout_id: workoutId });
+        .insert({ student_id: tid, coach_id: tid, specific_date: dateStr, workout_id: workoutId });
       if (error) alert('Error: ' + error.message);
       setEditPending(undefined);
       await fetchData();
@@ -306,13 +481,13 @@ export default function WorkoutsScreen({ navigation }) {
   }
 
   async function removeWorkoutFromDate(day, workout) {
-    const { data: { user } } = await supabase.auth.getUser();
+    const tid = await resolveTargetId();
     // Template-derived day: materialize first so removing one keeps the others.
     if (!workout.overrideId) await ensureMaterialized(day.dateStr);
     const { error } = await supabase
       .from('workout_override_workouts')
       .delete()
-      .eq('student_id', user.id)
+      .eq('student_id', tid)
       .eq('specific_date', day.dateStr)
       .eq('workout_id', workout.id);
     if (error) alert('Error: ' + error.message);
@@ -321,149 +496,246 @@ export default function WorkoutsScreen({ navigation }) {
 
   // Drop all per-date overrides for a date → it falls back to the weekly skeleton.
   async function resetDayToPlan(dateStr) {
-    const { data: { user } } = await supabase.auth.getUser();
+    const tid = await resolveTargetId();
     const { error } = await supabase
       .from('workout_override_workouts')
       .delete()
-      .eq('student_id', user.id)
+      .eq('student_id', tid)
       .eq('specific_date', dateStr);
     if (error) alert('Error: ' + error.message);
     setEditVisible(false);
     await fetchData();
   }
 
-  // ── Loading ────────────────────────────────────────────────────────────────
-
-  if (loading) {
-    return (
-      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator size="large" color={SL.accent} />
-      </View>
-    );
-  }
-
   // ── Render ─────────────────────────────────────────────────────────────────
+  // The full layout ALWAYS renders inside a fixed-size card (matching the Weekly
+  // Plan), so the frame never resizes with data or while loading — the spinner
+  // shows inside the day panel.
 
   return (
-    <ScrollView
-      style={styles.container}
-      contentContainerStyle={styles.body}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={SL.accent} />}
-    >
+    <ScreenFrame maxWidth={CARD_W} ready={!loading}>
+    <View style={styles.card}>
+    <View style={styles.body}>
+      {/* Admin-as-coach: BACK to the player hub (this screen is a tab for players,
+          so the pill only shows when an admin opened it for a specific player). */}
+      {adminMode && (
+        <View style={styles.adminBackRow}>
+          <PillButton label="← BACK" size="sm" onPress={() => navigation.goBack()} />
+        </View>
+      )}
+
       {/* ── Header ── */}
-      <View style={styles.header}>
+      <Animated.View style={[styles.header, {
+        opacity: boot.header,
+        transform: [{ translateY: boot.header.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }) }],
+      }]}>
         <Text style={styles.studentName}>
           {profile?.full_name?.toUpperCase() ?? '—'}
         </Text>
-        <Text style={styles.level}>LVL {lvl ?? '—'}</Text>
-        {className && (
-          <Text style={styles.className}>{className.toUpperCase()}</Text>
-        )}
-        <View style={styles.headerDivider} />
-      </View>
+        <View style={styles.statRow}>
+          <Text style={styles.level}>LVL {lvl ?? '—'}</Text>
+          {className && (
+            <>
+              <View style={styles.statDot} />
+              <Text style={styles.className}>{className.toUpperCase()}</Text>
+            </>
+          )}
+        </View>
+        {/* Ice divider scans out from its center as the headline settles. */}
+        <Animated.View style={[styles.headerDivider, { transform: [{ scaleX: boot.divider }] }]} />
+      </Animated.View>
 
-      {/* ── Manage training (self-coach) ── */}
-      <TouchableOpacity
-        style={styles.manageBanner}
-        onPress={() => navigation.navigate('Manage')}
-        activeOpacity={0.85}
-      >
-        <Text style={styles.manageBannerText}>⚙ MANAGE MY TRAINING</Text>
-        <Text style={styles.manageBannerArrow}>→</Text>
-      </TouchableOpacity>
+      {/* Everything below the headline swipes off to the left on the Forge exit
+          (the headline itself stays put). */}
+      <Animated.View style={[styles.swipeBody, { transform: [{ translateX: exitBodyX }], opacity: exitBodyO }]}>
+
+      {/* ── Training upgrade console (self-coach) ──
+          Reframed as a game-style "forge / upgrade station": a glowing panel with
+          a live ice-shimmer frame, a power chip, and a build/upgrade subtitle. */}
+      <Animated.View style={[styles.manageRow, {
+        opacity: boot.forge,
+        transform: [
+          { translateY: boot.forge.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) },
+          { scale: boot.forge.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] }) },
+        ],
+      }]}>
+        <Pressable onPressIn={onForgeIn} onPressOut={onForgeOut} onPress={onForgePress}>
+          <Animated.View
+            style={[styles.forgeBtn, { transform: [{ scale: forgeScale }] }]}
+            onLayout={e => setForgeW(e.nativeEvent.layout.width)}
+          >
+            <ShimmerFrame
+              style={StyleSheet.absoluteFill}
+              colors={BLUE}
+              radius={14}
+              thickness={2}
+              active
+            />
+            <Animated.View style={[styles.forgeChip, { transform: [{ scale: forgeChipS }] }]}>
+              <Text style={styles.forgeChipGlyph}>▲</Text>
+            </Animated.View>
+            <Text style={styles.forgeTitle}>TRAINING FORGE</Text>
+            <Animated.Text style={[styles.forgeChevron, { transform: [{ translateX: forgeChevX }] }]}>›</Animated.Text>
+            {/* one-shot light streak that sweeps across on press (holo shine) */}
+            <Animated.View
+              pointerEvents="none"
+              style={[styles.forgeSweep, { opacity: forgeSweepO, transform: [{ translateX: forgeSweepX }, { skewX: '-18deg' }] }]}
+            />
+          </Animated.View>
+        </Pressable>
+      </Animated.View>
 
       {/* ── Week nav ── */}
-      <View style={styles.calendarNav}>
-        <TouchableOpacity style={styles.navArrow} onPress={() => setWeekOffset(o => o - 1)}>
-          <Text style={styles.navArrowText}>←</Text>
+      <Animated.View style={[styles.calendarNav, {
+        opacity: boot.nav,
+        transform: [{ translateY: boot.nav.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }],
+      }]}>
+        <TouchableOpacity
+          style={[styles.navArrow, weekOffset <= -WEEKS_BACK && styles.navArrowDisabled]}
+          disabled={weekOffset <= -WEEKS_BACK}
+          onPress={() => setWeekOffset(o => Math.max(-WEEKS_BACK, o - 1))}
+        >
+          <View style={[styles.chevron, styles.chevronLeft]} />
         </TouchableOpacity>
         <View style={styles.navCenter}>
-          {weekOffset === 0 && <Text style={styles.navBadge}>THIS WEEK</Text>}
-          <Text style={styles.navRange}>{fmtWeekRange(weekDays)}</Text>
+          <View style={styles.navRangeCard}>
+            <Text style={styles.navRange}>{fmtWeekRange(weekDays)}</Text>
+          </View>
         </View>
-        <TouchableOpacity style={styles.navArrow} onPress={() => setWeekOffset(o => o + 1)}>
-          <Text style={styles.navArrowText}>→</Text>
+        <TouchableOpacity
+          style={[styles.navArrow, weekOffset >= WEEKS_FWD && styles.navArrowDisabled]}
+          disabled={weekOffset >= WEEKS_FWD}
+          onPress={() => setWeekOffset(o => Math.min(WEEKS_FWD, o + 1))}
+        >
+          <View style={[styles.chevron, styles.chevronRight]} />
         </TouchableOpacity>
-      </View>
+      </Animated.View>
 
       {/* ── Calendar grid ── */}
       <View style={styles.calendarGrid}>
-        {weekDays.map(day => {
+        {weekDays.map((day, i) => {
           const dayWorkouts = getDayWorkouts(day);
           const isSelected  = day.dateStr === selectedDay?.dateStr;
           const isToday     = day.dateStr === TODAY_STR;
-          const allDone     = dayWorkouts.length > 0 && dayWorkouts.every(w => w.completed);
+          // A workout day is done when every workout is completed. A REST day
+          // (no workouts) still counts as done when all active daily quests are
+          // checked off for that date.
+          const dailyDone   = [...(dailyDoneByDate[day.dateStr] ?? [])]
+            .filter(id => activeDailyIds.has(id)).length;
+          const allDone     = dayWorkouts.length > 0
+            ? dayWorkouts.every(w => w.completed)
+            : activeDailyIds.size > 0 && dailyDone >= activeDailyIds.size;
 
+          const cellV = boot.cells[i];
           return (
-            <TouchableOpacity
+            <Animated.View
               key={day.dateStr}
+              style={{
+                flex: 1,
+                opacity: cellV,
+                transform: [
+                  { translateY: cellV.interpolate({ inputRange: [0, 1], outputRange: [22, 0] }) },
+                  { scale: cellV.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] }) },
+                ],
+              }}
+            >
+            <TouchableOpacity
               style={[
                 styles.dayNode,
                 isToday && !isSelected && styles.dayNodeToday,
                 isSelected && styles.dayNodeSelected,
+                allDone && styles.dayNodeDone,
               ]}
               onPress={() => setSelectedDay(day)}
               activeOpacity={0.75}
             >
-              <Text style={[styles.dayLabel, (isSelected || isToday) && styles.dayLabelSel]}>
+              <Text style={[
+                styles.dayLabel,
+                (isSelected || isToday) && styles.dayLabelSel,
+                allDone && styles.dayLabelDone,
+              ]}>
                 {day.label}
               </Text>
-              <Text style={[styles.dayNum, (isSelected || isToday) && styles.dayNumActive]}>
+              <Text style={[
+                styles.dayNum,
+                (isSelected || isToday) && styles.dayNumActive,
+                allDone && styles.dayNumDone,
+              ]}>
                 {day.date.getDate()}
               </Text>
-              <Text style={styles.dayMonth}>{day.month}</Text>
+              <Text style={[styles.dayMonth, allDone && styles.dayMonthDone]}>
+                {day.month}
+              </Text>
 
-              {dayWorkouts.length > 0 ? (
-                <View style={styles.dayStatus}>
-                  <Text
-                    style={[styles.dayWorkoutName, allDone && { color: SL.green }]}
-                    numberOfLines={2}
-                  >
-                    {dayWorkouts[0].title?.toUpperCase()}
-                    {dayWorkouts.length > 1 ? ` +${dayWorkouts.length - 1}` : ''}
-                  </Text>
-                  {allDone && <Text style={styles.dayCheck}>✓ DONE</Text>}
-                </View>
-              ) : (
-                <Text style={styles.dayRest}>REST</Text>
-              )}
+              {/* A rest day is simply a day with no accent dot below — no label. */}
+
+              {/* Per-workout accent dots — a dot for every workout on this day:
+                  accessory/legs in their signature type color, the dated
+                  program (main/side/untyped) in the default ice-blue accent. */}
+              {(() => {
+                const accents = dayWorkouts.map(w => accentFor(w.category) ?? SL.accent);
+                if (!accents.length) return null;
+                return (
+                  <View style={styles.accDots}>
+                    {accents.map((c, di) => (
+                      <View key={di} style={[styles.accDot, { backgroundColor: c, shadowColor: c }]} />
+                    ))}
+                  </View>
+                );
+              })()}
 
               {isToday && <View style={styles.todayBar} />}
             </TouchableOpacity>
+            </Animated.View>
           );
         })}
       </View>
 
       {/* ── Day detail panel ── */}
-      <View style={styles.dayCard}>
+      <Animated.View style={[styles.dayCard, {
+        opacity: boot.panel,
+        transform: [{ translateY: boot.panel.interpolate({ inputRange: [0, 1], outputRange: [24, 0] }) }],
+      }]}>
         <View style={styles.dayCardHead}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.dayCardName}>{selectedDay?.label}</Text>
-            <Text style={styles.dayCardDate}>{fmtDisplayDate(selectedDay?.dateStr)}</Text>
-            <Text style={styles.daySourceHint}>
-              {isDateOverridden(selectedDay?.dateStr, overrideWorkouts) ? 'CUSTOM FOR THIS DATE' : 'FROM WEEKLY PLAN'}
-            </Text>
+          <Text style={styles.dayCardDate}>{fmtDisplayDate(selectedDay?.dateStr)}</Text>
+          <View style={styles.dayCardEditBtn}>
+            <PillButton
+              label="✎ EDIT DAY"
+              size="sm"
+              onPress={() => { setEditPending(undefined); setEditVisible(true); }}
+            />
           </View>
-          <TouchableOpacity
-            style={styles.editDayBtn}
-            onPress={() => { setEditPending(undefined); setEditVisible(true); }}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.editDayBtnText}>✎ EDIT DAY</Text>
-          </TouchableOpacity>
         </View>
 
-        {selectedDayWorkouts.length > 0 ? (
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={[
+            styles.dayCardBody,
+            (loading || selectedDayWorkouts.length === 0) && styles.dayCardBodyEmpty,
+          ]}
+          showsVerticalScrollIndicator={false}
+        >
+        {loading ? (
+          <View style={styles.restCard}>
+            <ActivityIndicator color={SL.accent} size="large" />
+          </View>
+        ) : selectedDayWorkouts.length > 0 ? (
           selectedDayWorkouts.map(workout => {
             const isMarking = !!marking[mkKey(workout)];
             const locked    = isLocked(workout.specific_date);
             const hasUnreadFeedback = workout.coachFeedback && !workout.feedbackIsRead;
+            const tc        = accentFor(workout.category); // accessory/legs glow, else null
 
             return (
-              <View key={workout.id} style={styles.workoutCard}>
+              <View key={workout.id} style={[styles.workoutCard, tc && { borderLeftColor: tc, shadowColor: tc, shadowOpacity: 0.4, shadowRadius: 8 }]}>
                 <View style={styles.workoutInfo}>
                   <View style={styles.workoutTitleRow}>
-                    <Text style={styles.workoutTitle} numberOfLines={1}>{workout.title?.toUpperCase()}</Text>
+                    <Text style={[styles.workoutTitle, tc && { color: tc }]} numberOfLines={2}>{workout.title?.toUpperCase()}</Text>
+                    {tc && (
+                      <View style={[styles.typeTag, { borderColor: tc }]}>
+                        <Text style={[styles.typeTagText, { color: tc }]}>{categoryMeta(workout.category).l}</Text>
+                      </View>
+                    )}
                     {hasUnreadFeedback && <View style={styles.feedbackDot} />}
                   </View>
                   {workout.purpose ? (
@@ -477,43 +749,55 @@ export default function WorkoutsScreen({ navigation }) {
                 </View>
 
                 <View style={styles.actionRow}>
-                  <TouchableOpacity
-                    style={styles.viewBtn}
-                    onPress={() => navigation.navigate('WorkoutDetail', {
-                      workout,
-                      studentView: true,
-                    })}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={styles.viewBtnText}>VIEW</Text>
-                  </TouchableOpacity>
-
                   {workout.completed ? (
+                    /* Done — just a shining COMPLETED badge + UNDO (no mode/view). */
                     <>
-                      <View style={styles.doneTag}>
-                        <Text style={styles.doneTagText}>✓ DONE</Text>
+                      <View style={styles.completedTag}>
+                        <ShimmerText
+                          text="✓ COMPLETED"
+                          style={styles.completedTagText}
+                          colors={BLUE}
+                          direction="ltr"
+                          active
+                        />
                       </View>
-                      <TouchableOpacity
-                        style={[styles.undoBtn, locked && { opacity: 0.4 }]}
+                      <PillButton
+                        label="UNDO"
+                        tone="muted"
+                        size="sm"
+                        style={styles.actionBtn}
+                        textStyle={styles.actionBtnText}
                         onPress={locked ? undefined : () => handleUndoDone(workout)}
                         disabled={isMarking || locked}
-                        activeOpacity={0.8}
-                      >
-                        <Text style={styles.undoBtnText}>UNDO</Text>
-                      </TouchableOpacity>
+                      />
                     </>
                   ) : (
-                    <TouchableOpacity
-                      style={[styles.markDoneBtn, (isMarking || locked) && { opacity: locked ? 0.4 : 0.6 }]}
-                      onPress={locked ? undefined : () => handleMarkDone(workout)}
-                      disabled={isMarking || locked}
-                      activeOpacity={0.8}
-                    >
-                      {isMarking
-                        ? <ActivityIndicator color={SL.bg} size="small" />
-                        : <Text style={styles.markDoneBtnText}>MARK DONE</Text>
-                      }
-                    </TouchableOpacity>
+                    /* Not done — VIEW + DONE share one row. Entering the live
+                       session (Workout Mode) is NOT offered here anymore: the
+                       player steps into it exclusively through the RED GATE portal
+                       on HomeScreen's today's-missions. */
+                    <>
+                      <PillButton
+                        label="VIEW"
+                        size="sm"
+                        style={styles.actionBtn}
+                        textStyle={styles.actionBtnText}
+                        onPress={() => navigation.navigate('WorkoutDetail', {
+                          workout,
+                          studentView: true,
+                        })}
+                      />
+                      <PillButton
+                        label="DONE"
+                        variant="solid"
+                        size="sm"
+                        style={styles.actionBtn}
+                        textStyle={styles.actionBtnText}
+                        onPress={locked ? undefined : () => handleMarkDone(workout)}
+                        disabled={isMarking || locked}
+                        loading={isMarking}
+                      />
+                    </>
                   )}
                 </View>
               </View>
@@ -525,15 +809,16 @@ export default function WorkoutsScreen({ navigation }) {
             <Text style={styles.restSub}>Recovery is part of the program.</Text>
           </View>
         )}
-      </View>
+        </ScrollView>
+      </Animated.View>
 
-      <View style={{ height: 32 }} />
+      </Animated.View>
 
       {/* ── Per-date edit modal ── */}
       <Modal
         visible={editVisible}
         transparent
-        animationType="slide"
+        animationType="fade"
         onRequestClose={() => setEditVisible(false)}
       >
         <View style={styles.modalOverlay}>
@@ -588,37 +873,38 @@ export default function WorkoutsScreen({ navigation }) {
             </ScrollView>
 
             <View style={styles.editorButtons}>
-              <TouchableOpacity
-                style={styles.editorCancelBtn}
+              <PillButton
+                label="CLOSE"
+                tone="muted"
                 onPress={() => setEditVisible(false)}
                 disabled={editSaving}
-              >
-                <Text style={styles.editorCancelText}>CLOSE</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.editorSaveBtn, (editSaving || !editPending) && { opacity: 0.4 }]}
+                style={{ flex: 1 }}
+              />
+              <PillButton
+                label="ADD"
+                variant="solid"
                 onPress={() => editPending && addWorkoutToDate(selectedDay.dateStr, editPending.id)}
                 disabled={editSaving || !editPending}
-              >
-                {editSaving
-                  ? <ActivityIndicator color={SL.bg} size="small" />
-                  : <Text style={styles.editorSaveText}>ADD</Text>}
-              </TouchableOpacity>
+                loading={editSaving}
+                style={{ flex: 2 }}
+              />
             </View>
 
             {isDateOverridden(selectedDay?.dateStr, overrideWorkouts) && (
-              <TouchableOpacity
-                style={styles.resetBtn}
+              <PillButton
+                label="↺ RESET TO WEEKLY PLAN"
+                tone="muted"
                 onPress={() => resetDayToPlan(selectedDay.dateStr)}
                 disabled={editSaving}
-              >
-                <Text style={styles.resetBtnText}>↺ RESET TO WEEKLY PLAN</Text>
-              </TouchableOpacity>
+                style={{ marginTop: 14 }}
+              />
             )}
           </View>
         </View>
       </Modal>
-    </ScrollView>
+    </View>
+    </View>
+    </ScreenFrame>
   );
 }
 
@@ -626,84 +912,156 @@ export default function WorkoutsScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SL.bg },
-  // Centered, capped width — matches the Home page so the two read consistently.
-  body: { paddingBottom: 56, width: '100%', maxWidth: 1440, alignSelf: 'center' },
+  // Fixed card size so the frame matches the Weekly Plan and never resizes with data.
+  card: { height: CARD_H },
+
+  // The body region (everything under the headline) that swipes left on exit.
+  swipeBody: { flex: 1, width: '100%' },
+  body: { flex: 1, width: '100%', paddingBottom: 12 },
 
   // ── Header ──────────────────────────────────────────────────────────────────
 
+  // Admin BACK pill — absolute so it overlays the header's top padding without
+  // shifting the fixed-height layout.
+  adminBackRow: {
+    position: 'absolute',
+    top: 16,
+    // Match the week strip's inset (calendarGrid paddingHorizontal) so the BACK
+    // pill keeps the same space from the frame border.
+    left: 28,
+    zIndex: 10,
+  },
   header: {
     paddingHorizontal: 20,
     paddingTop: 64,
     paddingBottom: 20,
     alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: SL.border,
   },
   studentName: {
     fontFamily: F.heading,
     fontSize: 42,
-    color: SL.accent,
+    color: '#FFFFFF',
     letterSpacing: 4,
     textTransform: 'uppercase',
     textAlign: 'center',
+    textShadowColor: SL.accent,
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 18,
+  },
+  statRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 6,
+  },
+  statDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: SL.muted,
   },
   level: {
     fontFamily: F.body,
-    fontSize: 28,
+    fontSize: 26,
     color: SL.text,
     letterSpacing: 3,
-    marginTop: 6,
   },
   className: {
     fontFamily: F.bodyMed,
     fontSize: 22,
     color: SL.gold,
     letterSpacing: 3,
-    marginTop: 4,
-    textAlign: 'center',
   },
   headerDivider: {
-    height: 2,
+    height: 3,
+    width: 180,
     backgroundColor: SL.accent,
-    opacity: 0.4,
-    alignSelf: 'stretch',
+    opacity: 0.95,
+    alignSelf: 'center',
     marginTop: 16,
-    borderRadius: 1,
+    borderRadius: 2,
+    // Bright ice-glow so the line shines.
     shadowColor: SL.accent,
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.6,
-    shadowRadius: 6,
+    shadowOpacity: 1,
+    shadowRadius: 12,
   },
 
   // ── Manage banner ─────────────────────────────────────────────────────────────
 
-  manageBanner: {
+  manageRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'center',
     marginHorizontal: 16,
     marginTop: 18,
-    paddingHorizontal: 18,
-    paddingVertical: 16,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 10,
-    backgroundColor: 'rgba(74,158,191,0.08)',
+  },
+  // ── Training "forge" upgrade console ──
+  forgeBtn: {
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 13,
+    paddingVertical: 13,
+    paddingHorizontal: 22,
+    borderRadius: 13,
+    backgroundColor: '#0a1626',
+    overflow: 'hidden',
     shadowColor: SL.accent,
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.18,
-    shadowRadius: 14,
+    shadowOpacity: 0.45,
+    shadowRadius: 16,
   },
-  manageBannerText: {
-    fontFamily: F.heading,
-    fontSize: 22,
-    color: SL.accent,
-    letterSpacing: 2.5,
+  forgeSweep: {
+    position: 'absolute',
+    top: -4,
+    bottom: -4,
+    left: 0,
+    width: 46,
+    backgroundColor: 'rgba(180,230,255,0.85)',
+    shadowColor: '#bfe9ff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 10,
   },
-  manageBannerArrow: {
+  forgeChip: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(74,158,191,0.12)',
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 8,
+  },
+  forgeChipGlyph: {
     fontFamily: F.heading,
-    fontSize: 22,
+    fontSize: 18,
     color: SL.accent,
+    textShadowColor: SL.accent,
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 8,
+  },
+  forgeTitle: {
+    fontFamily: F.heading,
+    fontSize: 20,
+    color: SL.text,
+    letterSpacing: 2,
+    textShadowColor: SL.accent,
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
+  },
+  forgeChevron: {
+    fontFamily: F.heading,
+    fontSize: 26,
+    color: SL.accent,
+    textShadowColor: SL.accent,
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 8,
+    marginLeft: 2,
   },
 
   // ── Checkup banner ──────────────────────────────────────────────────────────
@@ -775,7 +1133,9 @@ const styles = StyleSheet.create({
   calendarNav: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
+    // Match the week strip's inset (calendarGrid) so the ← / → arrows keep the
+    // same space from the frame border instead of clipping against it.
+    paddingHorizontal: 28,
     paddingTop: 16,
     paddingBottom: 10,
   },
@@ -789,19 +1149,38 @@ const styles = StyleSheet.create({
     borderColor: SL.accent,
     backgroundColor: 'rgba(74,158,191,0.06)',
   },
-  navArrowText: { fontFamily: F.heading, fontSize: 26, color: SL.accent },
+  navArrowDisabled: { opacity: 0.25 },
+  // Hollow chevron drawn from two borders (a top-right corner ⌐) then rotated so
+  // it points left/right — crisper than the font glyph and pixel-consistent on web.
+  chevron: {
+    width: 12,
+    height: 12,
+    borderTopWidth: 3,
+    borderRightWidth: 3,
+    borderColor: SL.accent,
+    borderRadius: 1.5,
+  },
+  // Rotated corners land optically off-centre; the small margins nudge them back
+  // into the middle of the circle.
+  chevronLeft:  { transform: [{ rotate: '-135deg' }], marginLeft: 4 },
+  chevronRight: { transform: [{ rotate: '45deg' }],   marginRight: 4 },
   navCenter:    { flex: 1, alignItems: 'center', gap: 2 },
-  navBadge: {
-    fontFamily: F.body,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
+  navRangeCard: {
+    paddingVertical: 7,
+    paddingHorizontal: 18,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    backgroundColor: 'rgba(74,158,191,0.06)',
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
   },
   navRange: {
     fontFamily: F.bodyMed,
-    fontSize: 20,
-    color: SL.muted,
+    fontSize: 24,
+    color: SL.accent,
     letterSpacing: 0.5,
   },
 
@@ -809,7 +1188,10 @@ const styles = StyleSheet.create({
 
   calendarGrid: {
     flexDirection: 'row',
-    paddingHorizontal: 8,
+    // Align the week strip's outer edges with the session node inside dayCard
+    // (dayCard margin 8 + border 1.5 + padding 20 ≈ 29), so it sits on the same
+    // line as the workout card and leaves breathing room to the frame border.
+    paddingHorizontal: 28,
     gap: 6,
   },
   dayNode: {
@@ -836,6 +1218,15 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.5,
     shadowRadius: 12,
   },
+  // Accomplished day — full-day completion glows: shining ice-blue frame + labels.
+  dayNodeDone: {
+    borderColor: SL.accent,
+    backgroundColor: 'rgba(74,158,191,0.12)',
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.85,
+    shadowRadius: 16,
+  },
   dayLabel: {
     fontFamily: F.body,
     fontSize: 16,
@@ -844,6 +1235,7 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   dayLabelSel: { color: SL.accent },
+  dayLabelDone: { color: SL.accent },
   dayNum: {
     fontFamily: F.heading,
     fontSize: 34,
@@ -851,6 +1243,12 @@ const styles = StyleSheet.create({
     lineHeight: 38,
   },
   dayNumActive: { color: SL.accent },
+  dayNumDone: {
+    color: SL.accent,
+    textShadowColor: 'rgba(74,158,191,0.7)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 12,
+  },
   dayMonth: {
     fontFamily: F.bodyMed,
     fontSize: 15,
@@ -858,30 +1256,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
     textTransform: 'uppercase',
   },
-  dayStatus: { alignItems: 'center', gap: 2, marginTop: 2 },
-  dayWorkoutName: {
-    fontFamily: F.bodyMed,
-    fontSize: 15,
-    color: SL.accent,
-    letterSpacing: 0.3,
-    textAlign: 'center',
-    paddingHorizontal: 2,
-    textTransform: 'uppercase',
-  },
-  dayCheck: {
-    fontFamily: F.heading,
-    fontSize: 13,
-    color: SL.green,
-    letterSpacing: 1,
-  },
-  dayRest: {
-    fontFamily: F.bodyMed,
-    fontSize: 15,
-    color: '#2a4a6a',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-    marginTop: 2,
-  },
+  dayMonthDone: { color: SL.accent },
   todayBar: {
     position: 'absolute',
     bottom: 0,
@@ -900,6 +1275,7 @@ const styles = StyleSheet.create({
   dayCard: {
     marginHorizontal: 8,
     marginTop: 14,
+    flex: 1,                  // fills remaining space inside the fixed-height card
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
@@ -911,34 +1287,26 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.15,
     shadowRadius: 16,
   },
-  dayCardHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
-  dayCardName: {
-    fontFamily: F.heading,
-    fontSize: 26,
-    color: SL.accent,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
+  // Sessions stack from the top (first one highest); only the REST placeholder centers.
+  dayCardBody: { gap: 12, flexGrow: 1, justifyContent: 'flex-start' },
+  dayCardBodyEmpty: { justifyContent: 'center' },
+  // Date on the left, EDIT DAY pill on the right — a clean row, never overlapping.
+  dayCardHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    minHeight: 36,
   },
   dayCardDate: {
-    fontFamily: F.bodyMed,
-    fontSize: 22,
-    color: SL.muted,
+    flex: 1,
+    fontFamily: F.heading,
+    fontSize: 30,
+    color: SL.accent,
     letterSpacing: 0.5,
   },
-  daySourceHint: {
-    alignSelf: 'flex-start',
-    fontFamily: F.bodyMed,
-    fontSize: 13,
-    color: SL.muted,
-    letterSpacing: 1.5,
-    textTransform: 'uppercase',
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: SL.border,
-    borderRadius: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    overflow: 'hidden',
+  dayCardEditBtn: {
+    flexShrink: 0,
   },
   editDayBtn: {
     paddingHorizontal: 12,
@@ -956,14 +1324,28 @@ const styles = StyleSheet.create({
   },
 
   // ── Per-date edit modal ───────────────────────────────────────────────────
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'flex-end' },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+  },
   editorBox: {
+    width: '100%',
+    maxWidth: 620,
+    height: 620,            // FIXED — dialog size is independent of its data
+    maxHeight: '92%',       // …but never taller than the viewport
     backgroundColor: SL.panel,
     borderWidth: 1.5,
-    borderColor: SL.border,
+    borderColor: SL.accent,
+    borderRadius: 18,
     padding: 24,
-    paddingBottom: 40,
-    maxHeight: '85%',
+    paddingBottom: 28,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.35,
+    shadowRadius: 24,
   },
   editorTitle: {
     fontFamily: F.heading,
@@ -996,11 +1378,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 8,
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     borderWidth: 1,
     borderColor: SL.accent,
-    borderRadius: 4,
-    backgroundColor: 'rgba(74,158,191,0.08)',
+    borderRadius: 999,
+    backgroundColor: 'rgba(74,158,191,0.12)',
   },
   assignedChipText: {
     fontFamily: F.bodyMed,
@@ -1010,21 +1392,21 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   assignedChipRemove: { fontFamily: F.body, fontSize: 16, color: SL.muted, paddingLeft: 12 },
-  workoutList: { maxHeight: 220, marginBottom: 20 },
+  workoutList: { flex: 1, marginBottom: 20 },
   workoutOption: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 14,
     paddingHorizontal: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: SL.border,
+    marginBottom: 8,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    borderRadius: 12,
+    backgroundColor: SL.bg,
   },
   workoutOptionSelected: {
-    backgroundColor: 'rgba(74,158,191,0.08)',
-    borderBottomWidth: 0,
-    borderWidth: 1,
+    backgroundColor: 'rgba(74,158,191,0.12)',
     borderColor: SL.accent,
-    borderRadius: 4,
   },
   workoutOptionText: {
     flex: 1,
@@ -1093,19 +1475,22 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
 
+  // Stacked: workout info on top, action buttons centered below — so the buttons
+  // never overflow the card the way a single side-by-side row did.
   workoutCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
     backgroundColor: SL.bg,
     borderWidth: 1.5,
     borderColor: SL.border,
     borderLeftWidth: 4,
     borderLeftColor: SL.accent,
     borderRadius: 8,
-    padding: 16,
-    gap: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
   },
-  workoutInfo: { flex: 1, gap: 4 },
+  workoutInfo: { flex: 1, gap: 2 },
   workoutTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1113,11 +1498,23 @@ const styles = StyleSheet.create({
   },
   workoutTitle: {
     fontFamily: F.heading,
-    fontSize: 24,
+    fontSize: 19,
     color: SL.accent,
-    letterSpacing: 2,
+    letterSpacing: 1.5,
     textTransform: 'uppercase',
     flexShrink: 1,
+  },
+  typeTag: {
+    borderWidth: 1, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 1,
+  },
+  typeTagText: { fontFamily: F.bodyMed, fontSize: 10, letterSpacing: 1.5 },
+  accDots: {
+    flexDirection: 'row', gap: 3, marginTop: 3, justifyContent: 'center', flexWrap: 'wrap',
+    position: 'absolute', bottom: 6, left: 0, right: 0,
+  },
+  accDot: {
+    width: 5, height: 5, borderRadius: 999,
+    shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.9, shadowRadius: 3,
   },
   feedbackDot: {
     width: 8,
@@ -1128,7 +1525,7 @@ const styles = StyleSheet.create({
   },
   workoutPurpose: {
     fontFamily: F.body,
-    fontSize: 18,
+    fontSize: 13,
     color: SL.muted,
     letterSpacing: 0.5,
   },
@@ -1136,8 +1533,31 @@ const styles = StyleSheet.create({
   actionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
     flexShrink: 0,
+  },
+  // Compact action buttons so WORKOUT MODE + VIEW + MARK DONE fit one row.
+  actionBtn: { paddingHorizontal: 12 },
+  actionBtnText: { fontSize: 14, letterSpacing: 1 },
+  modeBtn: {
+    height: 44,
+    paddingHorizontal: 20,
+    backgroundColor: SL.accent,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 12,
+  },
+  modeBtnText: {
+    fontFamily: F.heading,
+    fontSize: 17,
+    color: SL.bg,
+    letterSpacing: 2,
   },
   viewBtn: {
     height: 44,
@@ -1173,20 +1593,25 @@ const styles = StyleSheet.create({
     color: SL.bg,
     letterSpacing: 2,
   },
-  doneTag: {
-    height: 44,
-    paddingHorizontal: 16,
+  // Shining ice-blue "completed" badge — replaces the action buttons once done.
+  completedTag: {
+    paddingVertical: 8,
+    paddingHorizontal: 18,
     borderWidth: 1.5,
-    borderColor: SL.green,
-    borderRadius: 8,
+    borderColor: SL.accent,
+    borderRadius: 999,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(76,175,80,0.08)',
+    backgroundColor: 'rgba(74,158,191,0.12)',
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 12,
   },
-  doneTagText: {
-    fontFamily: F.body,
-    fontSize: 16,
-    color: SL.green,
+  completedTagText: {
+    fontFamily: F.heading,
+    fontSize: 15,
+    color: SL.accent,
     letterSpacing: 2,
   },
   undoBtn: {

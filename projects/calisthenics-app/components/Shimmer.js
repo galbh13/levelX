@@ -167,15 +167,34 @@ export function ShimmerFrame({ style, colors = GOLD, active, radius = 5, thickne
   );
 
   const t = thickness;
+  const r = Math.max(radius, 0);
+  // Two layers:
+  //  1. A single UNIFORM rounded border (real CSS `borderWidth`/`borderRadius`) in
+  //     the OUTER wrapper, which is `overflow:'visible'` so this border is never
+  //     clipped — a CSS border is perfectly even thickness everywhere, corner arcs
+  //     included, so the frame is the same width all the way around (no gap, no
+  //     thinning). It cycles a palette color.
+  //  2. The travelling gradient strips, in an INNER rounded clip so their square
+  //     corners are trimmed. The clip may shave the strips slightly at the corners,
+  //     but the uniform border below shows through there at full thickness — so the
+  //     corner width never depends on the clipped layer.
+  const cornerColor = shimmerColorPhase(colors, 0);
+
   return (
     <Animated.View
       pointerEvents="none"
-      style={[style, { borderWidth: 0, borderRadius: radius, overflow: 'hidden' }]}
+      style={[style, { borderWidth: 0, borderRadius: r, overflow: 'visible' }]}
     >
-      {edge('top',    { position: 'absolute', top: 0,    left: 0,   right: 0,  height: t }, 'row')}
-      {edge('right',  { position: 'absolute', top: 0,    bottom: 0, right: 0,  width: t  }, 'column')}
-      {edge('bottom', { position: 'absolute', bottom: 0, left: 0,   right: 0,  height: t }, 'row-reverse')}
-      {edge('left',   { position: 'absolute', top: 0,    bottom: 0, left: 0,   width: t  }, 'column-reverse')}
+      <Animated.View
+        pointerEvents="none"
+        style={{ ...StyleSheet.absoluteFillObject, borderRadius: r, borderWidth: t, borderColor: cornerColor }}
+      />
+      <View pointerEvents="none" style={{ ...StyleSheet.absoluteFillObject, borderRadius: r, overflow: 'hidden' }}>
+        {edge('top',    { position: 'absolute', top: 0,    left: 0,   right: 0,  height: t }, 'row')}
+        {edge('right',  { position: 'absolute', top: 0,    bottom: 0, right: 0,  width: t  }, 'column')}
+        {edge('bottom', { position: 'absolute', bottom: 0, left: 0,   right: 0,  height: t }, 'row-reverse')}
+        {edge('left',   { position: 'absolute', top: 0,    bottom: 0, left: 0,   width: t  }, 'column-reverse')}
+      </View>
     </Animated.View>
   );
 }
@@ -219,18 +238,22 @@ export function ShimmerRing({ size, thickness = 5, colors = BLUE, active, durati
 }
 
 // Progress-bar fill that sweeps the palette across its width while active —
-// built from thin segments so the color travels in the same direction as a
-// ShimmerText sweep. Falls back to a plain <View> when inactive.
-const FILL_SEGMENTS = 14;
+// built from many thin segments, each at a CONTINUOUS fractional phase (same
+// technique as ShimmerFrame) so adjacent segments differ only slightly and blend
+// into one smooth travelling gradient instead of hard color bands. The strip maps
+// exactly one full palette cycle across its width. Falls back to a plain <View>
+// when inactive.
+const FILL_SEGMENTS = 30;
 export function ShimmerFill({ style, active, colors = GOLD, duration = 1600 }) {
   useShimmer(active, duration);
   if (!active) return <View style={style} />;
   return (
     <Animated.View style={[style, { flexDirection: 'row', overflow: 'hidden' }]}>
       {Array.from({ length: FILL_SEGMENTS }).map((_, i) => {
-        const shift = (FILL_SEGMENTS - 1 - i) % colors.length;
+        // Reversed offset keeps the previous travel direction.
+        const offset = (FILL_SEGMENTS - 1 - i + 0.5) / FILL_SEGMENTS;
         return (
-          <Animated.View key={i} style={{ flex: 1, backgroundColor: shimmerColor(colors, shift) }} />
+          <Animated.View key={i} style={{ flex: 1, backgroundColor: shimmerColorPhase(colors, offset) }} />
         );
       })}
     </Animated.View>

@@ -2,3 +2,5 @@
 CLAUDE.local.md
 .claude/settings.local.json
 node_modules/
+.last-deploy
+dist/

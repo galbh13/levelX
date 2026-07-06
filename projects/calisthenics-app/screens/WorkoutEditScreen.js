@@ -1,30 +1,133 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  View, Text, StyleSheet, TextInput, TouchableOpacity,
-  ScrollView, ActivityIndicator, KeyboardAvoidingView, Platform, Modal,
+  View, Text, StyleSheet, TextInput, TouchableOpacity, ActivityIndicator,
+  Modal, ScrollView, Dimensions,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { F } from '../constants/fonts';
+import ScreenFrame from '../components/ScreenFrame';
+import ScreenHeader from '../components/ScreenHeader';
+import PillButton from '../components/PillButton';
+import { ShimmerFrame, BLUE } from '../components/Shimmer';
+import { WORKOUT_CATEGORIES, insertExercises } from '../lib/workouts';
 
-// ─── Theme ────────────────────────────────────────────────────────────────────
+// ─── Theme ──────────────────────────────────────────────────────────────────
+// Matches the admin example-workout builder so the two editors look identical.
 
 const SL = {
-  bg:     '#050912',
-  panel:  '#070d1a',
-  border: '#1a3a5c',
-  accent: '#4A9EBF',
-  text:   '#E8F4FF',
-  muted:  '#4a6a8a',
-  danger: '#FF4444',
+  bg:      '#050912',
+  panel:   '#0d1e35',
+  border:  '#2a5070',
+  accent:  '#4A9EBF',
+  text:    '#E8F4FF',
+  muted:   '#8ab0cc',
+  gold:    '#FFD700',
+  danger:  '#FF4444',
 };
 
-// ─── Corner accent component ──────────────────────────────────────────────────
+const MOVEMENT_TYPES = ['All', 'Pull', 'Push', 'Balance', 'Legs', 'Core', 'Mobility', 'Flexibility', 'Isolated'];
 
-function Corner({ pos }) {
-  const s = pos === 'TL'
-    ? { top: -1, left: -1, borderTopWidth: 1.5, borderLeftWidth: 1.5 }
-    : { bottom: -1, right: -1, borderBottomWidth: 1.5, borderRightWidth: 1.5 };
-  return <View style={[styles.corner, s]} pointerEvents="none" />;
+const uid = () => `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+// Fixed picker-card height so the modal never resizes between filter steps.
+const PICKER_H = Math.min(600, Math.max(420, Dimensions.get('window').height - 100));
+
+// Assign a shared superset_group number to each maximal run of exercises linked
+// by `linkedAbove`; runs of one get null (standalone).
+function computeGroups(list) {
+  const raw = [];
+  let run = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (i > 0 && list[i].linkedAbove) raw[i] = raw[i - 1];
+    else { run += 1; raw[i] = run; }
+  }
+  const counts = {};
+  raw.forEach(r => { counts[r] = (counts[r] || 0) + 1; });
+  return raw.map(r => (counts[r] > 1 ? r : null));
+}
+
+// ─── Exercise row ─────────────────────────────────────────────────────────────
+
+function ExerciseRow({ exercise, letter, showLink, onChange, onRemove, onToggleLink, onMove, canUp, canDown }) {
+  const u = exercise._uid;
+  return (
+    <View style={styles.exRow}>
+      {/* Letter badge */}
+      <View style={styles.exLetterBox}>
+        <Text style={styles.exLetter}>{letter}</Text>
+      </View>
+
+      {/* Fields */}
+      <View style={styles.exFields}>
+        {/* Superset link with the exercise above in this section (any order) */}
+        {showLink && (
+          <TouchableOpacity
+            style={[styles.linkToggle, exercise.linkedAbove && styles.linkToggleOn]}
+            onPress={() => onToggleLink(u)}
+            activeOpacity={0.8}
+          >
+            <Text style={[styles.linkToggleText, exercise.linkedAbove && styles.linkToggleTextOn]}>
+              {exercise.linkedAbove ? '⇄ SUPERSET WITH ABOVE' : '⇄ MAKE SUPERSET WITH ABOVE'}
+            </Text>
+          </TouchableOpacity>
+        )}
+        {/* Name — chosen from the library, not free text */}
+        <View style={styles.exNameBox}>
+          <Text style={styles.exNameText} numberOfLines={1}>{exercise.name}</Text>
+        </View>
+        {/* Variation — free-text per-exercise focus, editable any time and
+            independent of the library exercise (changes cycle to cycle). */}
+        <TextInput
+          style={styles.exVariationInput}
+          placeholder="variation / focus this cycle (optional)"
+          placeholderTextColor={SL.muted}
+          value={exercise.variation}
+          onChangeText={v => onChange(u, 'variation', v)}
+          multiline
+        />
+        {/* Sets × Reps */}
+        <View style={styles.exFieldsRow}>
+          <TextInput
+            style={styles.exInputSets}
+            placeholder="sets"
+            placeholderTextColor={SL.muted}
+            value={exercise.sets}
+            onChangeText={v => onChange(u, 'sets', v)}
+            keyboardType="numeric"
+          />
+          <Text style={styles.exMult}>×</Text>
+          <TextInput
+            style={styles.exInputReps}
+            placeholder="reps"
+            placeholderTextColor={SL.muted}
+            value={exercise.reps}
+            onChangeText={v => onChange(u, 'reps', v)}
+          />
+        </View>
+      </View>
+
+      {/* Reorder (within this section) + remove */}
+      <View style={styles.exSideCol}>
+        <TouchableOpacity
+          style={[styles.moveBtn, !canUp && styles.moveBtnDisabled]}
+          onPress={() => canUp && onMove(u, -1)}
+          disabled={!canUp}
+        >
+          <Text style={styles.moveBtnText}>▲</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.moveBtn, !canDown && styles.moveBtnDisabled]}
+          onPress={() => canDown && onMove(u, 1)}
+          disabled={!canDown}
+        >
+          <Text style={styles.moveBtnText}>▼</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.exRemoveBtn} onPress={() => onRemove(u)}>
+          <Text style={styles.exRemoveText}>✕</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
@@ -32,712 +135,731 @@ function Corner({ pos }) {
 export default function WorkoutEditScreen({ route, navigation }) {
   const { workout, exercises: initialExercises } = route.params;
 
-  const [title,     setTitle]     = useState(workout.title   ?? '');
-  const [purpose,   setPurpose]   = useState(workout.purpose ?? '');
-  const [exercises, setExercises] = useState(
-    (initialExercises ?? []).map(ex => ({
-      _uid:  ex.id,
-      name:  ex.name  ?? '',
-      sets:  ex.sets  ?? '',
-      reps:  ex.reps  ?? '',
-      notes: ex.notes ?? '',
-    }))
-  );
-  const [saving, setSaving] = useState(false);
+  const [title,    setTitle]    = useState(workout.title    ?? '');
+  const [purpose,  setPurpose]  = useState(workout.purpose  ?? '');
+  const [category, setCategory] = useState(workout.category ?? 'main');
+  const [exercises, setExercises] = useState(() => {
+    const list = (initialExercises ?? []).map(ex => ({
+      _uid:           uid(),
+      name:           ex.name ?? '',
+      gallery_id:     ex.gallery_id ?? null,   // catalog link (Workout Mode how-to card)
+      variation:      ex.variation ?? '',
+      sets:           String(ex.sets ?? ''),
+      reps:           String(ex.reps ?? ''),
+      notes:          ex.notes ?? '',          // preserved through save (no inline UI)
+      superset_group: ex.superset_group ?? null,
+      branch:         ex.branch ?? null,        // null = trunk, 'a'/'b' = path, 'merge' = ending
+    }));
+    // linkedAbove = same superset group as the previous exercise in the SAME branch.
+    return list.map((ex, i) => ({
+      ...ex,
+      linkedAbove: i > 0
+        && ex.superset_group != null
+        && ex.superset_group === list[i - 1].superset_group
+        && (ex.branch ?? null) === (list[i - 1].branch ?? null),
+    }));
+  });
+  const [saving,   setSaving]   = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
 
-  // ── Gallery picker state ───────────────────────────────────────────────────
+  // Fork (branch) authoring — seed from the workout row if it carries branches,
+  // otherwise confirm via a lookup (the param may not include them).
+  const initialBranches = Array.isArray(workout.branches) && workout.branches.length >= 2 ? workout.branches : null;
+  const [forkEnabled, setForkEnabled] = useState(!!initialBranches);
+  const [branchA,     setBranchA]     = useState(initialBranches?.[0]?.label ?? '');
+  const [branchB,     setBranchB]     = useState(initialBranches?.[1]?.label ?? '');
 
-  const [showGallery,    setShowGallery]    = useState(false);
-  const [gallery,        setGallery]        = useState([]);
-  const [galleryLoading, setGalleryLoading] = useState(false);
-  const [gallerySearch,  setGallerySearch]  = useState('');
+  useEffect(() => {
+    if (initialBranches) return;
+    supabase.from('workouts').select('branches').eq('id', workout.id).maybeSingle()
+      .then(({ data }) => {
+        const b = data?.branches;
+        if (Array.isArray(b) && b.length >= 2) {
+          setForkEnabled(true);
+          setBranchA(b[0]?.label ?? '');
+          setBranchB(b[1]?.label ?? '');
+        }
+      });
+  }, [workout.id]);
 
-  async function fetchGallery() {
-    setGalleryLoading(true);
-    const { data } = await supabase
+  // ── Library picker (gallery exercises) ──────────────────────────────────────
+  const [galleryExercises, setGalleryExercises] = useState([]);
+  const [pickerVisible,    setPickerVisible]    = useState(false);
+  const [pickerStep,       setPickerStep]       = useState('category'); // 'category' | 'list'
+  const [pickerCategory,   setPickerCategory]   = useState('All');      // movement type
+  const [pickerSearch,     setPickerSearch]     = useState('');
+  const [pickerAdded,      setPickerAdded]      = useState({});         // id → recently-added flash
+  const [pickerTarget,     setPickerTarget]     = useState(null);       // which branch the picker adds to
+
+  useEffect(() => {
+    supabase
       .from('exercises_gallery')
-      .select('id, name, movement_type, youtube_url')
-      .order('name', { ascending: true });
-    setGallery(data ?? []);
-    setGalleryLoading(false);
+      .select('id, name, movement_type')
+      .order('name', { ascending: true })
+      .then(({ data }) => setGalleryExercises(data ?? []));
+  }, []);
+
+  function updateExercise(u, field, value) {
+    setExercises(prev => prev.map(ex => ex._uid === u ? { ...ex, [field]: value } : ex));
   }
 
-  function addExercise() {
-    setGallerySearch('');
-    setShowGallery(true);
-    fetchGallery();
+  function removeExercise(u) {
+    setExercises(prev => prev.filter(ex => ex._uid !== u));
   }
 
-  function selectFromGallery(galleryItem) {
+  function toggleLink(u) {
+    setExercises(prev => prev.map(ex => ex._uid === u ? { ...ex, linkedAbove: !ex.linkedAbove } : ex));
+  }
+
+  // Move an exercise up/down WITHIN its own section (same branch), swapping it with
+  // the neighbouring same-branch exercise so the other sections stay put.
+  function moveExercise(u, dir) {
+    setExercises(prev => {
+      const i = prev.findIndex(e => e._uid === u);
+      if (i < 0) return prev;
+      const branch = prev[i].branch ?? null;
+      const sameIdx = prev.reduce((acc, e, idx) => {
+        if ((e.branch ?? null) === branch) acc.push(idx);
+        return acc;
+      }, []);
+      const pos = sameIdx.indexOf(i);
+      const target = pos + dir;
+      if (target < 0 || target >= sameIdx.length) return prev;
+      const a = sameIdx[pos], b = sameIdx[target];
+      const next = [...prev];
+      [next[a], next[b]] = [next[b], next[a]];
+      return next;
+    });
+  }
+
+  function addFork() { setForkEnabled(true); }
+  function removeFork() {
+    setForkEnabled(false);
+    setBranchA('');
+    setBranchB('');
+    setExercises(prev => prev.map(ex => ({ ...ex, branch: null })));
+  }
+
+  // ── Library picker helpers ──────────────────────────────────────────────────
+  const pickerList = useMemo(() => {
+    let r = galleryExercises;
+    if (pickerCategory !== 'All') r = r.filter(e => e.movement_type === pickerCategory);
+    if (pickerSearch.trim())      r = r.filter(e => e.name.toLowerCase().includes(pickerSearch.toLowerCase()));
+    return r;
+  }, [galleryExercises, pickerCategory, pickerSearch]);
+
+  function openPicker(target) {
+    setPickerTarget(target ?? null);
+    setPickerStep('category');
+    setPickerCategory('All');
+    setPickerSearch('');
+    setPickerVisible(true);
+  }
+  function chooseCategory(cat) { setPickerCategory(cat); setPickerStep('list'); }
+  function pickerBack() { if (pickerStep === 'list') setPickerStep('category'); }
+
+  function pickExercise(item) {
     setExercises(prev => [
       ...prev,
-      {
-        _uid:  `new_${Date.now()}`,
-        name:  galleryItem.name,
-        sets:  '',
-        reps:  '',
-        notes: '',
-      },
+      { _uid: uid(), name: item.name, gallery_id: item.id, variation: '', sets: '', reps: '', notes: '', superset_group: null, branch: pickerTarget, linkedAbove: false },
     ]);
-    setShowGallery(false);
+    setPickerAdded(p => ({ ...p, [item.id]: true }));
+    setTimeout(() => setPickerAdded(p => { const n = { ...p }; delete n[item.id]; return n; }), 1200);
   }
 
-  // ── Exercise helpers ───────────────────────────────────────────────────────
-
-  function updateExercise(uid, field, value) {
-    setExercises(prev =>
-      prev.map(ex => ex._uid === uid ? { ...ex, [field]: value } : ex)
-    );
-  }
-
-  function removeExercise(uid) {
-    setExercises(prev => prev.filter(ex => ex._uid !== uid));
-  }
-
-  // ── Save ──────────────────────────────────────────────────────────────────
-
+  // ── Save ────────────────────────────────────────────────────────────────────
   const canSave = title.trim().length > 0 && !saving;
 
   async function handleSave() {
-    if (!title.trim()) { alert('Please enter a workout title.'); return; }
+    setErrorMsg('');
+    if (!title.trim()) { setErrorMsg('Workout title is required.'); return; }
+
+    // Store in trunk → branch A → branch B → merge (common ending) order so the
+    // letters and the workout-mode flow stay sensible.
+    const ordered = forkEnabled
+      ? [...exercises.filter(e => (e.branch ?? null) === null),
+         ...exercises.filter(e => e.branch === 'a'),
+         ...exercises.filter(e => e.branch === 'b'),
+         ...exercises.filter(e => e.branch === 'merge')]
+      : exercises;
+    const valid = ordered.filter(e => e.name.trim());
+
     setSaving(true);
-    console.log('[WorkoutEdit] handleSave start — workout.id:', workout.id, 'title:', title.trim(), 'exercises:', exercises.length);
 
     // 1. Update workout metadata
-    console.log('[WorkoutEdit] 1. Updating workout metadata...');
-    const { error: workoutError, data: workoutData } = await supabase
+    const branches = forkEnabled
+      ? [{ key: 'a', label: branchA.trim() || 'OPTION A' }, { key: 'b', label: branchB.trim() || 'OPTION B' }]
+      : null;
+    const { error: workoutError } = await supabase
       .from('workouts')
-      .update({ title: title.trim(), purpose: purpose.trim() })
+      .update({ title: title.trim(), purpose: purpose.trim(), branches, category })
       .eq('id', workout.id);
-    console.log('[WorkoutEdit] 1. Update result — error:', workoutError, 'data:', workoutData);
-    if (workoutError) { alert('Save failed: ' + workoutError.message); setSaving(false); return; }
+    if (workoutError) { setErrorMsg('Save failed: ' + workoutError.message); setSaving(false); return; }
 
-    // 2. Delete ALL existing exercises for this workout before inserting
-    console.log('[WorkoutEdit] 2. Deleting exercises for workout_id:', workout.id);
-    const { error: delError, count } = await supabase
+    // 2. Replace the exercise list (delete all, then insert fresh)
+    const { error: delError } = await supabase
       .from('exercises')
-      .delete({ count: 'exact' })
+      .delete()
       .eq('workout_id', workout.id);
-    console.log('[WorkoutEdit] 2. Delete result — error:', delError, 'count:', count);
-    if (delError) { alert('Delete failed: ' + JSON.stringify(delError)); setSaving(false); return; }
-    console.log('[WorkoutEdit] deleted', count, 'exercises for workout', workout.id);
+    if (delError) { setErrorMsg('Delete failed: ' + delError.message); setSaving(false); return; }
 
-    // Small delay to ensure delete commits before insert
-    console.log('[WorkoutEdit] waiting 300ms before insert...');
+    // Small delay so the delete commits before the insert.
     await new Promise(r => setTimeout(r, 300));
 
-    // 3. Insert fresh exercise list with correct letters
-    if (exercises.length > 0) {
-      const rows = exercises.map((ex, i) => ({
-        workout_id: workout.id,
-        letter:     String.fromCharCode(65 + i),
-        name:       ex.name.trim(),
-        sets:       ex.sets,
-        reps:       ex.reps,
-        notes:      ex.notes,
+    if (valid.length > 0) {
+      const groups = computeGroups(valid);
+      const rows = valid.map((e, i) => ({
+        workout_id:     workout.id,
+        letter:         String.fromCharCode(65 + i),
+        name:           e.name.trim(),
+        gallery_id:     e.gallery_id ?? null,   // catalog link (Workout Mode how-to card)
+        variation:      e.variation?.trim() || null,
+        sets:           String(e.sets ?? '').trim(),
+        reps:           e.reps,
+        notes:          e.notes,
+        superset_group: groups[i],
+        branch:         forkEnabled ? (e.branch ?? null) : null,
       }));
-      console.log('[WorkoutEdit] 3. Inserting', rows.length, 'exercises:', JSON.stringify(rows));
-      const { error: insertError, data: insertData } = await supabase
-        .from('exercises')
-        .insert(rows);
-      console.log('[WorkoutEdit] 3. Insert result — error:', insertError, 'data:', insertData);
-      if (insertError) { alert('Insert failed: ' + insertError.message); setSaving(false); return; }
-    } else {
-      console.log('[WorkoutEdit] 3. No exercises to insert — skipping insert step');
+      const { error: insertError } = await insertExercises(rows);
+      if (insertError) { setErrorMsg('Insert failed: ' + insertError.message); setSaving(false); return; }
     }
 
-    // 4. Done — WorkoutDetailScreen re-fetches via useFocusEffect
-    console.log('[WorkoutEdit] handleSave complete — navigating back');
     setSaving(false);
     navigation.goBack();
   }
 
-  // ── Gallery filtered list ──────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────────
 
-  const filteredGallery = gallerySearch.trim()
-    ? gallery.filter(item =>
-        item.name.toLowerCase().includes(gallerySearch.toLowerCase())
-      )
-    : gallery;
+  const trunkEx = exercises.filter(e => (e.branch ?? null) === null);
+  const aEx     = exercises.filter(e => e.branch === 'a');
+  const bEx     = exercises.filter(e => e.branch === 'b');
+  const mergeEx = exercises.filter(e => e.branch === 'merge');
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // Each section is its own list — letters restart at A, link toggle only within it.
+  const renderRows = (items) => items.map((ex, i) => (
+    <ExerciseRow
+      key={ex._uid}
+      exercise={ex}
+      letter={String.fromCharCode(65 + i)}
+      showLink={i > 0}
+      onChange={updateExercise}
+      onRemove={removeExercise}
+      onToggleLink={toggleLink}
+      onMove={moveExercise}
+      canUp={i > 0}
+      canDown={i < items.length - 1}
+    />
+  ));
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Text style={styles.backText}>← BACK</Text>
-        </TouchableOpacity>
-        <Text style={styles.screenTitle}>EDIT WORKOUT</Text>
-        <View style={styles.divider} />
-      </View>
+    <ScreenFrame maxWidth={920}>
+      <ScreenHeader title="EDIT WORKOUT" onBack={() => navigation.goBack()} />
 
-      <ScrollView
-        contentContainerStyle={styles.form}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* Workout title */}
-        <Text style={styles.inputLabel}>WORKOUT TITLE</Text>
+      <View style={styles.form}>
+        {/* ── Title ── */}
+        <Text style={styles.label}>WORKOUT TITLE</Text>
         <TextInput
           style={styles.input}
-          value={title}
-          onChangeText={setTitle}
           placeholder="e.g. PULL DAY A"
           placeholderTextColor={SL.muted}
+          value={title}
+          onChangeText={setTitle}
         />
 
-        {/* Purpose */}
-        <Text style={styles.inputLabel}>
-          GOAL / PURPOSE{'  '}
-          <Text style={styles.optional}>(OPTIONAL)</Text>
+        {/* ── Purpose ── */}
+        <Text style={styles.label}>
+          GOAL / PURPOSE <Text style={styles.optional}>(optional)</Text>
         </Text>
         <TextInput
           style={styles.input}
-          value={purpose}
-          onChangeText={setPurpose}
           placeholder="e.g. BUILD PULLING STRENGTH"
           placeholderTextColor={SL.muted}
+          value={purpose}
+          onChangeText={setPurpose}
         />
 
-        {/* Exercises header */}
-        <View style={styles.exercisesHeader}>
-          <Text style={styles.exercisesLabel}>EXERCISES</Text>
-          {exercises.length > 0 && (
-            <View style={styles.exCountBadge}>
-              <Text style={styles.exCountText}>{exercises.length}</Text>
-            </View>
-          )}
+        {/* ── Category ── */}
+        <Text style={styles.label}>TYPE</Text>
+        <View style={styles.chipRow}>
+          {WORKOUT_CATEGORIES.map(c => {
+            const on = category === c.k;
+            return (
+              <TouchableOpacity
+                key={c.k}
+                style={[styles.chip, on && styles.chipActive]}
+                onPress={() => setCategory(c.k)}
+              >
+                <Text style={[styles.chipText, on && styles.chipTextActive]}>{c.l}</Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
 
-        {/* Empty state */}
-        {exercises.length === 0 && (
-          <View style={styles.emptyExWrap}>
-            <Text style={styles.emptyExText}>NO EXERCISES</Text>
-            <Text style={styles.emptyExSub}>Tap + ADD EXERCISE below</Text>
+        {/* ── Exercises ── */}
+        <View style={styles.exercisesHeader}>
+          <Text style={[styles.label, { marginTop: 0, marginBottom: 0 }]}>
+            {forkEnabled ? 'COMMON EXERCISES' : 'EXERCISES'}
+          </Text>
+          <Text style={styles.exerciseHint}>{exercises.length} added</Text>
+        </View>
+        {forkEnabled && (
+          <Text style={styles.sectionSub}>Everyone does these first, before the split.</Text>
+        )}
+
+        {trunkEx.length === 0 ? (
+          <View style={styles.exEmpty}>
+            <Text style={styles.exEmptyText}>NO EXERCISES YET</Text>
+            <Text style={styles.exEmptySub}>Add exercises from your library below.</Text>
+          </View>
+        ) : renderRows(trunkEx)}
+
+        <TouchableOpacity style={styles.addRowBtn} onPress={() => openPicker(null)} activeOpacity={0.8}>
+          <Text style={styles.addRowBtnText}>＋ ADD FROM LIBRARY</Text>
+        </TouchableOpacity>
+
+        {/* ── Fork ── */}
+        {!forkEnabled ? (
+          <TouchableOpacity style={styles.addForkBtn} onPress={addFork} activeOpacity={0.8}>
+            <Text style={styles.addForkText}>⑂ ADD A FORK — SPLIT INTO TWO PATHS</Text>
+          </TouchableOpacity>
+        ) : (
+          <>
+            {/* Split graphic */}
+            <View style={styles.split}>
+              <Text style={styles.splitStem}>│</Text>
+              <View style={styles.splitHead}>
+                <Text style={styles.splitTitle}>⑂ FORK · PICK ONE PATH</Text>
+                <TouchableOpacity onPress={removeFork} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={styles.splitRemove}>✕ REMOVE</Text>
+                </TouchableOpacity>
+              </View>
+              <View style={styles.splitArrows}>
+                <Text style={styles.splitArrow}>↙</Text>
+                <Text style={styles.splitArrow}>↘</Text>
+              </View>
+            </View>
+
+            {/* Two parallel paths, side by side */}
+            <View style={styles.branchRow}>
+              {/* Branch A */}
+              <View style={styles.branchPanel}>
+                <TextInput
+                  style={styles.branchLabelInput}
+                  value={branchA}
+                  onChangeText={setBranchA}
+                  placeholder="PATH A NAME"
+                  placeholderTextColor={SL.muted}
+                />
+                {aEx.length === 0
+                  ? <Text style={styles.branchEmptyHint}>No exercises — this path just ends the workout.</Text>
+                  : renderRows(aEx)}
+                <TouchableOpacity style={styles.addBranchBtn} onPress={() => openPicker('a')} activeOpacity={0.8}>
+                  <Text style={styles.addBranchText}>＋ ADD TO THIS PATH</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Branch B */}
+              <View style={styles.branchPanel}>
+                <TextInput
+                  style={styles.branchLabelInput}
+                  value={branchB}
+                  onChangeText={setBranchB}
+                  placeholder="PATH B NAME"
+                  placeholderTextColor={SL.muted}
+                />
+                {bEx.length === 0
+                  ? <Text style={styles.branchEmptyHint}>No exercises — this path just ends the workout.</Text>
+                  : renderRows(bEx)}
+                <TouchableOpacity style={styles.addBranchBtn} onPress={() => openPicker('b')} activeOpacity={0.8}>
+                  <Text style={styles.addBranchText}>＋ ADD TO THIS PATH</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {/* Merge — both paths rejoin into a shared ending (optional). */}
+            <View style={styles.split}>
+              <View style={styles.splitArrows}>
+                <Text style={styles.splitArrow}>↘</Text>
+                <Text style={styles.splitArrow}>↙</Text>
+              </View>
+              <View style={styles.splitHead}>
+                <Text style={styles.splitTitle}>⑃ MERGE · COMMON ENDING (BOTH PATHS)</Text>
+              </View>
+              <Text style={styles.splitStem}>│</Text>
+            </View>
+            <Text style={styles.sectionSub}>
+              Everyone does these after their path — build a shared ending once instead of in both.
+            </Text>
+            {mergeEx.length === 0
+              ? <Text style={styles.branchEmptyHint}>No ending — each path just finishes on its own.</Text>
+              : renderRows(mergeEx)}
+            <TouchableOpacity style={styles.addRowBtn} onPress={() => openPicker('merge')} activeOpacity={0.8}>
+              <Text style={styles.addRowBtnText}>＋ ADD TO COMMON ENDING</Text>
+            </TouchableOpacity>
+          </>
+        )}
+
+        {/* ── Error ── */}
+        {!!errorMsg && (
+          <View style={styles.errorBox}>
+            <Text style={styles.errorText}>⚠ {errorMsg}</Text>
           </View>
         )}
 
-        {/* Exercise cards */}
-        {exercises.map((ex, i) => (
-          <View key={ex._uid} style={styles.exCard}>
-            <Corner pos="TL" />
-            <Corner pos="BR" />
-
-            {/* Card header: letter + name (non-editable) + remove */}
-            <View style={styles.exCardHead}>
-              <View style={styles.letterBadge}>
-                <Text style={styles.letterText}>{String.fromCharCode(65 + i)}</Text>
-              </View>
-              <Text style={styles.exName} numberOfLines={2}>{ex.name?.toUpperCase()}</Text>
-              <TouchableOpacity
-                style={styles.removeBtn}
-                onPress={() => removeExercise(ex._uid)}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Text style={styles.removeBtnText}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Sets + Reps */}
-            <View style={styles.exRow}>
-              <View style={styles.exField}>
-                <Text style={styles.fieldLabel}>SETS</Text>
-                <TextInput
-                  style={styles.input}
-                  value={ex.sets}
-                  onChangeText={v => updateExercise(ex._uid, 'sets', v)}
-                  placeholder="4"
-                  placeholderTextColor={SL.muted}
-                  keyboardType="numeric"
-                />
-              </View>
-              <View style={styles.exField}>
-                <Text style={styles.fieldLabel}>REPS</Text>
-                <TextInput
-                  style={styles.input}
-                  value={ex.reps}
-                  onChangeText={v => updateExercise(ex._uid, 'reps', v)}
-                  placeholder="8-10"
-                  placeholderTextColor={SL.muted}
-                />
-              </View>
-            </View>
-
-            {/* Notes */}
-            <Text style={styles.fieldLabel}>COACHING NOTES</Text>
-            <TextInput
-              style={[styles.input, styles.inputMultiline]}
-              value={ex.notes}
-              onChangeText={v => updateExercise(ex._uid, 'notes', v)}
-              placeholder="Focus cues, technique notes..."
-              placeholderTextColor={SL.muted}
-              multiline
-            />
-          </View>
-        ))}
-
-        {/* Add exercise — opens gallery modal */}
-        <TouchableOpacity style={styles.addExBtn} onPress={addExercise} activeOpacity={0.8}>
-          <Text style={styles.addExBtnText}>+ ADD EXERCISE</Text>
-        </TouchableOpacity>
-
-        {/* Save */}
-        <TouchableOpacity
-          style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
+        {/* ── Save ── */}
+        <PillButton
+          label="SAVE CHANGES"
+          variant="solid"
+          size="lg"
           onPress={handleSave}
           disabled={!canSave}
-          activeOpacity={0.85}
-        >
-          {saving
-            ? <ActivityIndicator color={SL.bg} />
-            : <Text style={[styles.saveBtnText, !canSave && styles.saveBtnTextDisabled]}>
-                SAVE CHANGES
-              </Text>
-          }
-        </TouchableOpacity>
+          loading={saving}
+          style={{ marginTop: 28 }}
+        />
 
         <View style={{ height: 40 }} />
-      </ScrollView>
+      </View>
 
-      {/* ── Gallery picker modal ── */}
+      {/* ── Library picker ── */}
       <Modal
-        visible={showGallery}
+        visible={pickerVisible}
         transparent
         animationType="slide"
-        onRequestClose={() => setShowGallery(false)}
+        onRequestClose={() => setPickerVisible(false)}
       >
         <View style={styles.modalOverlay}>
-          <View style={styles.modalSheet}>
-
-            {/* Modal header */}
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>SELECT EXERCISE</Text>
-              <TouchableOpacity
-                onPress={() => setShowGallery(false)}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Text style={styles.modalClose}>✕</Text>
-              </TouchableOpacity>
+          <View style={styles.pickerBox}>
+            {/* Header: back (on the names step) + title */}
+            <View style={styles.pickerHeader}>
+              {pickerStep === 'list' ? (
+                <TouchableOpacity style={styles.pickerBackBtn} onPress={pickerBack} activeOpacity={0.8}>
+                  <Text style={styles.pickerBackText}>←</Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.pickerHeaderSpacer} />
+              )}
+              <Text style={styles.pickerTitle}>ADD FROM LIBRARY</Text>
+              <View style={styles.pickerHeaderSpacer} />
             </View>
 
-            {/* Search bar */}
-            <View style={styles.modalSearchWrap}>
-              <TextInput
-                style={styles.modalSearch}
-                value={gallerySearch}
-                onChangeText={setGallerySearch}
-                placeholder="Search exercises..."
-                placeholderTextColor={SL.muted}
-                autoCorrect={false}
-              />
-            </View>
+            <View style={styles.pickerBody}>
+              {/* STEP 1 — movement category */}
+              {pickerStep === 'category' && (
+                <>
+                  <Text style={styles.pickerStepLabel}>SELECT CATEGORY</Text>
+                  <View style={styles.pickerChips}>
+                    {MOVEMENT_TYPES.map(cat => (
+                      <TouchableOpacity key={cat} style={styles.chip} onPress={() => chooseCategory(cat)} activeOpacity={0.8}>
+                        <Text style={styles.chipText}>{cat.toUpperCase()}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </>
+              )}
 
-            {/* List */}
-            {galleryLoading ? (
-              <ActivityIndicator color={SL.accent} style={{ marginTop: 40 }} size="large" />
-            ) : (
-              <ScrollView
-                contentContainerStyle={styles.modalList}
-                keyboardShouldPersistTaps="handled"
-                showsVerticalScrollIndicator={false}
-              >
-                {filteredGallery.length === 0 ? (
-                  <Text style={styles.modalEmpty}>NO EXERCISES FOUND</Text>
-                ) : (
-                  filteredGallery.map(item => (
-                    <TouchableOpacity
-                      key={item.id}
-                      style={styles.galleryItem}
-                      onPress={() => selectFromGallery(item)}
-                      activeOpacity={0.75}
-                    >
-                      <View style={styles.galleryItemBody}>
-                        <Text style={styles.galleryItemName}>{item.name?.toUpperCase()}</Text>
-                        {item.movement_type ? (
-                          <View style={styles.galleryTypeBadge}>
-                            <Text style={styles.galleryTypeText}>
-                              {item.movement_type.toUpperCase()}
+              {/* STEP 2 — names */}
+              {pickerStep === 'list' && (
+                <>
+                  <Text style={styles.pickerCrumb}>{pickerCategory.toUpperCase()}</Text>
+                  <TextInput
+                    style={styles.pickerSearch}
+                    placeholder="Search exercises..."
+                    placeholderTextColor={SL.muted}
+                    value={pickerSearch}
+                    onChangeText={setPickerSearch}
+                  />
+                  <ScrollView style={styles.pickerList} showsVerticalScrollIndicator={false}>
+                    {pickerList.map(item => {
+                      const added = !!pickerAdded[item.id];
+                      return (
+                        <TouchableOpacity
+                          key={item.id}
+                          style={styles.pickerRow}
+                          onPress={() => pickExercise(item)}
+                          activeOpacity={0.8}
+                        >
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.pickerName}>{item.name}</Text>
+                            {!!item.movement_type && (
+                              <Text style={styles.pickerType}>{item.movement_type.toUpperCase()}</Text>
+                            )}
+                          </View>
+                          <View style={[styles.pickerAdd, added && styles.pickerAddDone]}>
+                            <Text style={[styles.pickerAddText, added && styles.pickerAddTextDone]}>
+                              {added ? '✓ ADDED' : '+ ADD'}
                             </Text>
                           </View>
-                        ) : null}
-                      </View>
-                      {item.youtube_url ? (
-                        <Text style={styles.galleryVideoLabel}>▶ VIDEO</Text>
-                      ) : null}
-                    </TouchableOpacity>
-                  ))
-                )}
-              </ScrollView>
-            )}
+                        </TouchableOpacity>
+                      );
+                    })}
+                    {pickerList.length === 0 && (
+                      <Text style={styles.pickerEmpty}>No exercises match this filter.</Text>
+                    )}
+                  </ScrollView>
+                </>
+              )}
+            </View>
+
+            <TouchableOpacity
+              style={styles.pickerDone}
+              onPress={() => { setPickerVisible(false); setPickerSearch(''); }}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.pickerDoneText}>DONE</Text>
+            </TouchableOpacity>
+
+            <ShimmerFrame style={styles.pickerBorder} colors={BLUE} radius={18} thickness={3} duration={4200} active />
           </View>
         </View>
       </Modal>
-    </KeyboardAvoidingView>
+    </ScreenFrame>
   );
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
+  form: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 28 },
 
-  corner: {
-    position: 'absolute',
-    width: 14,
-    height: 14,
-    borderColor: SL.accent,
-    zIndex: 2,
+  label: {
+    fontFamily: F.bodyMed, fontSize: 18, color: SL.text,
+    letterSpacing: 2, textTransform: 'uppercase', marginTop: 30, marginBottom: 12,
   },
-
-  // ── Header ──────────────────────────────────────────────────────────────────
-
-  header: {
-    width: '100%',
-    maxWidth: 1440,
-    alignSelf: 'center',
-    paddingHorizontal: 24,
-    paddingTop: 60,
-    paddingBottom: 24,
-    borderBottomWidth: 1,
-    borderBottomColor: SL.border,
+  optional: {
+    fontFamily: F.body, fontSize: 15, color: SL.muted,
+    textTransform: 'none', letterSpacing: 0.5,
   },
-  backText: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 2,
-    marginBottom: 14,
-  },
-  screenTitle: {
-    fontFamily: F.heading,
-    fontSize: 32,
-    color: SL.accent,
-    letterSpacing: 4,
-    textAlign: 'center',
-    textTransform: 'uppercase',
-  },
-  divider: {
-    height: 1,
-    backgroundColor: SL.accent,
-    opacity: 0.3,
-    marginTop: 18,
-  },
-
-  // ── Form ────────────────────────────────────────────────────────────────────
-
-  // Cool ice-glow frame wrapping the whole form, matching the Skills page.
-  form: {
-    padding: 20,
-    paddingBottom: 24,
-    width: '100%',
-    maxWidth: 1440,
-    alignSelf: 'center',
-    marginTop: 16,
-    marginBottom: 28,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 18,
-    backgroundColor: SL.bg,
-    shadowColor: SL.accent,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.2,
-    shadowRadius: 20,
-  },
-
-  inputLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 12,
-    color: SL.muted,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-    marginTop: 18,
-    marginBottom: 6,
-  },
-  optional: { fontSize: 11, color: SL.muted, opacity: 0.7 },
 
   input: {
-    height: 46,
-    backgroundColor: SL.panel,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    paddingHorizontal: 14,
-    fontFamily: F.body,
-    fontSize: 16,
-    color: SL.text,
-  },
-  inputMultiline: {
-    height: 76,
-    paddingTop: 12,
-    textAlignVertical: 'top',
+    backgroundColor: SL.panel, borderWidth: 1.5, borderColor: SL.border, borderRadius: 12,
+    paddingHorizontal: 20, paddingVertical: 18, fontFamily: F.body, fontSize: 21, color: SL.text,
   },
 
-  // ── Exercises section ────────────────────────────────────────────────────────
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, minHeight: 55 },
+  chip: {
+    paddingHorizontal: 26, paddingVertical: 15,
+    borderRadius: 999, borderWidth: 1.5, borderColor: SL.border, backgroundColor: SL.panel,
+  },
+  chipActive: {
+    backgroundColor: 'rgba(74,158,191,0.16)', borderColor: SL.accent,
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.5, shadowRadius: 10,
+  },
+  chipText: { fontFamily: F.bodyMed, fontSize: 17, color: SL.muted, letterSpacing: 1 },
+  chipTextActive: { color: SL.accent, fontFamily: F.heading },
+
+  // ── Exercise list ─────────────────────────────────────────────────────────────
 
   exercisesHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginTop: 24,
-    marginBottom: 8,
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between', marginTop: 30, marginBottom: 12,
   },
-  exercisesLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 12,
-    color: SL.muted,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-  },
-  exCountBadge: {
-    backgroundColor: 'rgba(74,158,191,0.15)',
-    borderWidth: 1,
-    borderColor: SL.accent,
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-  },
-  exCountText: {
-    fontFamily: F.body,
-    fontSize: 12,
-    color: SL.accent,
-    letterSpacing: 1.5,
-  },
+  exerciseHint: { fontFamily: F.body, fontSize: 14, color: SL.muted, letterSpacing: 1 },
 
-  emptyExWrap: {
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    borderStyle: 'dashed',
-    paddingVertical: 28,
-    alignItems: 'center',
-    gap: 8,
-  },
-  emptyExText: {
-    fontFamily: F.heading,
-    fontSize: 16,
-    color: SL.muted,
-    letterSpacing: 2,
-  },
-  emptyExSub: {
-    fontFamily: F.bodyMed,
-    fontSize: 13,
-    color: SL.muted,
-    opacity: 0.7,
-  },
+  // ── Exercise row ──────────────────────────────────────────────────────────────
 
-  // ── Exercise card ────────────────────────────────────────────────────────────
+  exRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginBottom: 12 },
+  exLetterBox: {
+    width: 36, height: 46,
+    backgroundColor: 'rgba(74,158,191,0.12)',
+    borderWidth: 1.5, borderColor: SL.accent, borderRadius: 8,
+    justifyContent: 'center', alignItems: 'center', marginTop: 1,
+  },
+  exLetter: { fontFamily: F.heading, fontSize: 18, color: SL.accent, letterSpacing: 1 },
+  exFields: { flex: 1, gap: 8 },
 
-  exCard: {
-    backgroundColor: SL.panel,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    padding: 16,
-    marginTop: 12,
-    gap: 10,
-    overflow: 'visible',
-    position: 'relative',
-  },
-  exCardHead: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  letterBadge: {
-    width: 36,
-    height: 36,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(74,158,191,0.08)',
-    flexShrink: 0,
-  },
-  letterText: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.accent,
-  },
-  exName: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.text,
-    letterSpacing: 1,
-    flex: 1,
-    textTransform: 'uppercase',
-  },
-  removeBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 4,
-    borderWidth: 1.5,
-    borderColor: SL.danger,
-    justifyContent: 'center',
-    alignItems: 'center',
-    flexShrink: 0,
-  },
-  removeBtnText: {
-    fontFamily: F.body,
-    fontSize: 13,
-    color: SL.danger,
-  },
-
-  exRow:   { flexDirection: 'row', gap: 12 },
-  exField: { flex: 1, gap: 6 },
-
-  fieldLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 12,
-    color: SL.muted,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-    marginBottom: 4,
-  },
-
-  // ── Buttons ──────────────────────────────────────────────────────────────────
-
-  addExBtn: {
-    height: 40,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 16,
-  },
-  addExBtnText: {
-    fontFamily: F.heading,
-    fontSize: 16,
-    color: SL.accent,
-    letterSpacing: 3,
-  },
-
-  saveBtn: {
-    height: 48,
-    backgroundColor: SL.accent,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 14,
-  },
-  saveBtnDisabled: { backgroundColor: SL.border },
-  saveBtnText: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.bg,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
-  },
-  saveBtnTextDisabled: { color: SL.muted },
-
-  // ── Gallery modal ─────────────────────────────────────────────────────────────
-
-  modalOverlay: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0,0,0,0.7)',
-  },
-  modalSheet: {
-    height: '75%',
-    backgroundColor: SL.panel,
-    borderTopWidth: 2,
-    borderTopColor: SL.accent,
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    paddingTop: 20,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    marginBottom: 16,
-  },
-  modalTitle: {
-    fontFamily: F.heading,
-    fontSize: 20,
-    color: SL.accent,
-    letterSpacing: 4,
-    textTransform: 'uppercase',
-  },
-  modalClose: {
-    fontFamily: F.body,
-    fontSize: 18,
-    color: SL.muted,
-  },
-  modalSearchWrap: {
-    paddingHorizontal: 16,
-    marginBottom: 12,
-  },
-  modalSearch: {
-    height: 44,
-    backgroundColor: SL.bg,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    paddingHorizontal: 14,
-    fontFamily: F.body,
-    fontSize: 16,
-    color: SL.text,
-  },
-  modalList: {
-    paddingHorizontal: 16,
-    paddingBottom: 32,
-    gap: 8,
-  },
-  modalEmpty: {
-    fontFamily: F.heading,
-    fontSize: 16,
-    color: SL.muted,
-    letterSpacing: 2,
-    textAlign: 'center',
-    marginTop: 40,
-  },
-  galleryItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: SL.bg,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-  },
-  galleryItemBody: {
-    flex: 1,
-    gap: 6,
-  },
-  galleryItemName: {
-    fontFamily: F.body,
-    fontSize: 16,
-    color: SL.text,
-    letterSpacing: 1,
-  },
-  galleryTypeBadge: {
+  linkToggle: {
     alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: SL.border,
-    borderRadius: 3,
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    backgroundColor: 'rgba(74,158,191,0.06)',
+    paddingHorizontal: 12, paddingVertical: 6,
+    borderWidth: 1.5, borderColor: SL.border, borderRadius: 999,
+    backgroundColor: 'rgba(74,158,191,0.04)',
   },
-  galleryTypeText: {
-    fontFamily: F.bodyMed,
-    fontSize: 10,
-    color: SL.muted,
-    letterSpacing: 1,
+  linkToggleOn: {
+    borderColor: SL.accent, backgroundColor: 'rgba(74,158,191,0.16)',
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.4, shadowRadius: 8,
   },
-  galleryVideoLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 12,
-    color: SL.accent,
-    letterSpacing: 1,
-    marginLeft: 10,
+  linkToggleText: { fontFamily: F.bodyMed, fontSize: 13, color: SL.muted, letterSpacing: 1.5 },
+  linkToggleTextOn: { fontFamily: F.heading, color: SL.accent },
+
+  sectionSub: {
+    fontFamily: F.bodyMed, fontSize: 14, color: SL.muted, letterSpacing: 0.5, marginBottom: 10, marginTop: -4,
   },
+
+  exNameBox: {
+    height: 46, justifyContent: 'center',
+    backgroundColor: 'rgba(74,158,191,0.08)',
+    borderWidth: 1.5, borderColor: SL.accent, borderRadius: 8,
+    paddingHorizontal: 14,
+  },
+  exNameText: {
+    fontFamily: F.heading, fontSize: 16, color: SL.text,
+    letterSpacing: 1, textTransform: 'uppercase',
+  },
+  exVariationInput: {
+    marginTop: 6, minHeight: 38,
+    backgroundColor: SL.panel,
+    borderWidth: 1.5, borderColor: SL.border, borderRadius: 8,
+    paddingHorizontal: 12, paddingVertical: 8,
+    fontFamily: F.body, fontSize: 14, color: SL.text,
+    textAlignVertical: 'top',
+  },
+  exFieldsRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  exInputSets: {
+    width: 72, height: 42,
+    backgroundColor: SL.panel,
+    borderWidth: 1.5, borderColor: SL.border, borderRadius: 8,
+    paddingHorizontal: 8, textAlign: 'center',
+    fontFamily: F.body, fontSize: 16, color: SL.text,
+  },
+  exMult: { fontFamily: F.heading, fontSize: 16, color: SL.muted },
+  exInputReps: {
+    width: 130, height: 42,
+    backgroundColor: SL.panel,
+    borderWidth: 1.5, borderColor: SL.border, borderRadius: 8,
+    paddingHorizontal: 12, textAlign: 'center',
+    fontFamily: F.body, fontSize: 16, color: SL.text,
+  },
+  // Right-side controls: reorder up/down within the section + remove.
+  exSideCol: { alignItems: 'center', justifyContent: 'flex-start', gap: 2, marginLeft: 2 },
+  moveBtn: {
+    width: 36, height: 30, borderRadius: 8,
+    borderWidth: 1.5, borderColor: SL.border, backgroundColor: SL.panel,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  moveBtnDisabled: { opacity: 0.3 },
+  moveBtnText: { fontFamily: F.body, fontSize: 14, color: SL.accent },
+  exRemoveBtn: { width: 36, height: 36, justifyContent: 'center', alignItems: 'center', marginTop: 2 },
+  exRemoveText: { fontFamily: F.body, fontSize: 18, color: SL.danger },
+
+  exEmpty: {
+    borderWidth: 1.5, borderColor: SL.border, borderStyle: 'dashed', borderRadius: 12,
+    paddingVertical: 28, alignItems: 'center', gap: 6,
+  },
+  exEmptyText: { fontFamily: F.heading, fontSize: 17, color: SL.muted, letterSpacing: 2 },
+  exEmptySub: { fontFamily: F.bodyMed, fontSize: 14, color: SL.muted, letterSpacing: 0.5, textAlign: 'center' },
+
+  addRowBtn: {
+    marginTop: 14, height: 60,
+    borderWidth: 1.5, borderColor: SL.accent, borderRadius: 12, borderStyle: 'dashed',
+    justifyContent: 'center', alignItems: 'center',
+    backgroundColor: 'rgba(74,158,191,0.08)',
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.25, shadowRadius: 8,
+  },
+  addRowBtnText: {
+    fontFamily: F.heading, fontSize: 17, color: SL.accent, letterSpacing: 3, textTransform: 'uppercase',
+  },
+
+  addForkBtn: {
+    marginTop: 12, height: 56, borderRadius: 12,
+    borderWidth: 1.5, borderColor: SL.border, borderStyle: 'dashed',
+    justifyContent: 'center', alignItems: 'center',
+  },
+  addForkText: { fontFamily: F.heading, fontSize: 16, color: SL.muted, letterSpacing: 2, textTransform: 'uppercase' },
+
+  split: { alignItems: 'center', marginTop: 18, gap: 4 },
+  splitStem: { fontFamily: F.heading, fontSize: 20, color: SL.accent, lineHeight: 22 },
+  splitHead: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    alignSelf: 'stretch', borderWidth: 1.5, borderColor: SL.accent, borderRadius: 10,
+    paddingHorizontal: 14, paddingVertical: 10, backgroundColor: 'rgba(74,158,191,0.08)',
+  },
+  splitTitle: { fontFamily: F.heading, fontSize: 15, color: SL.accent, letterSpacing: 1.5 },
+  splitRemove: { fontFamily: F.bodyMed, fontSize: 13, color: SL.danger, letterSpacing: 1 },
+  splitArrows: { flexDirection: 'row', justifyContent: 'space-around', alignSelf: 'stretch', paddingHorizontal: 40 },
+  splitArrow: { fontFamily: F.heading, fontSize: 26, color: SL.accent },
+
+  branchRow: { flexDirection: 'row', gap: 12, marginTop: 10, alignItems: 'flex-start' },
+  branchPanel: {
+    flex: 1, padding: 14, borderRadius: 12,
+    borderWidth: 1.5, borderColor: SL.border, borderTopWidth: 4, borderTopColor: SL.accent,
+    backgroundColor: SL.panel, gap: 10,
+  },
+  branchLabelInput: {
+    height: 48, backgroundColor: SL.bg, borderWidth: 1.5, borderColor: SL.accent, borderRadius: 10,
+    paddingHorizontal: 14, fontFamily: F.heading, fontSize: 16, color: SL.text, letterSpacing: 1,
+  },
+  branchEmptyHint: {
+    fontFamily: F.bodyMed, fontSize: 14, color: SL.muted, letterSpacing: 0.5,
+    fontStyle: 'italic', textAlign: 'center', paddingVertical: 8,
+  },
+  addBranchBtn: {
+    height: 48, borderRadius: 10, borderWidth: 1.5, borderColor: SL.accent, borderStyle: 'dashed',
+    justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(74,158,191,0.06)',
+  },
+  addBranchText: { fontFamily: F.heading, fontSize: 15, color: SL.accent, letterSpacing: 2 },
+
+  // ── Library picker modal ────────────────────────────────────────────────────
+  modalOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.85)',
+    justifyContent: 'center', alignItems: 'center', padding: 16,
+  },
+  pickerBox: {
+    width: '100%', maxWidth: 640, height: PICKER_H,
+    backgroundColor: SL.bg, borderRadius: 18, overflow: 'hidden', padding: 24,
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.35, shadowRadius: 20,
+  },
+  pickerBorder: { ...StyleSheet.absoluteFillObject, borderRadius: 18 },
+
+  pickerHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
+  pickerBackBtn: {
+    width: 46, height: 40, borderRadius: 20,
+    borderWidth: 1.5, borderColor: SL.accent, backgroundColor: 'rgba(74,158,191,0.10)',
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.4, shadowRadius: 8,
+  },
+  pickerBackText: { fontFamily: F.heading, fontSize: 22, color: SL.accent },
+  pickerHeaderSpacer: { width: 46 },
+  pickerTitle: {
+    flex: 1, fontFamily: F.heading, fontSize: 22, color: SL.accent,
+    letterSpacing: 3, textTransform: 'uppercase', textAlign: 'center',
+  },
+
+  pickerBody: { flex: 1 },
+  pickerStepLabel: {
+    fontFamily: F.heading, fontSize: 16, color: SL.text,
+    letterSpacing: 2, textTransform: 'uppercase', marginBottom: 14,
+  },
+  pickerCrumb: {
+    fontFamily: F.bodyMed, fontSize: 14, color: SL.accent,
+    letterSpacing: 2, textTransform: 'uppercase', marginBottom: 12,
+  },
+  pickerChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+
+  pickerSearch: {
+    height: 52, backgroundColor: SL.panel, borderWidth: 1.5, borderColor: SL.border, borderRadius: 12,
+    paddingHorizontal: 18, fontFamily: F.body, fontSize: 18, color: SL.text, marginBottom: 12,
+  },
+  pickerList: { flex: 1 },
+  pickerRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 14, paddingHorizontal: 4,
+    borderBottomWidth: 1, borderBottomColor: SL.border,
+  },
+  pickerName: { fontFamily: F.bodyMed, fontSize: 19, color: SL.text, letterSpacing: 0.5, textTransform: 'uppercase' },
+  pickerType: { fontFamily: F.bodyMed, fontSize: 13, color: SL.muted, letterSpacing: 1.5, marginTop: 3 },
+  pickerAdd: {
+    paddingHorizontal: 16, paddingVertical: 9,
+    borderWidth: 1.5, borderColor: SL.accent, borderRadius: 999,
+    backgroundColor: 'rgba(74,158,191,0.10)', minWidth: 92, alignItems: 'center',
+  },
+  pickerAddDone: { borderColor: SL.gold, backgroundColor: 'rgba(255,215,0,0.10)' },
+  pickerAddText: { fontFamily: F.heading, fontSize: 15, color: SL.accent, letterSpacing: 1.5 },
+  pickerAddTextDone: { color: SL.gold },
+  pickerEmpty: {
+    fontFamily: F.bodyMed, fontSize: 16, color: SL.muted,
+    textAlign: 'center', marginVertical: 28, letterSpacing: 0.5,
+  },
+  pickerDone: {
+    marginTop: 16, height: 56, backgroundColor: SL.accent, borderRadius: 12,
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.5, shadowRadius: 14,
+  },
+  pickerDoneText: { fontFamily: F.heading, fontSize: 20, color: SL.bg, letterSpacing: 3, textTransform: 'uppercase' },
+
+  // ── Error ─────────────────────────────────────────────────────────────────────
+  errorBox: {
+    marginTop: 20,
+    backgroundColor: 'rgba(255,60,60,0.12)',
+    borderWidth: 1.5, borderColor: '#FF4444', borderRadius: 6, padding: 14,
+  },
+  errorText: { fontFamily: F.bodyMed, fontSize: 14, color: '#FF6B6B', letterSpacing: 0.5, lineHeight: 20 },
 });

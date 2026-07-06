@@ -76,6 +76,16 @@ Key policies:
 > migrations and may have broader or no RLS policies. Always check before
 > adding queries that touch sensitive data.
 
+> **Admin-as-coach override (2026-06-21).** `migrations/20260621_admin_manage_players.sql`
+> adds ADDITIVE `public.is_admin()` policies so admins can manage any player's
+> data (the roster taps through to `PlayerAdminScreen` → the self-coach screens).
+> Permissive policies are OR'd, so each player keeps owner-only access; these only
+> grant admins extra access. Tables covered: `profiles` (admin select + update),
+> `student_quest_completions`, `workouts`, `exercises`, `weekly_workout_template`,
+> `workout_override_workouts`, `daily_quests`, `daily_quest_completions` (all
+> `FOR ALL` via `is_admin()`). **Must be applied to the live Supabase** or admin
+> edits silently fail against the owner-only base policies.
+
 ---
 
 ## Tables
@@ -167,13 +177,19 @@ Every quest node in the quest tree (both main and side quests) for every class.
   Tier 2 side quest unlocks only after ALL Tier 1 side quests are done. No schema
   change; see `supabase/migrations/20260519_class3_side_quests.sql`.
 - Class I **side quests** (`quest_type='side'`) use the same cross-chain tier
-  pattern: Tier 1 side chains are `frog` (branch `main`) + `headstand` (branches
-  `disconnection`, `freestanding`); Tier 2 side chains are `lsit` + `pull_over`
-  (branch `main`). Each Tier 2 chain's first node is a convergence whose
+  pattern. After the 2026-06-30 swap, Tier 1 side chains are `frog`,
+  `kick-up muscle-up`, and `l-sit` (branch `main`); Tier 2 side chains are
+  `headstand` (branches `disconnection`, `freestanding`), `pull over`,
+  `archer pull up`, `archer push up` (branch `main`). NOTE: live `chain` slugs are
+  human strings with hyphens/spaces (e.g. `kick-up muscle-up`, `l-sit`), NOT the
+  underscore slugs in the older migration files — the swap migration matches them
+  by normalized name. Each Tier 2 chain's first node is a convergence whose
   `prerequisites` = the last node of every Tier 1 side branch (3 leaves: Frog
-  10 sec, 20 sec Disconnection from Wall, 20 sec Freestanding). All
-  `lvl_reward = 0`. See `supabase/migrations/20260522_class1_side_quests.sql`.
-  (Class I MAIN quests still use the simple linear `branch = 'main'` pattern.)
+  10 sec + the kick-up muscle-up leaf + the l-sit leaf). All
+  `lvl_reward = 0`. See `supabase/migrations/20260522_class1_side_quests.sql`
+  (original) and `supabase/migrations/20260630_class1_swap_headstand_kickup_tiers.sql`
+  (the headstand↔kick_up_muscle_up tier swap). (Class I MAIN quests still use the
+  simple linear `branch = 'main'` pattern.)
 
 **UI convention (all classes):** both main AND side quests render as one chain
 card per distinct `chain`, on SkillsScreen. Tapping a card opens `QuestTree` with
@@ -217,6 +233,8 @@ Workout templates a player creates for themselves (`assigned_to` = `created_by` 
 | `assigned_to` | uuid | FK → `profiles(id)` — the student |
 | `created_by` | uuid | FK → `profiles(id)` — the author (= the player, same as `assigned_to`) |
 | `scheduled_date` | date | Original scheduled date (mostly legacy) |
+| `category` | text | **Workout type/label.** One of `'main'` / `'side'` / `'accessory'` / `'legs'` (mirrors `gallery_example_workouts.category`); `NULL` = untyped (legacy rows). CHECK `workouts_category_check`. Chosen in Create/Edit Workout, copied from the gallery row on elite import, and shown as a label on the My Workouts card. Added in `migrations/20260630_workout_category.sql`. |
+| `branches` | jsonb | **Workout fork.** `NULL` = no fork. Otherwise a 2-element array of `{ "key": "a"|"b", "label": "..." }` defining the two alternative endings (labels shown in Workout Mode's "choose your path" prompt). Lives on the workout — not the exercises — so an *empty* branch (the "end here" option) still has a name. Added in `supabase/migrations/20260613_workout_branching.sql`. |
 | `created_at` | timestamptz | Auto |
 
 **Used by:** WorkoutsScreen, WorkoutDetailScreen, WorkoutEditScreen,
@@ -233,12 +251,16 @@ Individual exercises belonging to a workout.
 | `workout_id` | uuid | FK → `workouts(id)` ON DELETE CASCADE |
 | `letter` | text | Display order letter, e.g. `'A'`, `'B'`, `'C'` |
 | `name` | text | Exercise name |
-| `sets` | integer | |
+| `sets` | text | A count (`'3'`) or a **range** (`'1-2'`). For a range the lower bound is the REQUIRED sets and the extra sets up to the upper bound are OPTIONAL (bonus) — Workout Mode shows the optional sets muted and they don't block completion. Was integer until `migrations/20260622_exercise_sets_text.sql` changed it to text (mirrors `reps`). |
 | `reps` | text | String because can be `'8-12'` or `'MAX'` etc. |
 | `notes` | text | Coach notes for the exercise |
+| `variation` | text | **Per-exercise-instance free-text "variation"** — instructions/focus attached to the exercise INSIDE this workout, editable any time and independent of the library exercise it was picked from (e.g. a focus that changes each cycle). NULL = none. Shown under the name in WorkoutDetail / Workout Mode. Added in `migrations/20260622_exercise_variation.sql`. Gallery example workouts store the same key inline in their `exercises` JSONB. |
+| `superset_group` | smallint | **Parallel grouping (supersets).** Exercises in the same workout sharing the same non-null value are done in parallel — in Workout Mode all must be completed but their order doesn't matter. `NULL` = standalone. Grouped exercises are stored consecutively (group runs are contiguous in `letter` order). Set in the workout builder (Create/Edit Workout). Added in `supabase/migrations/20260613_exercise_superset_group.sql`. |
+| `branch` | text | **Workout fork (see `workouts.branches`).** `NULL` = trunk (common, done before the split). `'a'` / `'b'` = belongs to that branch (shown only if the player picks it in Workout Mode). **`'merge'`** = post-fork common "ending" — done by everyone AFTER their chosen path rejoins (lets a shared finisher be authored once instead of duplicated in both branches). Run order: trunk → chosen branch → merge. `'a'`/`'b'`/`'merge'` added on top of the original branching in `supabase/migrations/20260613_workout_branching.sql` (no schema change — `branch` is free text). |
+| `gallery_id` | uuid | **Catalog link** — FK → `exercises_gallery(id)` ON DELETE SET NULL. The gallery exercise this row was picked from in the builder; drives Workout Mode's **how-to card** (video + coaching cues) by a stable id instead of fragile name matching. NULL for legacy/free-text/imported rows (Workout Mode falls back to a normalized-name match on `exercises_gallery.name`). Set by Create/Edit Workout. Added in `migrations/20260701_exercise_gallery_id.sql`. |
 
 **Used by:** WorkoutDetailScreen (fetches via `workout_id`), WorkoutEditScreen,
-CreateWorkoutScreen.
+CreateWorkoutScreen, WorkoutModeScreen (how-to card via `gallery_id` → name fallback).
 
 ---
 
@@ -253,11 +275,13 @@ Master library of all exercises. Used as the source when players build workouts.
 | `youtube_url` | text | Full YouTube URL (optional) |
 | `description` | text | Optional description |
 | `coaching_cues` | text | Newline-separated coaching cues. (Re)added to the live table in migration `20260604_gallery_add_exercise_fixes.sql`. |
-| `min_class_order` | integer | Which class level this exercise targets: `0`=Class I, `1`=Class II, `2`=Class III, `NULL`=all classes. Added in migration `20260604_gallery_class_field.sql`. |
+| `min_class_order` | integer | Legacy scalar target class: `0`=Class I, `1`=Class II, `2`=Class III, `NULL`=all classes. Added in migration `20260604_gallery_class_field.sql`. Now kept as the **minimum** of `class_orders` for ordering/back-compat; prefer `class_orders`. |
+| `class_orders` | integer[] | Full set of class `order_index` values this exercise targets (an exercise can target several). `NULL`/empty = all classes. Added in migration `20260621_multi_target_class.sql`. |
 | `video_url` | text | Public URL of a video uploaded to the `exercise-videos` Supabase Storage bucket. Takes priority over `youtube_url` in detail view. Added in migration `20260604_gallery_video_url.sql`. |
 | `created_by` | uuid | FK → `profiles(id)` |
 
-**movement_type values (current):** `'Pull'`, `'Push'`, `'Balance'`, `'Legs'`, `'Mobility'`, `'Flexibility'`  
+**movement_type values (current):** `'Pull'`, `'Push'`, `'Balance'`, `'Legs'`, `'Core'`, `'Mobility'`, `'Flexibility'`, `'Isolated'`
+(`'Core'` added in `migrations/20260622_movement_type_core.sql`; `'Isolated'` added in `migrations/20260623_movement_type_isolated.sql`, which also renamed the briefly-used `'Accessories'` value to `'Isolated'`)  
 *(Old values `Strength`, `Skill`, `Conditioning` are no longer used in the UI but remain
 permitted by the CHECK constraint so legacy rows still validate.)*
 
@@ -384,6 +408,62 @@ player. Yesterday's rows stay as history, today starts empty — no cron needed.
 Workout dates still use UTC (`new Date().toISOString().split('T')[0]`) —
 these two systems are intentionally separate for now.
 
+> **9-week retention window (2026-06-18).** The two per-date tables —
+> `workout_override_workouts` (`specific_date`) and `daily_quest_completions`
+> (`completion_date`) — are kept only for a rolling **9-week window**: 4 weeks
+> before … 4 weeks after the current week. [WorkoutsScreen](screens/WorkoutsScreen.js)
+> clamps its week navigator to that range (so out-of-window rows are never created)
+> and, on load, deletes the signed-in player's rows whose date is outside the
+> window (`pruneOutOfWindow`). This trims storage; **completion history older than
+> 4 weeks is intentionally discarded.** Permanent progress
+> (`student_quest_completions`, `workouts`, `weekly_workout_template`) is per-date-free
+> and never pruned.
+
+---
+
+### `weekly_accessories`
+Self-managed list of EXTRA accessory / legs movements a player hits a target
+number of times per week, performed AD HOC (off the dated/fatigue-managed program).
+Soft-deleted via `active = false` so completion history survives a removal (mirrors
+`daily_quests`). Added in `migrations/20260630_weekly_accessories.sql`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | uuid PK | |
+| `student_id` | uuid | FK → `profiles(id)` ON DELETE CASCADE (the player; owner) |
+| `name` | text | Accessory name (a copy of the chosen workout's title), CHECK `char_length(name) <= 80`. Kept as a copy so the row survives if the source workout is deleted. |
+| `workout_id` | uuid | FK → `workouts(id)` ON DELETE SET NULL. The player's workout this accessory was picked from (My Workouts picker). NULL = legacy free-text accessory or the source workout was deleted. Added in `migrations/20260630_accessory_workout_link.sql`. |
+| `target_per_week` | smallint | How many times/week to do it. Default `1`, CHECK `between 1 and 21` |
+| `active` | boolean | Soft-delete flag, default `true` |
+| `created_at` | timestamptz | Auto |
+
+**Index:** `(student_id, active)`
+**RLS:** owner-only (`auth.uid() = student_id`) + additive `admin all accessories`
+(`public.is_admin()`).
+**Used by:** WeeklyAccessoriesScreen (opened from the Workouts → Manage hub's
+top-right ACCESSORIES button).
+
+---
+
+### `accessory_completions`
+One row per "I did this accessory once". This week's progress for an accessory =
+count of its rows whose `completion_date` falls in the current Sun–Sat week; it
+resets automatically next week (old rows just become history). No UNIQUE on
+(accessory, date) — the same accessory can be logged multiple times per day.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | uuid PK | |
+| `accessory_id` | uuid | FK → `weekly_accessories(id)` ON DELETE CASCADE |
+| `student_id` | uuid | FK → `profiles(id)` ON DELETE CASCADE (denormalized for cheap queries) |
+| `completion_date` | date | YYYY-MM-DD (UTC, via `toDateStr`/`TODAY_STR` in [lib/schedule.js](lib/schedule.js) — same date system as workouts) |
+| `completed_at` | timestamptz | Auto |
+
+**Index:** `(student_id, completion_date)`, `(accessory_id)`
+**RLS:** owner-only + additive `admin all accessory completions`.
+
+> Not currently swept by the 9-week pruning job (low row volume); revisit if it grows.
+
 ---
 
 ### `gallery_example_workouts`
@@ -394,20 +474,29 @@ Admin-authored example workout templates shown in the gallery's "Example Workout
 | `id` | uuid PK | |
 | `title` | text | Workout name, stored uppercase |
 | `description` | text | Optional one-liner describing the workout's goal |
-| `class_order` | integer | Which class this targets: `0`=Class I, `1`=Class II, `2`=Class III |
-| `exercises` | jsonb | Array of `{name, sets, reps, notes}` objects |
+| `class_order` | integer | Legacy scalar target class: `0`=Class I, `1`=Class II, `2`=Class III. Now kept as the **minimum** of `class_orders` for ordering/back-compat; prefer `class_orders`. |
+| `category` | text | Gallery filter bucket: `'main'` (Main Quest), `'side'` (Side Quest), or `'accessory'` (Accessories). `NOT NULL DEFAULT 'main'`, CHECK-constrained. Added in `migrations/20260622_example_workout_category.sql` (existing rows backfilled to `'main'`). The gallery's Example Workouts tab filters by class + this category. |
+| `class_orders` | integer[] | Full set of class `order_index` values this workout targets (always ≥ 1). Added in migration `20260621_multi_target_class.sql`. |
+| `exercises` | jsonb | Array of `{name, variation, sets, reps, superset_group, branch}` objects (`notes` removed 2026-06-13; `variation`/`superset_group`/`branch` mirror the `exercises` table — see those rows, including `branch: 'merge'` for the post-fork common ending). |
+| `branches` | jsonb | **Workout fork** (same shape as `workouts.branches`): `NULL` = no fork, else 2-element array of `{key,label}`. Added in `supabase/migrations/20260613_example_workout_branching.sql`. |
 | `created_at` | timestamptz | Auto |
 
-**RLS:** Authenticated users can read; only `admin` role can insert/delete.
+**RLS:** Authenticated users can read; only `admin` role can insert/update/delete.
+(The **UPDATE** policy was missing originally — edits silently saved nothing — and
+was added in `migrations/20260622_gallery_example_workouts_update_policy.sql` via
+`public.is_admin()`.)
 
 **Used by:** ExerciseGalleryScreen (Example Workouts tab — fetch + delete), AddExampleWorkoutScreen (create). Added in migration `20260604_gallery_example_workouts.sql`.
 
 ---
 
 ### `challenges`
-Admin-authored challenges shown to every player on the **Challenges** tab
-(`screens/ChallengesScreen.js`, which replaced the old placeholder Chat screen).
-Added in `migrations/20260607_challenges.sql`.
+Admin-authored challenges. Added in `migrations/20260607_challenges.sql`.
+
+> **UI REMOVED (2026-06-27):** the Challenges screen and its player nav tab /
+> AdminDashboard button were deleted. This table is currently **orphaned** — no
+> screen reads or writes it. The table + RLS are kept (no data dropped) in case the
+> feature returns; remove the migration/table separately if you want it gone.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -423,9 +512,7 @@ Added in `migrations/20260607_challenges.sql`.
 `DELETE`, gated by the `public.is_admin()` SECURITY DEFINER helper (same helper the
 `exercises_gallery` insert policy uses).
 
-**Used by:** ChallengesScreen — role-aware (read-only list for players; inline
-create + delete for admins). Reached as the player **Challenges** tab and from the
-Admin dashboard top bar (a `Challenges` screen in `AdminNavigator`).
+**Used by:** nothing (orphaned — see the UI REMOVED note above).
 
 ---
 

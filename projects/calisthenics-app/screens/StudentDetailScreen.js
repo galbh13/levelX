@@ -1,13 +1,42 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, Modal,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Pressable,
+  ActivityIndicator, Animated, Easing, Dimensions,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
 import { DAY_LABELS } from '../lib/schedule';
+import { computeLvl } from '../lib/computeLvl';
+import { categoryMeta } from '../lib/workouts';
+import ScreenFrame from '../components/ScreenFrame';
+import PillButton from '../components/PillButton';
+import { CARD_H, CARD_W } from '../constants/layout';
+
+// Off-program ACCESSORIES / LEGS workouts glow in their type color; the dated
+// program keeps the default ice theme. Returns a color or null (= default).
+const accentFor = (category) =>
+  (category === 'accessory' || category === 'legs') ? categoryMeta(category).color : null;
+
+// ─── Glowing action tile ──────────────────────────────────────────────────────
+// A dark "system" panel with a STATIC bright ice-edge + glow halo (no moving
+// shimmer) and a glowing label, plus a tactile press punch. No icons.
+function ForgeButton({ label, onPress }) {
+  const press = useRef(new Animated.Value(0)).current;
+  const onIn  = () => Animated.spring(press, { toValue: 1, useNativeDriver: true, speed: 50, bounciness: 0 }).start();
+  const onOut = () => Animated.spring(press, { toValue: 0, useNativeDriver: true, speed: 18, bounciness: 14 }).start();
+  const scale = press.interpolate({ inputRange: [0, 1], outputRange: [1, 0.94] });
+  return (
+    <Pressable style={{ flex: 1 }} onPressIn={onIn} onPressOut={onOut} onPress={onPress}>
+      <Animated.View style={[styles.forgeBtn, { transform: [{ scale }] }]}>
+        {/* a brighter inner hairline for a "polished glass" edge */}
+        <View pointerEvents="none" style={styles.forgeBtnInner} />
+        <Text style={styles.forgeBtnText} numberOfLines={2}>{label}</Text>
+      </Animated.View>
+    </Pressable>
+  );
+}
 
 const SL = {
   bg:     '#050912',
@@ -23,28 +52,73 @@ const SL = {
 
 const DOW_FULL = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'];
 
+// Full window width — how far the body slides in from the right on entrance.
+const WIN_W = Dimensions.get('window').width;
+// Shared swipe duration — matches WorkoutsScreen so both directions feel identical.
+const SWIPE_MS = 300;
+
+// Current weekday (0=Sun … 6=Sat) — highlighted in the grid like Workouts' "today".
+const TODAY_DOW = new Date().getDay();
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 // "Manage My Training" — the recurring WEEKLY SKELETON editor. Assign default
 // workout(s) to each weekday (Sun–Sat). No dates, no completion here: those live
 // on the dated Workouts screen, which fills each real date from this skeleton and
 // lets specific days be overridden. Writes `weekly_workout_template`.
 
-export default function StudentDetailScreen({ navigation }) {
+export default function StudentDetailScreen({ navigation, route }) {
   const { selectedStudent: student, setSelectedDay: setContextDay } = useCoach();
 
   // Data
   const [templateRows,    setTemplateRows]    = useState([]);  // weekly_workout_template rows
   const [studentWorkouts, setStudentWorkouts] = useState([]);  // all workouts for this player
+  // Seed from the values the Workouts screen already had (passed on navigate) so
+  // the header shows LVL · CLASS immediately — the fetch below just reconfirms them.
+  const [lvl,             setLvl]             = useState(route?.params?.lvl ?? 0);
+  const [className,       setClassName]       = useState(route?.params?.className ?? null);
   const [loading,         setLoading]         = useState(true);
 
   // Selected weekday (0=Sun … 6=Sat) — default today's weekday.
   const [selectedDow, setSelectedDow] = useState(() => new Date().getDay());
 
-  // Day editor modal
-  const [editorVisible,  setEditorVisible]  = useState(false);
-  const [editingDow,     setEditingDow]     = useState(null);
-  const [pendingWorkout, setPendingWorkout] = useState(undefined);
-  const [saving,         setSaving]         = useState(false);
+  // ── Entrance swipe (ONLY when arriving from the Workouts → Forge press) ──
+  // The body slides in from the right while the headline stays put, continuing the
+  // Workouts swipe. Gated on the `fromForge` param and run on mount only, so
+  // returning here from a child screen (Create/Library/Quests) does NOT replay it.
+  // Captured ONCE at mount: did we arrive via the Workouts → Forge swipe? Gates
+  // both the entrance slide-in and the BACK swipe-out to that specific flow.
+  const cameFromForge = useRef(route?.params?.fromForge === true).current;
+  const enterAnim = useRef(new Animated.Value(cameFromForge ? 0 : 1)).current;
+  const backingRef = useRef(false);
+  useEffect(() => {
+    if (!cameFromForge) return;
+    const anim = Animated.timing(enterAnim, {
+      toValue: 1, duration: SWIPE_MS, easing: Easing.out(Easing.cubic), useNativeDriver: true,
+    });
+    anim.start();
+    // Consume the flag so it can't replay on a later focus.
+    navigation.setParams({ fromForge: undefined });
+    return () => anim.stop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const enterBodyX = enterAnim.interpolate({ inputRange: [0, 1], outputRange: [WIN_W, 0] });
+  const enterBodyO = enterAnim.interpolate({ inputRange: [0, 0.25, 1], outputRange: [0, 1, 1] });
+
+  // BACK: swipe the body right (reverse of the entrance) then pop. Only for the
+  // Forge flow; other entries just go back normally. We re-arm `fromForge` so the
+  // pop's own transition is 'none' — leaving ONLY our swipe (and no hologram, since
+  // the Workouts screen underneath is already mounted, not rebuilt).
+  const onBack = useCallback(() => {
+    if (!cameFromForge) { navigation.goBack(); return; }
+    if (backingRef.current) return;
+    backingRef.current = true;
+    navigation.setParams({ fromForge: true });
+    Animated.timing(enterAnim, {
+      toValue: 0, duration: SWIPE_MS, easing: Easing.in(Easing.cubic), useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) navigation.goBack();
+    });
+  }, [cameFromForge, enterAnim, navigation]);
 
   const workoutsById = useMemo(
     () => Object.fromEntries(studentWorkouts.map(w => [w.id, w])),
@@ -64,7 +138,7 @@ export default function StudentDetailScreen({ navigation }) {
 
         supabase
           .from('workouts')
-          .select('id, title, purpose')
+          .select('id, title, purpose, category')
           .eq('assigned_to', student.id)
           .order('title', { ascending: true }),
       ]);
@@ -74,6 +148,24 @@ export default function StudentDetailScreen({ navigation }) {
 
       setTemplateRows(templateRes.data ?? []);
       setStudentWorkouts(workoutsRes.data ?? []);
+
+      // Hero headline data — LVL + CLASS, matching the Workouts screen header.
+      const { data: prof } = await supabase
+        .from('profiles')
+        .select('class_id')
+        .eq('id', student.id)
+        .single();
+      if (prof?.class_id) {
+        const [{ data: classData }, lvlVal] = await Promise.all([
+          supabase.from('classes').select('name').eq('id', prof.class_id).maybeSingle(),
+          computeLvl(student.id, prof.class_id),
+        ]);
+        setClassName(classData?.name ?? null);
+        setLvl(lvlVal ?? 0);
+      } else {
+        setClassName(null);
+        setLvl(0);
+      }
     } catch (e) {
       console.error('[StudentDetail] fetchData:', e);
     }
@@ -108,282 +200,182 @@ export default function StudentDetailScreen({ navigation }) {
     await fetchData();
   }
 
-  function openEditor(dow) {
-    setEditingDow(dow);
-    setPendingWorkout(undefined);
-    setEditorVisible(true);
-  }
-
-  async function saveDay() {
-    if (editingDow == null || !pendingWorkout) return;
-    setSaving(true);
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      const { error } = await supabase
-        .from('weekly_workout_template')
-        .insert({
-          student_id:  student.id,
-          coach_id:    user.id,
-          day_of_week: editingDow,
-          workout_id:  pendingWorkout.id,
-        });
-      if (error) { alert('Save failed: ' + error.message); setSaving(false); return; }
-      setEditorVisible(false);
-      await fetchData();
-    } catch (e) {
-      alert('Save failed: ' + (e.message ?? 'Something went wrong.'));
-    }
-    setSaving(false);
-  }
-
   // ── Render ─────────────────────────────────────────────────────────────────
 
   if (!student) {
     return (
-      <View style={[styles.container, { justifyContent: 'center', alignItems: 'center', gap: 16 }]}>
-        <Text style={{ fontFamily: F.body, color: SL.text, fontSize: 14, letterSpacing: 1 }}>
-          No student selected.
-        </Text>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Text style={{ fontFamily: F.bodyMed, color: SL.accent, fontSize: 13, letterSpacing: 2 }}>← GO BACK</Text>
-        </TouchableOpacity>
-      </View>
+      <ScreenFrame maxWidth={CARD_W} holoEntry={false}>
+        <View style={{ paddingVertical: 120, alignItems: 'center', gap: 16 }}>
+          <Text style={{ fontFamily: F.body, color: SL.text, fontSize: 14, letterSpacing: 1 }}>
+            No student selected.
+          </Text>
+          <PillButton label="← GO BACK" onPress={() => navigation.goBack()} />
+        </View>
+      </ScreenFrame>
     );
   }
 
   return (
-    <View style={styles.container}>
-      {/* Header */}
+    <ScreenFrame maxWidth={CARD_W} ready={!loading} holoEntry={false}>
+      <View style={styles.card}>
+      {/* Hero header — matches the Workouts screen: white shining name + LVL · CLASS. */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}>
-          <Text style={styles.backText}>← BACK</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>{student.full_name?.toUpperCase()}</Text>
-        <Text style={styles.level}>WEEKLY PLAN</Text>
+        <View style={styles.backRow}>
+          <PillButton label="← BACK" size="sm" onPress={onBack} />
+        </View>
+        <View style={styles.accessoriesRow}>
+          <PillButton
+            label="ACCESSORIES"
+            size="sm"
+            tone="gold"
+            onPress={() => navigation.navigate('WeeklyAccessories')}
+          />
+        </View>
+        <Text style={styles.studentName}>
+          {student.full_name?.toUpperCase() ?? '—'}
+        </Text>
+        <View style={styles.statRow}>
+          <Text style={styles.level}>LVL {lvl ?? '—'}</Text>
+          {className && (
+            <>
+              <View style={styles.statDot} />
+              <Text style={styles.className}>{className.toUpperCase()}</Text>
+            </>
+          )}
+        </View>
         <View style={styles.headerDivider} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.body}>
-        {/* Daily quests */}
-        <View style={styles.questRow}>
-          <TouchableOpacity
-            style={styles.dailyQuestBtn}
+      <Animated.View style={[styles.body, { transform: [{ translateX: enterBodyX }], opacity: enterBodyO }]}>
+        {/* All four actions in one forge-styled row. */}
+        <View style={styles.actionRow}>
+          <ForgeButton
+            label="DAILY QUESTS"
             onPress={() => navigation.navigate('DailyQuest', { student })}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.dailyQuestBtnText}>📋 MANAGE DAILY QUESTS</Text>
-          </TouchableOpacity>
+          />
+          <ForgeButton
+            label="WORKOUTS LIBRARY"
+            onPress={() => navigation.navigate('EliteWorkouts')}
+          />
+          <ForgeButton
+            label="CREATE WORKOUT"
+            onPress={() => {
+              setContextDay({ label: DAY_LABELS[selectedDow], dayOfWeek: selectedDow });
+              navigation.navigate('CreateWorkout');
+            }}
+          />
+          <ForgeButton
+            label="MY WORKOUTS"
+            onPress={() => navigation.navigate('AllWorkouts')}
+          />
         </View>
 
-        {loading ? (
-          <ActivityIndicator color={SL.accent} style={{ marginTop: 40 }} />
-        ) : (
-          <>
-            <Text style={styles.skeletonHint}>
-              YOUR RECURRING WEEK · repeats every week. Edit specific dates on the Workouts tab.
-            </Text>
-
-            {/* Weekday skeleton — SUN…SAT */}
+            {/* Weekday skeleton — SUN…SAT (mirrors the Workouts week grid) */}
             <View style={styles.weekGrid}>
               {DAY_LABELS.map((label, dow) => {
                 const dayWorkouts = getDowWorkouts(dow);
                 const isSelected  = dow === selectedDow;
+                const isToday     = dow === TODAY_DOW;
                 return (
                   <TouchableOpacity
                     key={label}
-                    style={[styles.dayNode, isSelected && styles.dayNodeSelected]}
+                    style={[
+                      styles.dayNode,
+                      isToday && !isSelected && styles.dayNodeToday,
+                      isSelected && styles.dayNodeSelected,
+                    ]}
                     onPress={() => setSelectedDow(dow)}
                     activeOpacity={0.75}
                   >
-                    <Text style={[styles.dayLabel, isSelected && styles.dayLabelSel]}>{label}</Text>
-                    {dayWorkouts.length > 0 ? (
-                      <>
-                        <Text
-                          style={[styles.dayWorkoutName, isSelected && styles.dayWorkoutNameSel]}
-                          numberOfLines={2}
-                        >
-                          {dayWorkouts[0].title?.toUpperCase()}
-                          {dayWorkouts.length > 1 ? ` +${dayWorkouts.length - 1}` : ''}
-                        </Text>
-                        <View style={styles.dotsRow}>
-                          {dayWorkouts.map((_, di) => (
-                            <View key={di} style={styles.dot} />
-                          ))}
-                        </View>
-                      </>
-                    ) : (
-                      <Text style={styles.dayRest}>REST</Text>
+                    <Text style={[styles.dayLabel, (isSelected || isToday) && styles.dayLabelSel]}>
+                      {label}
+                    </Text>
+                    {/* A rest day is simply a day with no accent dot — no label. */}
+                    {dayWorkouts.length > 0 && (
+                      <View style={styles.dotsRow}>
+                        {dayWorkouts.map((w, di) => {
+                          const tc = accentFor(w.category);
+                          return (
+                            <View key={di} style={[styles.dot, tc && { backgroundColor: tc, shadowColor: tc, shadowOpacity: 0.9, shadowRadius: 3 }]} />
+                          );
+                        })}
+                      </View>
                     )}
+                    {isToday && <View style={styles.todayBar} />}
                   </TouchableOpacity>
                 );
               })}
             </View>
 
-            {/* Selected weekday detail */}
+            {/* Selected weekday detail — FIXED height so the card never resizes
+                with the day's data (rest day vs. 1+ workouts); overflow scrolls. */}
             <View style={styles.dayCard}>
               <View style={styles.dayCardHeader}>
                 <Text style={styles.dayCardDayName}>{DOW_FULL[selectedDow]}</Text>
-                <Text style={styles.dayCardDate}>Every week</Text>
               </View>
 
-              {selectedWorkouts.length > 0 ? (
-                selectedWorkouts.map(workout => (
-                  <View key={workout.templateId} style={styles.assignedWorkoutCard}>
-                    <View style={styles.assignedWorkoutCardHead}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.workoutTitle}>{workout.title?.toUpperCase()}</Text>
+              <ScrollView
+                style={styles.dayCardBody}
+                contentContainerStyle={[
+                  styles.dayCardBodyContent,
+                  (loading || selectedWorkouts.length === 0) && styles.dayCardBodyEmpty,
+                ]}
+                showsVerticalScrollIndicator={false}
+              >
+                {loading ? (
+                  <View style={styles.restCard}>
+                    <ActivityIndicator color={SL.accent} size="large" />
+                  </View>
+                ) : selectedWorkouts.length > 0 ? (
+                  selectedWorkouts.map(workout => {
+                    const tc = accentFor(workout.category); // accessory/legs glow, else null
+                    return (
+                    <View key={workout.templateId} style={[styles.workoutCard, tc && { borderLeftColor: tc, shadowColor: tc, shadowOpacity: 0.4, shadowRadius: 8 }]}>
+                      <View style={styles.workoutInfo}>
+                        <View style={styles.workoutTitleRow}>
+                          <Text style={[styles.workoutTitle, tc && { color: tc }]} numberOfLines={1}>{workout.title?.toUpperCase()}</Text>
+                          {tc && (
+                            <View style={[styles.typeTag, { borderColor: tc }]}>
+                              <Text style={[styles.typeTagText, { color: tc }]}>{categoryMeta(workout.category).l}</Text>
+                            </View>
+                          )}
+                        </View>
                         {workout.purpose ? (
-                          <Text style={styles.workoutPurpose}>{workout.purpose}</Text>
+                          <Text style={styles.workoutPurpose} numberOfLines={1}>{workout.purpose}</Text>
                         ) : null}
                       </View>
-                      <TouchableOpacity
-                        style={styles.workoutRemoveBtn}
-                        onPress={() => handleRemoveFromDay(workout.templateId)}
-                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      >
-                        <Text style={styles.workoutRemoveBtnText}>✕</Text>
-                      </TouchableOpacity>
+                      <View style={styles.cardActionRow}>
+                        <PillButton
+                          label="VIEW"
+                          variant="solid"
+                          size="sm"
+                          style={styles.actionBtn}
+                          textStyle={styles.actionBtnText}
+                          onPress={() => navigation.navigate('WorkoutDetail', { workout })}
+                        />
+                        <PillButton
+                          label="✕"
+                          tone="danger"
+                          size="sm"
+                          style={styles.actionBtn}
+                          textStyle={styles.actionBtnText}
+                          onPress={() => handleRemoveFromDay(workout.templateId)}
+                        />
+                      </View>
                     </View>
-                    <TouchableOpacity
-                      style={styles.viewBtn}
-                      onPress={() => navigation.navigate('WorkoutDetail', { workout })}
-                      activeOpacity={0.8}
-                    >
-                      <Text style={styles.viewBtnText}>VIEW DETAILS</Text>
-                    </TouchableOpacity>
+                    );
+                  })
+                ) : (
+                  <View style={styles.restCard}>
+                    <Text style={styles.restLabel}>REST DAY</Text>
                   </View>
-                ))
-              ) : (
-                <View style={styles.restCard}>
-                  <Text style={styles.restLabel}>REST DAY</Text>
-                  <Text style={styles.restSub}>No workout in the weekly plan yet.</Text>
-                </View>
-              )}
+                )}
+              </ScrollView>
             </View>
 
-            {/* Bottom actions */}
-            <View style={styles.bottomActionsRow}>
-              <TouchableOpacity
-                style={styles.assignBtn}
-                onPress={() => openEditor(selectedDow)}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.assignBtnText}>
-                  {selectedWorkouts.length > 0 ? '+ ADD ANOTHER' : '+ ASSIGN WORKOUT'}
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.newWorkoutBtn}
-                onPress={() => {
-                  setContextDay({ label: DAY_LABELS[selectedDow], dayOfWeek: selectedDow });
-                  navigation.navigate('CreateWorkout');
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.newWorkoutBtnText}>+ CREATE NEW WORKOUT</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.viewAllBtn}
-                onPress={() => navigation.navigate('AllWorkouts')}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.viewAllBtnText}>VIEW ALL WORKOUTS</Text>
-              </TouchableOpacity>
-            </View>
-          </>
-        )}
-      </ScrollView>
-
-      {/* ── Day Editor Modal ── */}
-      <Modal
-        visible={editorVisible}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setEditorVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.editorBox}>
-            <Text style={styles.editorTitle}>
-              {editingDow != null ? DOW_FULL[editingDow] : ''} · EVERY WEEK
-            </Text>
-
-            {editingDow != null && getDowWorkouts(editingDow).length > 0 && (
-              <>
-                <Text style={styles.editorSectionLabel}>ALREADY IN PLAN</Text>
-                <View style={styles.assignedChips}>
-                  {getDowWorkouts(editingDow).map(w => (
-                    <View key={w.templateId} style={styles.assignedChip}>
-                      <Text style={styles.assignedChipText}>✓ {w.title?.toUpperCase()}</Text>
-                    </View>
-                  ))}
-                </View>
-              </>
-            )}
-
-            <Text style={styles.editorSectionLabel}>ADD WORKOUT</Text>
-            <ScrollView style={styles.workoutList} showsVerticalScrollIndicator={false}>
-              {studentWorkouts
-                .filter(w => editingDow != null
-                  ? !getDowWorkouts(editingDow).some(dw => dw.id === w.id)
-                  : true
-                )
-                .map(w => (
-                  <TouchableOpacity
-                    key={w.id}
-                    style={[
-                      styles.workoutOption,
-                      pendingWorkout?.id === w.id && styles.workoutOptionSelected,
-                    ]}
-                    onPress={() => setPendingWorkout(w)}
-                  >
-                    <View style={{ flex: 1 }}>
-                      <Text style={[
-                        styles.workoutOptionText,
-                        pendingWorkout?.id === w.id && styles.workoutOptionTextSelected,
-                      ]}>
-                        {w.title}
-                      </Text>
-                      {w.purpose ? (
-                        <Text style={styles.workoutOptionSub}>{w.purpose}</Text>
-                      ) : null}
-                    </View>
-                    {pendingWorkout?.id === w.id && <Text style={styles.checkMark}>✓</Text>}
-                  </TouchableOpacity>
-                ))
-              }
-              {studentWorkouts.length === 0 && (
-                <Text style={styles.noWorkoutsText}>
-                  No workouts yet.{'\n'}Use "Create New Workout" first.
-                </Text>
-              )}
-            </ScrollView>
-
-            <View style={styles.editorButtons}>
-              <TouchableOpacity
-                style={styles.editorCancelBtn}
-                onPress={() => setEditorVisible(false)}
-                disabled={saving}
-              >
-                <Text style={styles.editorCancelText}>CANCEL</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.editorSaveBtn, (saving || !pendingWorkout) && { opacity: 0.4 }]}
-                onPress={saveDay}
-                disabled={saving || !pendingWorkout}
-              >
-                {saving
-                  ? <ActivityIndicator color="#fff" size="small" />
-                  : <Text style={styles.editorSaveText}>ADD</Text>
-                }
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-    </View>
+      </Animated.View>
+      </View>
+    </ScreenFrame>
   );
 }
 
@@ -392,149 +384,211 @@ export default function StudentDetailScreen({ navigation }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SL.bg },
 
+  // Fixed card height so the frame is the same size regardless of data/loading.
+  card: { height: CARD_H },
+  body: { flex: 1, width: '100%', paddingBottom: 12 },
+
+  // ── Forge-style action buttons (4-up row) ──
+  // Tiles are tall so this block occupies the same vertical zone the Workouts
+  // screen uses for its TRAINING FORGE button + week-nav row — keeping the grid
+  // and day panel at an identical position/height across both screens.
+  actionRow: {
+    flexDirection: 'row',
+    marginHorizontal: 16,
+    marginTop: 18,
+    marginBottom: 34,
+    gap: 8,
+  },
+  forgeBtn: {
+    flex: 1,
+    minHeight: 100,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 4,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: '#5AC8FA',          // bright static ice edge
+    backgroundColor: '#0a1626',
+    shadowColor: '#5AC8FA',          // matching glow halo
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 16,
+  },
+  // A faint brighter hairline just inside the edge → a "polished glass" sheen.
+  forgeBtnInner: {
+    position: 'absolute',
+    top: 2,
+    left: 2,
+    right: 2,
+    bottom: 2,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(159,228,255,0.25)',
+  },
+  forgeBtnText: {
+    fontFamily: F.heading,
+    fontSize: 14,
+    lineHeight: 18,
+    color: '#FFFFFF',
+    letterSpacing: 0.3,
+    textAlign: 'center',
+    textShadowColor: SL.accent,
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
+  },
+
+  // ── Hero header (must match WorkoutsScreen EXACTLY for the transition) ──
   header: {
-    width: '100%',
-    maxWidth: 1440,
-    alignSelf: 'center',
-    paddingHorizontal: 24,
-    paddingTop: 60,
+    paddingHorizontal: 20,
+    paddingTop: 64,
     paddingBottom: 20,
     alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: SL.border,
   },
-  back:     { alignSelf: 'flex-start', marginBottom: 12 },
-  backText: { fontFamily: F.heading, color: SL.accent, fontSize: 24, letterSpacing: 3, textTransform: 'uppercase' },
-  headerDivider: {
-    height: 1,
-    backgroundColor: SL.accent,
-    opacity: 0.3,
-    alignSelf: 'stretch',
-    marginTop: 16,
+  // BACK pill overlaid top-left so the name stays dead-centered.
+  backRow: {
+    position: 'absolute',
+    top: 20,
+    left: 16,
+    zIndex: 2,
   },
-  title: {
+  // ACCESSORIES pill mirrored top-right (gold), leaving the name centered.
+  accessoriesRow: {
+    position: 'absolute',
+    top: 20,
+    right: 16,
+    zIndex: 2,
+  },
+  studentName: {
     fontFamily: F.heading,
-    fontSize: 56,
-    color: SL.accent,
-    letterSpacing: 6,
+    fontSize: 42,
+    color: '#FFFFFF',
+    letterSpacing: 4,
     textTransform: 'uppercase',
     textAlign: 'center',
+    textShadowColor: SL.accent,
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 18,
+  },
+  statRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 6,
+  },
+  statDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: SL.muted,
   },
   level: {
-    fontFamily: F.heading,
-    fontSize: 28,
+    fontFamily: F.body,
+    fontSize: 26,
     color: SL.text,
-    letterSpacing: 4,
-    marginTop: 8,
-    textAlign: 'center',
+    letterSpacing: 3,
   },
-
-  // Centered, capped width — matches the Home page so the two read consistently.
-  body: { paddingBottom: 48, width: '100%', maxWidth: 1440, alignSelf: 'center' },
-
-  questRow: {
-    flexDirection: 'row',
-    marginHorizontal: 20,
-    marginTop: 16,
-    marginBottom: 14,
-    gap: 12,
-  },
-  dailyQuestBtn: {
-    flex: 1,
-    height: 60,
-    borderWidth: 2,
-    borderColor: SL.accent,
-    borderRadius: 6,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(74,158,191,0.08)',
-  },
-  dailyQuestBtnText: {
-    fontFamily: F.heading,
-    fontSize: 22,
-    color: SL.accent,
-    letterSpacing: 4,
-  },
-
-  skeletonHint: {
+  className: {
     fontFamily: F.bodyMed,
-    fontSize: 16,
-    color: SL.muted,
-    letterSpacing: 1,
-    textAlign: 'center',
-    paddingHorizontal: 16,
-    marginTop: 18,
-    marginBottom: 12,
-    textTransform: 'uppercase',
+    fontSize: 22,
+    color: SL.gold,
+    letterSpacing: 3,
+  },
+  headerDivider: {
+    height: 3,
+    width: 180,
+    backgroundColor: SL.accent,
+    opacity: 0.95,
+    alignSelf: 'center',
+    marginTop: 16,
+    borderRadius: 2,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 12,
   },
 
-  // ── Weekday grid ─────────────────────────────────────────────────────────
+  // ── Weekday grid (matches the Workouts week grid) ──────────────────────────
   weekGrid: {
     flexDirection: 'row',
-    paddingHorizontal: 8,
-    gap: 4,
+    // Align the week strip's outer edges with the day panel below it (dayCard
+    // margin 8 + border 1.5 + padding 20 ≈ 29), leaving space to the frame border.
+    paddingHorizontal: 28,
+    gap: 6,
   },
   dayNode: {
     flex: 1,
-    minHeight: 110,
+    minHeight: 124,
+    overflow: 'hidden',
     backgroundColor: SL.panel,
-    borderRadius: 4,
+    borderRadius: 10,
     borderWidth: 1.5,
     borderColor: SL.border,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 2,
-    gap: 4,
+    paddingVertical: 12,
+    paddingHorizontal: 4,
+    gap: 3,
   },
+  dayNodeToday: { borderColor: SL.accent },
   dayNodeSelected: {
     backgroundColor: '#0a1a2e',
     borderColor: SL.accent,
     borderWidth: 2,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 12,
   },
   dayLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 16,
+    fontFamily: F.heading,
+    fontSize: 18,
     color: SL.muted,
     letterSpacing: 1,
     textTransform: 'uppercase',
   },
   dayLabelSel: { color: SL.accent },
-  dayWorkoutName: {
-    fontFamily: F.bodyMed,
-    fontSize: 14,
-    color: SL.accent,
-    letterSpacing: 0.5,
-    textAlign: 'center',
-    paddingHorizontal: 2,
-    textTransform: 'uppercase',
+  // Absolute-positioned at the bottom so the presence/absence of dots never
+  // shifts the day label — it stays at a constant height across the whole strip.
+  dotsRow: {
+    flexDirection: 'row', gap: 4, justifyContent: 'center',
+    position: 'absolute', bottom: 8, left: 0, right: 0,
   },
-  dayWorkoutNameSel: { color: SL.accent },
-  dotsRow: { flexDirection: 'row', gap: 3, marginTop: 1 },
-  dot: { width: 5, height: 5, backgroundColor: SL.accent },
-  dayRest: {
-    fontFamily: F.bodyMed,
-    fontSize: 14,
-    color: '#2a4a6a',
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
+  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: SL.accent },
+  todayBar: {
+    position: 'absolute',
+    bottom: 0,
+    left: 12,
+    right: 12,
+    height: 3,
+    borderTopLeftRadius: 2,
+    borderTopRightRadius: 2,
+    backgroundColor: SL.accent,
   },
 
-  // ── Selected day panel ────────────────────────────────────────────────────
+  // ── Selected day panel (matches the Workouts day panel) ────────────────────
   dayCard: {
     marginHorizontal: 8,
     marginTop: 14,
+    flex: 1,                     // fills remaining space inside the fixed-height card
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 4,
+    borderRadius: 12,
     padding: 20,
     gap: 12,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.15,
+    shadowRadius: 16,
   },
-  dayCardHeader: { gap: 4 },
+  dayCardBody: { flex: 1 },
+  dayCardBodyContent: { gap: 12, flexGrow: 1, justifyContent: 'flex-start' },
+  dayCardBodyEmpty: { justifyContent: 'center' },
+  dayCardHeader: { gap: 4, minHeight: 36 },
   dayCardDayName: {
     fontFamily: F.heading,
-    fontSize: 26,
+    fontSize: 30,
     color: SL.accent,
     letterSpacing: 3,
     textTransform: 'uppercase',
@@ -545,305 +599,52 @@ const styles = StyleSheet.create({
     color: SL.muted,
     letterSpacing: 1,
   },
-  assignedWorkoutCard: {
+  // Session card — matches the Workouts day panel: title left, action pills right.
+  workoutCard: {
     backgroundColor: SL.bg,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 4,
-    padding: 14,
-    gap: 12,
-  },
-  assignedWorkoutCardHead: {
+    borderLeftWidth: 4,
+    borderLeftColor: SL.accent,
+    borderRadius: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: 12,
   },
+  workoutInfo: { flex: 1, gap: 2 },
+  workoutTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   workoutTitle: {
     fontFamily: F.heading,
-    fontSize: 26,
+    fontSize: 19,
     color: SL.accent,
-    letterSpacing: 2,
+    letterSpacing: 1.5,
     textTransform: 'uppercase',
+    flexShrink: 1,
   },
+  typeTag: {
+    borderWidth: 1, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 1,
+  },
+  typeTagText: { fontFamily: F.bodyMed, fontSize: 10, letterSpacing: 1.5 },
   workoutPurpose: {
-    fontFamily: F.bodyMed,
-    fontSize: 20,
-    color: SL.text,
+    fontFamily: F.body,
+    fontSize: 13,
+    color: SL.muted,
     letterSpacing: 0.5,
-    marginTop: 2,
   },
-  workoutRemoveBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 4,
-    borderWidth: 1.5,
-    borderColor: SL.danger,
-    justifyContent: 'center',
+  cardActionRow: {
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
     flexShrink: 0,
-    marginTop: 2,
   },
-  workoutRemoveBtnText: { fontFamily: F.body, fontSize: 12, color: SL.danger },
-  viewBtn: {
-    backgroundColor: SL.accent,
-    borderRadius: 6,
-    height: 44,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  viewBtnText: {
-    fontFamily: F.heading,
-    fontSize: 20,
-    color: SL.bg,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
-  },
+  actionBtn: { paddingHorizontal: 12 },
+  actionBtnText: { fontSize: 14, letterSpacing: 1 },
   restCard: { alignItems: 'center', gap: 8, paddingVertical: 16 },
   restLabel: { fontFamily: F.heading, fontSize: 26, color: SL.muted, letterSpacing: 5 },
   restSub:   { fontFamily: F.bodyMed, fontSize: 20, color: SL.muted, letterSpacing: 0.5 },
 
-  bottomActionsRow: {
-    flexDirection: 'row',
-    marginHorizontal: 8,
-    marginTop: 14,
-    gap: 10,
-  },
-  assignBtn: {
-    flex: 1,
-    height: 64,
-    borderWidth: 2,
-    borderColor: SL.accent,
-    borderRadius: 6,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(74,158,191,0.1)',
-  },
-  assignBtnText: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 2.5,
-    textTransform: 'uppercase',
-    textAlign: 'center',
-  },
-  newWorkoutBtn: {
-    flex: 1,
-    height: 64,
-    borderWidth: 2,
-    borderColor: SL.accent,
-    borderRadius: 6,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(74,158,191,0.1)',
-  },
-  newWorkoutBtnText: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 2.5,
-    textTransform: 'uppercase',
-    textAlign: 'center',
-  },
-  viewAllBtn: {
-    flex: 1,
-    height: 64,
-    borderWidth: 2,
-    borderColor: SL.accent,
-    borderRadius: 6,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(74,158,191,0.1)',
-  },
-  viewAllBtnText: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 2.5,
-    textTransform: 'uppercase',
-    textAlign: 'center',
-  },
-
-  // ── Day Editor Modal ──────────────────────────────────────────────────────
-  // Centered system-style dialog (not a bottom sheet).
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.85)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-  },
-  // The dialog itself — rounded, with the cool ice-glow frame.
-  editorBox: {
-    width: '100%',
-    maxWidth: 560,
-    backgroundColor: SL.panel,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 18,
-    padding: 24,
-    paddingBottom: 28,
-    maxHeight: '85%',
-    shadowColor: SL.accent,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.3,
-    shadowRadius: 24,
-  },
-  editorTitle: {
-    fontFamily: F.heading,
-    fontSize: 26,
-    color: SL.accent,
-    letterSpacing: 4,
-    textTransform: 'uppercase',
-    textAlign: 'center',
-    marginBottom: 20,
-  },
-  assignedChips: { gap: 6, marginBottom: 16 },
-  assignedChip: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderWidth: 1,
-    borderColor: SL.accent,
-    borderRadius: 4,
-    backgroundColor: 'rgba(74,158,191,0.08)',
-  },
-  assignedChipText: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  editorSectionLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.muted,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
-    marginBottom: 10,
-  },
-  workoutList: { maxHeight: 240, marginBottom: 20 },
-  workoutOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: SL.border,
-  },
-  workoutOptionSelected: {
-    backgroundColor: 'rgba(74,158,191,0.08)',
-    borderBottomWidth: 0,
-    marginBottom: 2,
-    borderWidth: 1,
-    borderColor: SL.accent,
-    borderRadius: 4,
-  },
-  workoutOptionText: {
-    fontFamily: F.bodyMed,
-    fontSize: 22,
-    color: SL.text,
-    letterSpacing: 0.5,
-    textTransform: 'uppercase',
-  },
-  workoutOptionTextSelected: { color: SL.accent },
-  workoutOptionSub: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.muted,
-    letterSpacing: 0.5,
-    marginTop: 2,
-  },
-  checkMark: { fontFamily: F.bodyMed, fontSize: 22, color: SL.accent, marginLeft: 8 },
-  noWorkoutsText: {
-    fontFamily: F.bodyMed,
-    fontSize: 20,
-    color: SL.muted,
-    letterSpacing: 0.5,
-    textAlign: 'center',
-    marginVertical: 24,
-    lineHeight: 28,
-  },
-  editorButtons: { flexDirection: 'row', gap: 10 },
-  editorCancelBtn: {
-    flex: 1,
-    height: 36,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 6,
-  },
-  editorCancelText: {
-    fontFamily: F.bodyMed,
-    fontSize: 20,
-    color: SL.muted,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-  },
-  editorSaveBtn: {
-    flex: 2,
-    height: 44,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: SL.accent,
-    borderRadius: 6,
-  },
-  editorSaveText: {
-    fontFamily: F.heading,
-    fontSize: 22,
-    color: SL.bg,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
-  },
-
-  // ── Phrase Modal ──────────────────────────────────────────────────────────
-  modalBox: {
-    backgroundColor: SL.panel,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    padding: 24,
-    gap: 16,
-    margin: 24,
-  },
-  modalTitle: {
-    fontFamily: F.heading,
-    fontSize: 24,
-    color: SL.accent,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
-    textAlign: 'center',
-  },
-  modalButtons: { flexDirection: 'row', gap: 10 },
-  modalCancel: {
-    flex: 1,
-    height: 36,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 6,
-  },
-  modalCancelText: {
-    fontFamily: F.bodyMed,
-    fontSize: 20,
-    color: SL.muted,
-    letterSpacing: 1.5,
-    textTransform: 'uppercase',
-  },
-  modalSave: {
-    flex: 1,
-    height: 44,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: SL.accent,
-    borderRadius: 6,
-  },
-  modalSaveText: {
-    fontFamily: F.heading,
-    fontSize: 22,
-    color: SL.bg,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
-  },
 });

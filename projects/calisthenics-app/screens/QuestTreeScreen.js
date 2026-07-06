@@ -1,14 +1,19 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   View, Text, StyleSheet, ScrollView, ActivityIndicator,
-  TouchableOpacity,
+  TouchableOpacity, Modal, Animated, Easing,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { supabase } from '../lib/supabase';
 import { F } from '../constants/fonts';
-import { ShimmerFrame, BORDEAUX } from '../components/Shimmer';
+import { ShimmerFrame, ShimmerText, ShimmerFill, GOLD, BLUE } from '../components/Shimmer';
+import PillButton from '../components/PillButton';
 import { requiredMainQuestIds } from '../lib/prestige';
+
+// An SVG path whose props (here strokeDashoffset) can be driven by an Animated
+// value — lets completed connectors carry a travelling "energy" dash.
+const AnimatedPath = Animated.createAnimatedComponent(Path);
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
@@ -27,9 +32,9 @@ const SL = {
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
-const NODE_W       = 420;
-const NODE_H       = 82;
-const COL_GAP      = 70;
+const NODE_W       = 380;
+const NODE_H       = 76;
+const COL_GAP      = 60;
 const RANK_GAP     = 76;
 const TIER_GAP     = 96;      // extra vertical room reserved around a TIER divider
 const TREE_PAD_H   = 16;
@@ -42,17 +47,17 @@ const BEND_NEAR_CHILD = 12;   // horizontal jog sits this many px above child to
 // Width is fixed by column geometry, so we can't widen a node without colliding
 // with its neighbours. Instead each node's HEIGHT is sized to how many lines its
 // name needs (up to a cap), so long text wraps fully and short nodes stay compact.
-const NODE_LINE_H    = 30;   // must match styles.questName lineHeight
+const NODE_LINE_H    = 27;   // must match styles.questName lineHeight
 const NODE_V_PAD     = 12;   // must match styles.questCard paddingVertical
 // Reserved row for the DONE / +LVL badge + the gap above it. Must comfortably
 // cover the badge's real rendered height (text lineHeight 22 + 4 padding = 26)
 // plus styles.questCard gap (6) plus slack so the title is never clipped.
-const NODE_BADGE_H   = 42;
+const NODE_BADGE_H   = 38;
 const NODE_MAX_LINES = 3;
 
 function nodeLineCount(name, nodeW) {
   const usable  = nodeW - 32;                       // minus horizontal padding
-  const perLine = Math.max(8, Math.floor(usable / 16)); // ~16px per bold char @27
+  const perLine = Math.max(8, Math.floor(usable / 14)); // ~14px per bold char @24
   const len     = (name?.length ?? 0) + 3;          // +3 buffer for the 🔒 prefix
   return Math.min(NODE_MAX_LINES, Math.max(1, Math.ceil(len / perLine)));
 }
@@ -156,9 +161,9 @@ function computeTier2Set(quests) {
 }
 
 // Handstand-specific layout constants — narrower columns, fixed split offset
-const HS_NODE_W       = 400;
-const HS_COL_GAP      = 56;
-const HS_SPLIT_OFFSET = 230;
+const HS_NODE_W       = 360;
+const HS_COL_GAP      = 50;
+const HS_SPLIT_OFFSET = 205;
 
 // ─── Handstand layout — strict 3-column tree with intra-branch splits ─────────
 //
@@ -811,10 +816,293 @@ function computeLayout(quests, { applyTiers = false, chain = null } = {}) {
   return { positions, firstNodeOfBranch, rankY, width, height };
 }
 
+// A number that RUSHES up from 0 to `value` on mount — the count-up flourish the
+// header stat chips share with the Skills LVL number. Renders a bare <Text> so it
+// inherits whatever styled <Text> it's nested inside. Color can't run on the
+// native driver, so a JS listener feeds the displayed integer.
+function Ticker({ value, duration = 1000, delay = 250 }) {
+  const v = useRef(new Animated.Value(0)).current;
+  const [shown, setShown] = useState(0);
+  useEffect(() => {
+    v.setValue(0);
+    const id = v.addListener(({ value: x }) => setShown(Math.round(x)));
+    const anim = Animated.timing(v, {
+      toValue: value, duration, delay,
+      easing: Easing.out(Easing.cubic), useNativeDriver: false,
+    });
+    anim.start();
+    return () => { anim.stop(); v.removeListener(id); };
+  }, [value, v, duration, delay]);
+  return <Text>{shown}</Text>;
+}
+
+// The hero quest name makes an ENTRANCE — fades, rises and scales up into place
+// on mount. Its color and ice-glow (styles.chainTitle) are untouched; only the
+// arrival is animated, so "HANDSTAND" lands with weight.
+function HeroTitle({ text }) {
+  const a = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const anim = Animated.timing(a, {
+      toValue: 1, duration: 600, easing: Easing.out(Easing.cubic), useNativeDriver: true,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [a]);
+  const translateY = a.interpolate({ inputRange: [0, 1], outputRange: [14, 0] });
+  const scale      = a.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1] });
+  return (
+    <Animated.View style={{ opacity: a, transform: [{ translateY }, { scale }] }}>
+      <Text style={styles.chainTitle}>{text}</Text>
+    </Animated.View>
+  );
+}
+
+// Quest-type emblem — a sleek capsule with a faint inner frame line (the "tech"
+// double-border) and a glowing gem flanking each side (hollow diamond + lit core,
+// the same gem language as the class crest / prestige seals). Ice for main quests,
+// gold for side quests.
+function QuestTypeBadge({ questType }) {
+  const isMain = questType === 'main';
+  const tone   = isMain ? SL.accent : SL.gold;
+
+  const Gem = () => (
+    <View style={[styles.typeGem, { borderColor: tone }]}>
+      <View style={[styles.typeGemCore, { backgroundColor: tone, shadowColor: tone }]} />
+    </View>
+  );
+
+  return (
+    <View style={[styles.typeBadge, !isMain && styles.typeBadgeSide]}>
+      <View style={[styles.typeBadgeInner, !isMain && { borderColor: 'rgba(255,215,0,0.3)' }]} pointerEvents="none" />
+      <Gem />
+      <Text style={[styles.typeBadgeText, { color: tone }]}>
+        {isMain ? 'MAIN QUEST' : 'SIDE QUEST'}
+      </Text>
+      <Gem />
+    </View>
+  );
+}
+
+// The header status HUD — a big completion meter + ticking stat readouts. The
+// fill GROWS in on mount and carries a live shimmer (ice while in progress, GOLD
+// once every node is cleared); at 100% it breathes a gold glow and a "MASTERED"
+// seal appears overhead — the payoff for finishing a whole quest line.
+function QuestHUD({ done, total, earnedLvl }) {
+  const pct      = total > 0 ? done / total : 0;
+  const complete = total > 0 && done === total;
+
+  const grow    = useRef(new Animated.Value(0)).current;
+  const breathe = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    grow.setValue(0);
+    const anim = Animated.timing(grow, {
+      toValue: 1, duration: 1100, delay: 350,
+      easing: Easing.out(Easing.cubic), useNativeDriver: false,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [pct, grow]);
+
+  useEffect(() => {
+    if (!complete) return;
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(breathe, { toValue: 1, duration: 1300, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(breathe, { toValue: 0, duration: 1300, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [complete, breathe]);
+
+  // min 3% so even 0-progress shows a glint of fill at the left.
+  const fillW       = grow.interpolate({ inputRange: [0, 1], outputRange: ['0%', `${Math.max(pct * 100, 3)}%`] });
+  const glowOpacity = breathe.interpolate({ inputRange: [0, 1], outputRange: [0.2, 0.65] });
+
+  return (
+    <View style={styles.hud}>
+      {complete && (
+        <View style={styles.masteredWrap}>
+          <ShimmerText text="✦ MASTERED ✦" style={styles.masteredText} colors={GOLD} direction="ltr" active />
+        </View>
+      )}
+
+      <View style={styles.meterTrack}>
+        <Animated.View style={[styles.meterFillWrap, { width: fillW }]}>
+          <ShimmerFill style={styles.meterFill} colors={complete ? GOLD : BLUE} active />
+        </Animated.View>
+        {complete && (
+          <Animated.View pointerEvents="none" style={[styles.meterGlow, { opacity: glowOpacity }]} />
+        )}
+      </View>
+
+      <View style={styles.hudStats}>
+        <Text style={[styles.hudStatNum, complete && styles.hudStatNumGold]}>
+          <Ticker value={done} />/{total}{'  '}
+          <Text style={styles.hudStatTag}>COMPLETE</Text>
+        </Text>
+        <Text style={styles.hudStatNumGold}>
+          +<Ticker value={earnedLvl} />{'  '}
+          <Text style={styles.hudStatTagGold}>LVL EARNED</Text>
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+// One quest node, brought to life. On mount it RISES + fades + scales in, delayed
+// by its `delay` (derived from tree rank) so the whole tree cascades into place
+// from roots to leaves. On press it DIPS to 0.95 under the finger — the tactile
+// "tap me" cue locked nodes deliberately don't get. All the visual states (done /
+// locked / required frame) are unchanged; only motion is added on top.
+function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, onPress }) {
+  const isDone   = state === 'done';
+  const isLocked = state === 'locked';
+
+  const enter = useRef(new Animated.Value(0)).current;
+  const press = useRef(new Animated.Value(0)).current;
+  const pulse = useRef(new Animated.Value(0)).current;
+  const gate  = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const anim = Animated.timing(enter, {
+      toValue: 1, duration: 440, delay,
+      easing: Easing.out(Easing.cubic), useNativeDriver: true,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [enter, delay]);
+
+  // Available-but-not-done nodes BREATHE — a soft ice halo that draws the eye to
+  // the player's next possible move. Only the actionable nodes pulse; done and
+  // locked nodes stay calm.
+  useEffect(() => {
+    if (state !== 'unlocked') return;
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(pulse, { toValue: 1, duration: 1150, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(pulse, { toValue: 0, duration: 1150, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [state, pulse]);
+
+  // CLASS-GATE nodes (prestige requirements for the next class) get their OWN
+  // life: the gold crown ribbon bobs and its halo breathes, in every state, so a
+  // milestone always reads as a milestone — not just "the next tap".
+  useEffect(() => {
+    if (!isRequired) return;
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(gate, { toValue: 1, duration: 1250, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(gate, { toValue: 0, duration: 1250, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [isRequired, gate]);
+
+  const translateY = enter.interpolate({ inputRange: [0, 1], outputRange: [16, 0] });
+  const enterScale = enter.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] });
+  const pressScale = press.interpolate({ inputRange: [0, 1], outputRange: [1, 0.95] });
+  const scale = Animated.multiply(enterScale, pressScale);
+  const dip = to => Animated.timing(press, {
+    toValue: to, duration: to ? 90 : 150, easing: Easing.out(Easing.quad), useNativeDriver: true,
+  }).start();
+
+  return (
+    <Animated.View
+      style={{ width: '100%', height: '100%', opacity: enter, transform: [{ translateY }, { scale }] }}
+    >
+      {state === 'unlocked' && !isRequired && (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.unlockedHalo,
+            { opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.2, 0.9] }) },
+          ]}
+        />
+      )}
+
+      {/* CLASS-GATE breathing gold halo — its own glow, always on for required
+          nodes (replaces the ice halo so the gate reads as gold, not blue). */}
+      {isRequired && (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            styles.gateHalo,
+            { opacity: gate.interpolate({ inputRange: [0, 1], outputRange: [0.3, 0.85] }) },
+          ]}
+        />
+      )}
+      <TouchableOpacity
+        style={[
+          styles.questCard,
+          isDone     && styles.questCardDone,
+          isLocked   && styles.questCardLocked,
+          isRequired && styles.questCardRequired,
+        ]}
+        disabled={isLocked || disabled}
+        activeOpacity={isLocked ? 1 : 0.85}
+        onPress={() => { if (!isLocked) onPress(); }}
+        onPressIn={() => { if (!isLocked) dip(1); }}
+        onPressOut={() => { if (!isLocked) dip(0); }}
+      >
+        {isRequired && (
+          <ShimmerFrame
+            style={[styles.questFrame, { shadowColor: SL.gold }]}
+            colors={GOLD}
+            thickness={4}
+            active
+          />
+        )}
+
+        {/* Floating crown ribbon — marks this node as a gate to the next class.
+            Bobs gently (gate clock) so it always draws the eye. */}
+        {isRequired && (
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.gateRibbonWrap,
+              { transform: [{ translateY: gate.interpolate({ inputRange: [0, 1], outputRange: [0, -3] }) }] },
+            ]}
+          >
+            <View style={styles.gateRibbon}>
+              <Text style={styles.gateRibbonText}>✦ CLASS GATE ✦</Text>
+            </View>
+          </Animated.View>
+        )}
+        <Text
+          style={[
+            styles.questName,
+            isDone   && styles.questNameDone,
+            isLocked && styles.questNameLocked,
+          ]}
+          numberOfLines={nodeLineCount(quest.name, nodeWidth)}
+        >
+          {isLocked ? '🔒 ' : ''}{quest.name}
+        </Text>
+
+        <View style={styles.nodeBottom}>
+          {isDone ? (
+            <View style={styles.doneBadge}>
+              <Text style={styles.doneBadgeText}>
+                ✓ DONE{quest.lvl_reward > 0 ? ` · +${quest.lvl_reward}` : ''}
+              </Text>
+            </View>
+          ) : quest.lvl_reward > 0 ? (
+            <View style={[styles.rewardBadge, isLocked && { opacity: 0.4 }]}>
+              <Text style={styles.rewardText}>+{quest.lvl_reward} LVL</Text>
+            </View>
+          ) : null}
+        </View>
+      </TouchableOpacity>
+    </Animated.View>
+  );
+}
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function QuestTreeScreen({ route, navigation }) {
-  const { classId, chain, questType } = route.params;
+  // `studentId` is set by admin-as-coach (managing another player's tree). Absent
+  // in the player's own flow, where the toggle targets the signed-in user.
+  const { classId, chain, questType, studentId: overrideStudentId } = route.params;
 
   const [quests,      setQuests]      = useState([]);
   const [completions, setCompletions] = useState(new Set());
@@ -824,6 +1112,8 @@ export default function QuestTreeScreen({ route, navigation }) {
   const [studentId,   setStudentId]   = useState(null);
   const [pendingQuest, setPendingQuest] = useState(null);
   const [toggling,     setToggling]     = useState(false);
+  // Available width inside the frame → used to fit the whole tree to the phone.
+  const [availW,       setAvailW]       = useState(0);
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
 
@@ -831,7 +1121,8 @@ export default function QuestTreeScreen({ route, navigation }) {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
-      setStudentId(user.id);
+      const targetId = overrideStudentId ?? user.id;
+      setStudentId(targetId);
 
       const [qRes, cRes, clsRes] = await Promise.all([
         supabase
@@ -845,7 +1136,7 @@ export default function QuestTreeScreen({ route, navigation }) {
         supabase
           .from('student_quest_completions')
           .select('quest_id')
-          .eq('student_id', user.id),
+          .eq('student_id', targetId),
         supabase
           .from('classes')
           .select('order_index')
@@ -862,7 +1153,7 @@ export default function QuestTreeScreen({ route, navigation }) {
       console.error('[QuestTreeScreen]', e);
     }
     setLoading(false);
-  }, [classId, chain, questType]);
+  }, [classId, chain, questType, overrideStudentId]);
 
   useFocusEffect(useCallback(() => {
     setLoading(true);
@@ -913,6 +1204,25 @@ export default function QuestTreeScreen({ route, navigation }) {
     // Centered in the (TIER_GAP-enlarged) gap → even breathing room above & below.
     return (lastT1Bottom + firstT2Top) / 2;
   }, [applyTiers, quests, positions]);
+
+  // Fit-to-width: scale the whole tree down so its full width fits the phone.
+  // (≤1 only — never blow a small tree up past its natural size.)
+  const treeScale = availW > 0 && width > 0 ? Math.min(1, availW / width) : 1;
+
+  // Shared "energy flow" clock — a single looping value that marches the dashed
+  // overlay along every COMPLETED connector (parent → child), so mastery visibly
+  // courses down the tree. One value drives them all, so the cost is one timer.
+  const flow = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(Animated.timing(flow, {
+      toValue: 1, duration: 850, easing: Easing.linear, useNativeDriver: false,
+    }));
+    loop.start();
+    return () => loop.stop();
+  }, [flow]);
+  // One dash period (dash 5 + gap 13 = 18). Negative offset moves dashes in the
+  // path's drawn direction = downstream toward the child.
+  const dashOffset = flow.interpolate({ inputRange: [0, 1], outputRange: [0, -18] });
 
   // ── Node state ────────────────────────────────────────────────────────────
 
@@ -987,9 +1297,33 @@ export default function QuestTreeScreen({ route, navigation }) {
           d = `M ${px} ${py} L ${px} ${bendY} L ${cx} ${bendY} L ${cx} ${cy}`;
         }
 
+        const key = `${pid}->${q.id}`;
+
+        // Completed link — a dim solid "wire" with a bright energy dash flowing
+        // down it. The dash shares the screen's single `flow` clock. Returned as a
+        // flat array (not a Fragment) so it survives react-native-svg's child
+        // handling on every platform.
+        if (done) {
+          return [
+            <Path key={`${key}-wire`} d={d} stroke={SL.accent} strokeWidth={2} fill="none" opacity={0.4} />,
+            <AnimatedPath
+              key={`${key}-flow`}
+              d={d}
+              stroke="#9FE4FF"
+              strokeWidth={2.5}
+              strokeLinecap="round"
+              fill="none"
+              strokeDasharray="5 13"
+              strokeDashoffset={dashOffset}
+              opacity={0.95}
+            />,
+          ];
+        }
+
+        // Unmet link — static hairline (faint when the child is still locked).
         return (
           <Path
-            key={`${pid}->${q.id}`}
+            key={key}
             d={d}
             stroke={color}
             strokeWidth={1.5}
@@ -999,61 +1333,6 @@ export default function QuestTreeScreen({ route, navigation }) {
         );
       }).filter(Boolean);
     });
-  }
-
-  // ── Node ──────────────────────────────────────────────────────────────────
-
-  function renderNode(quest) {
-    const state      = nodeState(quest);
-    const isDone     = state === 'done';
-    const isLocked   = state === 'locked';
-    const isRequired = requiredIds.has(quest.id);
-
-    return (
-      <TouchableOpacity
-        style={[
-          styles.questCard,
-          isDone     && styles.questCardDone,
-          isLocked   && styles.questCardLocked,
-          isRequired && styles.questCardRequired,
-        ]}
-        disabled={isLocked || toggling}
-        activeOpacity={isLocked ? 1 : 0.75}
-        onPress={() => { if (!isLocked) setPendingQuest(quest); }}
-      >
-        {isRequired && (
-          <ShimmerFrame
-            style={[styles.questFrame, { shadowColor: SL.wine }]}
-            colors={BORDEAUX}
-            active
-          />
-        )}
-        <Text
-          style={[
-            styles.questName,
-            isDone   && styles.questNameDone,
-            isLocked && styles.questNameLocked,
-          ]}
-          numberOfLines={nodeLineCount(quest.name, nodeWidth ?? NODE_W)}
-        >
-          {isLocked ? '🔒 ' : ''}{quest.name}
-        </Text>
-
-        <View style={styles.nodeBottom}>
-          {isDone ? (
-            <View style={styles.doneBadge}>
-              <Text style={styles.doneBadgeText}>
-                ✓ DONE{quest.lvl_reward > 0 ? ` · +${quest.lvl_reward}` : ''}
-              </Text>
-            </View>
-          ) : quest.lvl_reward > 0 ? (
-            <View style={[styles.rewardBadge, isLocked && { opacity: 0.4 }]}>
-              <Text style={styles.rewardText}>+{quest.lvl_reward} LVL</Text>
-            </View>
-          ) : null}
-        </View>
-      </TouchableOpacity>
-    );
   }
 
   // ── Loading ───────────────────────────────────────────────────────────────
@@ -1068,44 +1347,47 @@ export default function QuestTreeScreen({ route, navigation }) {
 
   // ── Render ────────────────────────────────────────────────────────────────
 
-  const confirmBarVisible = pendingQuest !== null;
-
   return (
     <View style={styles.container}>
 
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Text style={styles.backText}>← BACK</Text>
-        </TouchableOpacity>
-        <Text style={styles.chainTitle}>
-          {chain.replace(/_/g, ' ').toUpperCase()}
-        </Text>
-        <Text style={styles.chainSubtitle}>
-          {questType === 'main' ? 'MAIN QUEST' : 'SIDE QUEST'}
-        </Text>
-        <Text style={styles.statsText}>
-          {doneCount}/{quests.length} · +{earnedLvl} LVL earned
-        </Text>
-        <View style={styles.headerDivider} />
-      </View>
+      {/* One page-sized ice-glow frame (matches SkillsScreen's body width) wraps
+          EVERYTHING — header + the tree. The tree scrolls horizontally INSIDE
+          the frame instead of stretching it. */}
+      <ScrollView contentContainerStyle={styles.scrollBody}>
+        <View style={styles.treeFrame}>
 
-      {/* Tree */}
-      <ScrollView contentContainerStyle={[
-        styles.scrollBody,
-        confirmBarVisible && { paddingBottom: 160 },
-      ]}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={{
-            flexGrow: 1,
-            justifyContent: 'center',
-            paddingHorizontal: TREE_PAD_H,
-          }}
+        {/* Header */}
+        <View style={styles.header}>
+          {/* Standard glowing BACK pill, left-aligned */}
+          <View style={styles.headerTopRow}>
+            <PillButton label="← BACK" size="sm" onPress={() => navigation.goBack()} />
+          </View>
+
+          {/* Quest name — the hero title (color + shining kept; entrance added) */}
+          <HeroTitle text={chain.replace(/_/g, ' ').toUpperCase()} />
+
+          {/* Quest-type badge — gem emblem */}
+          <QuestTypeBadge questType={questType} />
+
+          {/* Status HUD — completion meter + ticking readouts (gold at 100%) */}
+          <QuestHUD done={doneCount} total={quests.length} earnedLvl={earnedLvl} />
+
+          <View style={styles.headerDivider} />
+        </View>
+
+        {/* Tree — auto fit-to-width: the whole tree scales down so its full
+            width fits the phone; only vertical scrolling remains. */}
+        <View
+          style={styles.treeFitArea}
+          onLayout={e => setAvailW(e.nativeEvent.layout.width - TREE_PAD_H * 2)}
         >
-          <View style={styles.treeFrame}>
-          <View style={{ width, height, position: 'relative' }}>
+          {availW > 0 && width > 0 ? (
+          <View style={{ width: width * treeScale, height: height * treeScale }}>
+          <View style={{
+            width, height, position: 'relative',
+            transform: [{ scale: treeScale }],
+            transformOrigin: 'top left',
+          }}>
 
             {/* SVG connector lines (under nodes) */}
             <Svg
@@ -1150,13 +1432,14 @@ export default function QuestTreeScreen({ route, navigation }) {
                 style={[styles.tierDivider, { top: tierDividerY - 14, width }]}
                 pointerEvents="none"
               >
-                <View style={styles.tierLine} />
-                <Text style={styles.tierLabel}>TIER II</Text>
-                <View style={styles.tierLine} />
+                <View style={[styles.tierLine, styles.tierLineGold]} />
+                <ShimmerText text="TIER II" style={styles.tierLabel} colors={GOLD} direction="ltr" active />
+                <View style={[styles.tierLine, styles.tierLineGold]} />
               </View>
             )}
 
-            {/* Nodes */}
+            {/* Nodes — each cascades in delayed by its tree rank, so the tree
+                grows downward from its roots. */}
             {quests.map(q => {
               const p = positions[q.id];
               if (!p) return null;
@@ -1171,49 +1454,79 @@ export default function QuestTreeScreen({ route, navigation }) {
                     height: p.h,
                   }}
                 >
-                  {renderNode(q)}
+                  <QuestNode
+                    quest={q}
+                    state={nodeState(q)}
+                    isRequired={requiredIds.has(q.id)}
+                    nodeWidth={nodeWidth ?? NODE_W}
+                    delay={Math.min((p.rank ?? 0) * 80, 720)}
+                    disabled={toggling}
+                    onPress={() => setPendingQuest(q)}
+                  />
                 </View>
               );
             })}
 
           </View>
           </View>
-        </ScrollView>
+          ) : null}
+        </View>
+        </View>
       </ScrollView>
 
-      {/* ── Confirmation bar ── */}
-      {pendingQuest && (
-        <View style={styles.confirmBar}>
-          <Text style={styles.confirmText}>
-            {completions.has(pendingQuest.id)
-              ? `Remove "${pendingQuest.name}"? (−${pendingQuest.lvl_reward ?? 0} LVL)`
-              : `Mark "${pendingQuest.name}" done? (+${pendingQuest.lvl_reward ?? 0} LVL)`
-            }
-          </Text>
-          <View style={styles.confirmButtons}>
-            <TouchableOpacity
-              style={styles.confirmCancel}
-              onPress={() => setPendingQuest(null)}
-              disabled={toggling}
-            >
-              <Text style={styles.confirmCancelText}>CANCEL</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.confirmOk}
-              disabled={toggling}
-              onPress={() => {
-                const q = pendingQuest;
-                setPendingQuest(null);
-                toggleQuest(q);
-              }}
-            >
-              {toggling
-                ? <ActivityIndicator color={SL.bg} size="small" />
-                : <Text style={styles.confirmOkText}>CONFIRM</Text>}
-            </TouchableOpacity>
-          </View>
+      {/* ── Confirmation popup — system-notification style card ── */}
+      <Modal
+        visible={pendingQuest !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => { if (!toggling) setPendingQuest(null); }}
+      >
+        <View style={styles.confirmOverlay}>
+          {pendingQuest && (() => {
+            const removing = completions.has(pendingQuest.id);
+            const reward   = pendingQuest.lvl_reward ?? 0;
+            return (
+              <View style={styles.confirmCard}>
+                <Text style={styles.confirmCardTitle}>
+                  {removing ? 'REMOVE QUEST' : 'COMPLETE QUEST'}
+                </Text>
+                <Text style={styles.confirmCardName}>{pendingQuest.name}</Text>
+                <Text style={[
+                  styles.confirmCardDelta,
+                  removing ? styles.confirmCardDeltaDown : styles.confirmCardDeltaUp,
+                ]}>
+                  {removing ? `−${reward}` : `+${reward}`} LVL
+                </Text>
+
+                <View style={styles.confirmButtons}>
+                  <TouchableOpacity
+                    style={styles.confirmCancel}
+                    onPress={() => setPendingQuest(null)}
+                    disabled={toggling}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.confirmCancelText}>CANCEL</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.confirmOk}
+                    disabled={toggling}
+                    activeOpacity={0.85}
+                    onPress={() => {
+                      const q = pendingQuest;
+                      setPendingQuest(null);
+                      toggleQuest(q);
+                    }}
+                  >
+                    {toggling
+                      ? <ActivityIndicator color={SL.bg} size="small" />
+                      : <Text style={styles.confirmOkText}>CONFIRM</Text>}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            );
+          })()}
         </View>
-      )}
+      </Modal>
     </View>
   );
 }
@@ -1226,40 +1539,171 @@ const styles = StyleSheet.create({
   // Header
   header: {
     paddingHorizontal: 24,
-    paddingTop: 56,
+    paddingTop: 8,
     paddingBottom: 20,
     alignItems: 'center',
     borderBottomWidth: 1,
     borderBottomColor: SL.border,
   },
-  backBtn:  { alignSelf: 'flex-start', marginBottom: 12 },
-  backText: { fontFamily: F.bodyMed, fontSize: 24, color: SL.accent, letterSpacing: 2 },
+  headerTopRow: {
+    alignSelf: 'stretch',
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
   chainTitle: {
     fontFamily: F.heading,
-    fontSize: 66,
+    fontSize: 46,
     color: SL.text,
-    letterSpacing: 5,
+    letterSpacing: 4,
     textAlign: 'center',
-    // Ice-glow halo, matching the Home hero.
-    textShadowColor: 'rgba(74,158,191,0.5)',
+    // Strong ice-glow halo so the quest name reads as the hero.
+    textShadowColor: 'rgba(74,158,191,0.7)',
     textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 22,
+    textShadowRadius: 20,
   },
-  chainSubtitle: {
-    fontFamily: F.bodyMed,
-    fontSize: 26,
-    color: SL.muted,
-    letterSpacing: 3,
-    marginTop: 6,
-    textAlign: 'center',
+
+  // Quest-type emblem — a glowing capsule with a double-frame line + flanking gems.
+  typeBadge: {
+    marginTop: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 999,
+    paddingHorizontal: 26,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(74,158,191,0.14)',
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 18,
+    position: 'relative',
   },
-  statsText: {
-    fontFamily: F.bodyMed,
-    fontSize: 30,
-    color: SL.muted,
+  typeBadgeSide: {
+    borderColor: SL.gold,
+    backgroundColor: 'rgba(255,215,0,0.10)',
+    shadowColor: SL.gold,
+  },
+  // Faint inner hairline, inset from the border → the "tech" double-frame look.
+  typeBadgeInner: {
+    position: 'absolute',
+    top: 3, left: 3, right: 3, bottom: 3,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: 'rgba(74,158,191,0.32)',
+  },
+  typeBadgeText: {
+    fontFamily: F.heading,
+    fontSize: 19,
+    letterSpacing: 5,
+  },
+  // Flanking gem — a hollow diamond holding a lit core.
+  typeGem: {
+    width: 13,
+    height: 13,
+    borderWidth: 1.5,
+    borderRadius: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    transform: [{ rotate: '45deg' }],
+  },
+  typeGemCore: {
+    width: 5,
+    height: 5,
+    borderRadius: 1,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 5,
+  },
+
+  // ── Status HUD — completion meter + readouts ────────────────────────────────
+  hud: {
+    width: '100%',
+    maxWidth: 820,
+    alignSelf: 'center',
+    alignItems: 'stretch',
+    marginTop: 20,
+    gap: 14,
+  },
+  // The MASTERED seal floats over the meter when a line is fully cleared.
+  masteredWrap: { alignItems: 'center', marginBottom: 2 },
+  masteredText: {
+    fontFamily: F.heading,
+    fontSize: 24,
+    color: SL.gold,
+    letterSpacing: 6,
+    textShadowColor: 'rgba(255,215,0,0.7)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 16,
+  },
+  // The completion meter — a dark capsule track that the shimmer fill grows into.
+  meterTrack: {
+    width: '100%',
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(26,58,92,0.45)',
+    borderWidth: 1,
+    borderColor: SL.border,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  meterFillWrap: {
+    height: '100%',
+    borderRadius: 11,
+    overflow: 'hidden',
+  },
+  meterFill: {
+    height: '100%',
+    width: '100%',
+    borderRadius: 11,
+    backgroundColor: SL.accent,
+  },
+  // Breathing gold ring on a maxed meter (opacity pulsed by the HUD).
+  meterGlow: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 11,
+    borderWidth: 1.5,
+    borderColor: SL.gold,
+    shadowColor: SL.gold,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 12,
+  },
+  // Readouts flanking under the meter: count on the left, LVL earned on the right.
+  hudStats: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  hudStatNum: {
+    fontFamily: F.heading,
+    fontSize: 28,
+    color: SL.accent,
     letterSpacing: 1,
-    marginTop: 8,
-    textAlign: 'center',
+  },
+  hudStatNumGold: {
+    fontFamily: F.heading,
+    fontSize: 28,
+    color: SL.gold,
+    letterSpacing: 1,
+    textShadowColor: 'rgba(255,215,0,0.6)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
+  },
+  hudStatTag: {
+    fontFamily: F.bodyMed,
+    fontSize: 15,
+    color: SL.muted,
+    letterSpacing: 2,
+  },
+  hudStatTagGold: {
+    fontFamily: F.bodyMed,
+    fontSize: 15,
+    color: SL.gold,
+    opacity: 0.85,
+    letterSpacing: 2,
   },
   headerDivider: {
     height: 1,
@@ -1270,26 +1714,45 @@ const styles = StyleSheet.create({
   },
 
   // Tree
-  scrollBody: { paddingBottom: 60 },
+  scrollBody: {
+    flexGrow: 1,
+    alignItems: 'center',
+    paddingTop: 44,
+    paddingHorizontal: 12,
+    paddingBottom: 60,
+  },
 
-  // Cool ice-glow frame wrapping the whole skill tree.
+  // One page-sized ice-glow frame wrapping the whole skill tree — same width as
+  // SkillsScreen's body so the quest tree matches the skills page. The tree
+  // itself scrolls horizontally inside it (overflow clips to the frame).
   treeFrame: {
-    padding: 24,
+    width: '100%',
+    maxWidth: 1440,
+    alignSelf: 'center',
+    padding: 16,
     marginVertical: 18,
     borderWidth: 1.5,
     borderColor: SL.accent,
-    borderRadius: 20,
+    borderRadius: 18,
     backgroundColor: SL.bg,
+    overflow: 'hidden',
     shadowColor: SL.accent,
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.22,
-    shadowRadius: 22,
+    shadowOpacity: 0.2,
+    shadowRadius: 20,
+  },
+
+  // Fit-to-width area — measures the usable width; the scaled tree centers in it.
+  treeFitArea: {
+    width: '100%',
+    alignItems: 'center',
+    paddingHorizontal: TREE_PAD_H,
   },
 
   // Column label
   branchLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 34,
+    fontSize: 30,
     color: SL.accent,
     letterSpacing: 3,
     textAlign: 'center',
@@ -1317,13 +1780,22 @@ const styles = StyleSheet.create({
     backgroundColor: SL.accent,
     opacity: 0.5,
   },
+  // The TIER II rule reads as a gold milestone threshold, not just another divider.
+  tierLineGold: {
+    backgroundColor: SL.gold,
+    opacity: 0.55,
+    shadowColor: SL.gold,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 6,
+  },
   tierLabel: {
     fontFamily: F.heading,
     fontSize: 30,
-    color: SL.accent,
+    color: SL.gold,
     letterSpacing: 6,
     textAlign: 'center',
-    textShadowColor: 'rgba(74,158,191,0.6)',
+    textShadowColor: 'rgba(255,215,0,0.6)',
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 12,
   },
@@ -1356,9 +1828,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.32,
     shadowRadius: 12,
   },
-  // Live animated frame over prestige-requirement nodes — the BORDEAUX color
-  // sweeps clockwise around the border (segments owned by ShimmerFrame; the
-  // border here is drawn by that component via `thickness`, not borderWidth).
+  // Live animated frame over CLASS-GATE nodes — the GOLD palette sweeps clockwise
+  // around the border (segments owned by ShimmerFrame; the border here is drawn by
+  // that component via `thickness`, not borderWidth).
   questFrame: {
     ...StyleSheet.absoluteFillObject,
     borderRadius: 5,
@@ -1369,19 +1841,83 @@ const styles = StyleSheet.create({
   questCardLocked: {
     opacity: 0.45,
   },
-  // Requirement nodes hand their border over to the bordeaux ShimmerFrame, so
-  // the card's own blue border doesn't show through underneath it.
+  // Breathing ice halo behind an AVAILABLE node — its own glow is static; the
+  // wrapping Animated.View pulses this layer's opacity to make it breathe.
+  unlockedHalo: {
+    position: 'absolute',
+    top: -3, left: -3, right: -3, bottom: -3,
+    borderRadius: 13,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    backgroundColor: 'rgba(74,158,191,0.06)',
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 14,
+  },
+  // CLASS-GATE nodes hand their border over to the gold ShimmerFrame (so the
+  // card's own blue border doesn't show through underneath) and trade their faint
+  // ice glow for a richer gold one — the gate feels like a prestige milestone.
   questCardRequired: {
     borderColor: 'transparent',
+    backgroundColor: 'rgba(255,215,0,0.05)',
+    shadowColor: SL.gold,
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+  },
+
+  // Breathing gold halo behind a CLASS-GATE node (opacity pulsed by `gate`).
+  gateHalo: {
+    position: 'absolute',
+    top: -3, left: -3, right: -3, bottom: -3,
+    borderRadius: 13,
+    borderWidth: 1.5,
+    borderColor: SL.gold,
+    backgroundColor: 'rgba(255,215,0,0.06)',
+    shadowColor: SL.gold,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 16,
+  },
+
+  // Floating "✦ CLASS GATE ✦" crown ribbon, centered above the node's top edge.
+  gateRibbonWrap: {
+    position: 'absolute',
+    top: -15,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 6,
+  },
+  gateRibbon: {
+    backgroundColor: '#140d02',
+    borderWidth: 1.5,
+    borderColor: SL.gold,
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 3,
+    shadowColor: SL.gold,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.95,
+    shadowRadius: 12,
+  },
+  gateRibbonText: {
+    fontFamily: F.heading,
+    fontSize: 14,
+    color: SL.gold,
+    letterSpacing: 2.5,
+    textShadowColor: 'rgba(255,215,0,0.8)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 8,
   },
 
   // Node text
   questName: {
     fontFamily: F.heading,
-    fontSize: 27,
+    fontSize: 24,
     color: SL.text,
     letterSpacing: 0.6,
-    lineHeight: 30,
+    lineHeight: 27,
     textAlign: 'center',
     alignSelf: 'center',
     width: '100%',
@@ -1402,8 +1938,8 @@ const styles = StyleSheet.create({
   },
   doneBadgeText: {
     fontFamily: F.heading,
-    fontSize: 20,
-    lineHeight: 22,
+    fontSize: 18,
+    lineHeight: 20,
     color: SL.accent,
     letterSpacing: 1.5,
   },
@@ -1416,62 +1952,99 @@ const styles = StyleSheet.create({
   },
   rewardText: {
     fontFamily: F.bodyMed,
-    fontSize: 20,
-    lineHeight: 22,
+    fontSize: 18,
+    lineHeight: 20,
     color: SL.accent,
     letterSpacing: 1.2,
   },
 
-  // ── Confirmation bar ──────────────────────────────────────────────────────────
+  // ── Confirmation popup — system-notification style card ──────────────────────
 
-  confirmBar: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: SL.panel,
-    borderTopWidth: 2,
-    borderTopColor: SL.accent,
-    padding: 16,
-    gap: 12,
+  // Dim backdrop, card centered like a system notification.
+  confirmOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
   },
-  confirmText: {
-    fontFamily: F.bodyMed,
-    fontSize: 16,
+  confirmCard: {
+    width: '100%',
+    maxWidth: 460,
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 18,
+    paddingHorizontal: 24,
+    paddingVertical: 22,
+    alignItems: 'center',
+    gap: 8,
+    // Strong ice-glow so the card reads as a popped-out notification.
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 28,
+    elevation: 12,
+  },
+  confirmCardTitle: {
+    fontFamily: F.heading,
+    fontSize: 26,
+    color: SL.accent,
+    letterSpacing: 3,
+    textAlign: 'center',
+    textShadowColor: 'rgba(74,158,191,0.6)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 12,
+  },
+  confirmCardName: {
+    fontFamily: F.heading,
+    fontSize: 30,
     color: SL.text,
     letterSpacing: 0.5,
     textAlign: 'center',
+    marginTop: 2,
   },
+  confirmCardDelta: {
+    fontFamily: F.bodyMed,
+    fontSize: 24,
+    letterSpacing: 1,
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  confirmCardDeltaUp:   { color: SL.green },
+  confirmCardDeltaDown: { color: SL.danger },
   confirmButtons: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 12,
+    alignSelf: 'stretch',
+    marginTop: 6,
   },
   confirmCancel: {
     flex: 1,
-    height: 40,
+    height: 48,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 4,
+    borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
   },
   confirmCancelText: {
     fontFamily: F.bodyMed,
-    fontSize: 14,
+    fontSize: 20,
     color: SL.muted,
     letterSpacing: 2,
   },
   confirmOk: {
     flex: 1,
-    height: 40,
+    height: 48,
     backgroundColor: SL.accent,
-    borderRadius: 4,
+    borderRadius: 12,
     justifyContent: 'center',
     alignItems: 'center',
   },
   confirmOkText: {
     fontFamily: F.heading,
-    fontSize: 14,
+    fontSize: 20,
     color: SL.bg,
     letterSpacing: 2,
   },

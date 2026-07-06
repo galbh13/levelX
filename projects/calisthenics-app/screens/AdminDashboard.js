@@ -1,18 +1,14 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, RefreshControl,
+  View, Text, StyleSheet, ScrollView, Pressable,
+  ActivityIndicator, Animated, Easing,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { useCoach } from '../context/CoachContext';
 import { prestigeStars } from '../lib/prestige';
 import { F } from '../constants/fonts';
+import { CARD_H, CARD_W } from '../constants/layout';
 import ScreenFrame from '../components/ScreenFrame';
-import { ShimmerFrame } from '../components/Shimmer';
-
-// Fiery wine→ember ramp for the live CHALLENGES button — crimson rising into
-// orange/amber so the sweep reads like glowing fire. The hues are analogous
-// (all warm), so the gradient transitions are smooth rather than jumpy.
-const FIRE = ['#8B1538', '#C81E45', '#FF1E3C', '#FF5C2A', '#FF9A2E'];
 
 const SL = {
   bg:        '#050912',
@@ -25,11 +21,90 @@ const SL = {
   gold:      '#FFD700',
 };
 
+const STAGGER = 70;   // ms between consecutive row entrances
+const MAX_STAGGER_ROWS = 9; // cap cumulative delay so long rosters don't crawl in
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatJoinDate(ts) {
   if (!ts) return '—';
   return new Date(ts).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+}
+
+// Count-up that animates 0 → target once `run` flips true (used for the roster
+// tally pill so the number ticks up as the list materializes).
+function useCountUp(target, run, duration = 800) {
+  const [val, setVal] = useState(0);
+  useEffect(() => {
+    if (!run) { setVal(0); return; }
+    const v = new Animated.Value(0);
+    const id = v.addListener(({ value }) => setVal(Math.round(value)));
+    Animated.timing(v, {
+      toValue: target, duration,
+      easing: Easing.out(Easing.cubic), useNativeDriver: false,
+    }).start();
+    return () => v.removeListener(id);
+  }, [run, target, duration]);
+  return val;
+}
+
+// ─── Animated press wrapper ─────────────────────────────────────────────────────
+// Subtle scale-down on press (HIG/MD `scale-feedback`) used by every tappable
+// surface so the whole dashboard reacts to touch consistently.
+function TapScale({ children, onPress, style, down = 0.97, disabled = false }) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const to = (toValue, bounciness) =>
+    Animated.spring(scale, { toValue, bounciness, speed: 40, useNativeDriver: true }).start();
+  return (
+    <Pressable
+      onPress={disabled ? undefined : onPress}
+      onPressIn={() => !disabled && to(down, 0)}
+      onPressOut={() => !disabled && to(1, 6)}
+    >
+      <Animated.View style={[style, { transform: [{ scale }] }]}>
+        {children}
+      </Animated.View>
+    </Pressable>
+  );
+}
+
+// ─── Roster row ─────────────────────────────────────────────────────────────────
+function PlayerRow({ player, index, rankLabel, className, stars, onPress }) {
+  const enter = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const delay = STAGGER * Math.min(index, MAX_STAGGER_ROWS);
+    Animated.timing(enter, {
+      toValue: 1, duration: 460, delay,
+      easing: Easing.out(Easing.cubic), useNativeDriver: true,
+    }).start();
+  }, [enter, index]);
+
+  const translateY = enter.interpolate({ inputRange: [0, 1], outputRange: [22, 0] });
+  const translateX = enter.interpolate({ inputRange: [0, 1], outputRange: [-12, 0] });
+
+  return (
+    <Animated.View style={{ opacity: enter, transform: [{ translateY }, { translateX }] }}>
+      <TapScale onPress={onPress} style={styles.playerCard}>
+        <View style={styles.rankChip}>
+          <Text style={styles.rankText}>{rankLabel}</Text>
+        </View>
+
+        <View style={styles.cardLeft}>
+          <Text style={styles.playerName} numberOfLines={1}>
+            {player.full_name || '(no name)'}
+            {stars > 0 ? <Text style={styles.stars}>{` ${'★'.repeat(stars)}`}</Text> : null}
+          </Text>
+          <Text style={styles.joinDate}>Joined {formatJoinDate(player.created_at)}</Text>
+        </View>
+
+        <View style={styles.classBadge}>
+          <Text style={styles.classBadgeText}>{className ?? 'NO CLASS'}</Text>
+        </View>
+        <Text style={styles.cardChevron}>›</Text>
+      </TapScale>
+    </Animated.View>
+  );
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
@@ -39,19 +114,53 @@ function formatJoinDate(ts) {
 // of all players plus access to the shared exercise gallery.
 
 export default function AdminDashboard({ navigation }) {
+  const { setSelectedStudent } = useCoach();
   const [players,    setPlayers]    = useState([]);
   const [classNames, setClassNames] = useState({}); // class_id → name
   const [classOrder, setClassOrder] = useState({}); // class_id → order_index
   const [classCount, setClassCount] = useState(null);
   const [loading,    setLoading]    = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
+
+  const count = useCountUp(players.length, !loading);
+
+  // Looping breathe on the tally pill — a quiet HUD "alive" pulse.
+  const pulse = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (loading) return;
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: 1400, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0, duration: 1400, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [loading, pulse]);
+  const pulseScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.06] });
+
+  // Header entrance — title + actions ease in together, slightly ahead of the rows.
+  const head = useRef(new Animated.Value(0)).current;
+  // Title underline sweeps open (scaleX) once data has settled.
+  const underline = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(head, {
+      toValue: 1, duration: 520, easing: Easing.out(Easing.cubic), useNativeDriver: true,
+    }).start();
+  }, [head]);
+  useEffect(() => {
+    if (loading) return;
+    Animated.timing(underline, {
+      toValue: 1, duration: 640, delay: 120, easing: Easing.out(Easing.cubic), useNativeDriver: true,
+    }).start();
+  }, [loading, underline]);
+  const headTranslate = head.interpolate({ inputRange: [0, 1], outputRange: [-16, 0] });
 
   const fetchData = useCallback(async () => {
     try {
       const [playersRes, classesRes] = await Promise.all([
         supabase
           .from('profiles')
-          .select('id, full_name, class_id, prestige_count, created_at')
+          .select('id, full_name, class_id, prestige_count, created_at, avatar_url')
           .eq('role', 'player')
           .order('created_at', { ascending: true }),
         supabase
@@ -73,53 +182,37 @@ export default function AdminDashboard({ navigation }) {
     fetchData().finally(() => setLoading(false));
   }, [fetchData]);
 
-  async function refresh() {
-    setRefreshing(true);
-    await fetchData();
-    setRefreshing(false);
-  }
-
   return (
-    <ScreenFrame maxWidth={1100} duration={5200} ready={!loading}>
-      {/* Top bar */}
-      <View style={styles.topBar}>
-        <View style={styles.topBarLeft}>
-          <TouchableOpacity
+    <ScreenFrame maxWidth={CARD_W} duration={5200} ready={!loading}>
+      <View style={styles.card}>
+      {/* Top bar — title on its own row, the actions share the row below
+          (each flex:1 so they always fit one line on any phone width). */}
+      <Animated.View style={[styles.topBar, { opacity: head, transform: [{ translateY: headTranslate }] }]}>
+        <View style={styles.titleWrap}>
+          <Text style={styles.pageTitle}>ADMIN</Text>
+          <Animated.View style={[styles.titleUnderline, { transform: [{ scaleX: underline }] }]} />
+        </View>
+
+        <View style={styles.topBarButtons}>
+          <TapScale
             style={styles.topBarBtn}
             onPress={() => navigation.navigate('ExerciseGallery')}
-            activeOpacity={0.8}
           >
-            <Text style={styles.topBarBtnText}>GALLERY</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.challengesBtn}
-            onPress={() => navigation.navigate('Challenges')}
-            activeOpacity={0.85}
-          >
-            <ShimmerFrame
-              style={styles.challengesFrame}
-              colors={FIRE}
-              radius={22}
-              thickness={3}
-              duration={5200}
-              active
-            />
-            <Text style={styles.challengesText}>CHALLENGES</Text>
-          </TouchableOpacity>
-        </View>
+            <Text style={styles.topBarBtnText} numberOfLines={1}>GALLERY</Text>
+          </TapScale>
 
-        <Text style={styles.pageTitle}>ADMIN</Text>
-
-        <View style={styles.topBarRight}>
-          <TouchableOpacity
-            style={styles.topBarBtn}
+          <TapScale
+            style={[styles.topBarBtn, styles.signOutBtn]}
             onPress={() => supabase.auth.signOut()}
-            activeOpacity={0.8}
           >
-            <Text style={styles.topBarBtnText}>SIGN OUT</Text>
-          </TouchableOpacity>
+            <View style={styles.powerIcon}>
+              <View style={styles.powerRing} />
+              <View style={styles.powerStem} />
+            </View>
+            <Text style={styles.topBarBtnText} numberOfLines={1}>SIGN OUT</Text>
+          </TapScale>
         </View>
-      </View>
+      </Animated.View>
 
       {/* Body is always the same height (section header + fixed-height list area)
           so the card never resizes when the player data loads — the roster just
@@ -127,9 +220,9 @@ export default function AdminDashboard({ navigation }) {
       <View style={styles.body}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>PLAYERS</Text>
-          <View style={styles.sectionPill}>
-            <Text style={styles.sectionPillText}>{loading ? '—' : players.length}</Text>
-          </View>
+          <Animated.View style={[styles.sectionPill, { transform: [{ scale: pulseScale }] }]}>
+            <Text style={styles.sectionPillText}>{loading ? '—' : count}</Text>
+          </Animated.View>
         </View>
 
         <View style={styles.listArea}>
@@ -143,28 +236,24 @@ export default function AdminDashboard({ navigation }) {
             </View>
           ) : (
             <ScrollView showsVerticalScrollIndicator={false}>
-              {players.map(player => {
-                const stars = prestigeStars({ orderIndex: classOrder[player.class_id] ?? 0, classCount });
-                return (
-                <View key={player.id} style={styles.playerCard}>
-                  <View style={styles.cardLeft}>
-                    <Text style={styles.playerName}>
-                      {player.full_name || '(no name)'}
-                      {stars > 0 ? ` ${'★'.repeat(stars)}` : ''}
-                    </Text>
-                    <Text style={styles.joinDate}>Joined {formatJoinDate(player.created_at)}</Text>
-                  </View>
-                  <View style={styles.classBadge}>
-                    <Text style={styles.classBadgeText}>
-                      {classNames[player.class_id] ?? 'NO CLASS'}
-                    </Text>
-                  </View>
-                </View>
-                );
-              })}
+              {players.map((player, i) => (
+                <PlayerRow
+                  key={player.id}
+                  player={player}
+                  index={i}
+                  rankLabel={String(i + 1).padStart(2, '0')}
+                  className={classNames[player.class_id]}
+                  stars={prestigeStars({ orderIndex: classOrder[player.class_id] ?? 0, classCount })}
+                  onPress={() => {
+                    setSelectedStudent(player);
+                    navigation.navigate('PlayerAdmin', { player });
+                  }}
+                />
+              ))}
             </ScrollView>
           )}
         </View>
+      </View>
       </View>
     </ScreenFrame>
   );
@@ -175,31 +264,46 @@ export default function AdminDashboard({ navigation }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SL.bg },
 
-  // Top bar
+  // Top bar — vertical stack: ADMIN title on top, the actions in a row below.
   topBar: {
-    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 28,
-    paddingHorizontal: 28,
+    gap: 18,
+    paddingHorizontal: 16,
     paddingTop: 30,
-    paddingBottom: 26,
+    paddingBottom: 22,
     borderBottomWidth: 2,
     borderBottomColor: SL.border,
   },
-  // Both sides flex equally so the centered title is truly centered regardless of
-  // how wide each side's buttons are.
-  topBarLeft: { flex: 1, flexDirection: 'row', gap: 12, justifyContent: 'flex-start' },
-  topBarRight: { flex: 1, flexDirection: 'row', justifyContent: 'flex-end' },
+  titleWrap: { alignItems: 'center', gap: 10 },
   pageTitle: {
     fontFamily: F.heading,
     fontSize: 56,
     color: SL.accent,
     letterSpacing: 10,
     textTransform: 'uppercase',
+    textAlign: 'center',
+  },
+  // Accent bar under the title that sweeps open on entrance (scaleX 0→1).
+  titleUnderline: {
+    width: 160,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: SL.accent,
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.8, shadowRadius: 8,
+  },
+  // GALLERY pinned to the left edge, SIGN OUT to the right edge of the row.
+  topBarButtons: {
+    flexDirection: 'row',
+    alignSelf: 'stretch',
+    justifyContent: 'space-between',
+    gap: 8,
   },
   topBarBtn: {
-    paddingHorizontal: 22,
+    minWidth: 170,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
     paddingVertical: 12,
     borderWidth: 1.5,
     borderColor: SL.accent,
@@ -209,40 +313,49 @@ const styles = StyleSheet.create({
   },
   topBarBtnText: {
     fontFamily: F.heading,
-    fontSize: 18,
+    fontSize: 14,
     color: SL.accent,
-    letterSpacing: 3,
+    letterSpacing: 1.5,
     textTransform: 'uppercase',
+    textAlign: 'center',
   },
-
-  // ── CHALLENGES button — fire-gradient sweep on the border + ember glow ──
-  challengesBtn: {
-    flexDirection: 'row',
+  // SIGN OUT pill — same ice-glow pill, but laid out as a row so the power
+  // glyph sits before the label.
+  signOutBtn: {
+    gap: 8,
+  },
+  // Power symbol drawn from primitives (no icon font): a ring with a vertical
+  // stem through its top center — the universal power/exit glyph.
+  powerIcon: {
+    width: 16,
+    height: 16,
     alignItems: 'center',
-    gap: 9,
-    paddingHorizontal: 22,
-    paddingVertical: 12,
-    borderRadius: 22,
-    borderColor: 'transparent',
-    overflow: 'hidden',
-    backgroundColor: 'rgba(255,70,40,0.12)',
-    shadowColor: '#FF4D2A', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.7, shadowRadius: 16,
+    justifyContent: 'center',
   },
-  challengesFrame: { ...StyleSheet.absoluteFillObject, borderRadius: 22 },
-  challengesText: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: '#FF9A52',
-    letterSpacing: 3,
-    textTransform: 'uppercase',
+  powerRing: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    borderWidth: 2,
+    borderColor: SL.accent,
+  },
+  powerStem: {
+    position: 'absolute',
+    top: -1,
+    width: 2.5,
+    height: 8,
+    borderRadius: 1.5,
+    backgroundColor: SL.accent,
   },
 
-  body: { paddingHorizontal: 28, paddingTop: 30, paddingBottom: 30 },
+  // Fixed card height so the frame matches the other cards (Gallery/Weekly Plan).
+  card: { height: CARD_H },
+  body: { flex: 1, paddingHorizontal: 28, paddingTop: 30, paddingBottom: 30 },
 
-  // Fixed-height list region → the card is always the same size regardless of
-  // how many players load (spinner / empty / roster all occupy this same box;
-  // longer rosters scroll inside it). Keeps the hologram-build box from resizing.
-  listArea: { height: 520 },
+  // Fills the remaining card height → the card is always the same size regardless
+  // of how many players load (spinner / empty / roster all occupy this same box;
+  // longer rosters scroll inside it).
+  listArea: { flex: 1 },
   listCenter: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
   // Section headers
@@ -306,6 +419,24 @@ const styles = StyleSheet.create({
     marginBottom: 14,
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.18, shadowRadius: 12,
   },
+  // HUD rank index — a glowing ice token at the head of each row.
+  rankChip: {
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    backgroundColor: 'rgba(74,158,191,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 18,
+  },
+  rankText: {
+    fontFamily: F.heading,
+    fontSize: 18,
+    color: SL.accent,
+    letterSpacing: 1,
+  },
   cardLeft: { flex: 1, gap: 6 },
   playerName: {
     fontFamily: F.heading,
@@ -314,6 +445,7 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
     textTransform: 'uppercase',
   },
+  stars: { color: SL.gold },
   joinDate: {
     fontFamily: F.bodyMed,
     fontSize: 16,
@@ -334,5 +466,12 @@ const styles = StyleSheet.create({
     fontSize: 17,
     color: SL.gold,
     letterSpacing: 2,
+  },
+  cardChevron: {
+    fontFamily: F.heading,
+    fontSize: 30,
+    color: SL.accent,
+    marginLeft: 14,
+    marginTop: -2,
   },
 });

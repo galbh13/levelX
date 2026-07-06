@@ -1,28 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  Dimensions, Platform,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
 import ScreenFrame from '../components/ScreenFrame';
-
-const WIN = Dimensions.get('window');
-// How much of the viewport the player may occupy before we cap it.
-const MAX_W = Math.min(WIN.width - 32, 860); // wider than before → uses more page
-const MAX_H = WIN.height * 0.66;
-const MIN_CARD_W = 320;                       // keep text below readable
-
-// Given a width:height ratio, return the largest {w,h} that fits the viewport
-// caps while preserving that ratio — so vertical videos get a tall narrow card
-// and horizontal videos get a wide one, with no letterbox bars.
-function fitToViewport(ratio) {
-  let w = MAX_W;
-  let h = w / ratio;
-  if (h > MAX_H) { h = MAX_H; w = h * ratio; }
-  return { w, h };
-}
 
 function getYouTubeEmbedUrl(url) {
   if (!url) return null;
@@ -32,6 +15,14 @@ function getYouTubeEmbedUrl(url) {
   return id ? `https://www.youtube.com/embed/${id}` : null;
 }
 
+// Largest {w,h} for a given ratio that fits inside a box — no letterbox bars.
+function fitWithin(boxW, boxH, ratio) {
+  let w = boxW;
+  let h = w / ratio;
+  if (h > boxH) { h = boxH; w = h * ratio; }
+  return { w, h };
+}
+
 function SectionTitle({ children }) {
   return <Text style={styles.sectionTitle}>{children}</Text>;
 }
@@ -39,7 +30,7 @@ function SectionTitle({ children }) {
 // ─── Video renderer ───────────────────────────────────────────────────────────
 // Priority: storage video (video_url) > YouTube embed (youtube_url) > placeholder
 
-function VideoSection({ exercise, ratio, height, onRatio }) {
+function VideoSection({ exercise, ratio, width, height, onRatio }) {
   const storageUrl = exercise.video_url;
   const embedUrl   = getYouTubeEmbedUrl(exercise.youtube_url);
 
@@ -56,8 +47,8 @@ function VideoSection({ exercise, ratio, height, onRatio }) {
             if (v.videoWidth && v.videoHeight) onRatio(v.videoWidth / v.videoHeight);
           }}
           style={{
-            width: '100%',
-            aspectRatio: String(ratio),
+            width,
+            height,
             display: 'block',
             objectFit: 'contain',
             backgroundColor: C.lockedBg,
@@ -69,7 +60,7 @@ function VideoSection({ exercise, ratio, height, onRatio }) {
     return (
       <WebView
         source={{ uri: storageUrl }}
-        style={{ width: '100%', height }}
+        style={{ width, height }}
         allowsFullscreenVideo
         mediaPlaybackRequiresUserAction={false}
       />
@@ -82,7 +73,7 @@ function VideoSection({ exercise, ratio, height, onRatio }) {
       return (
         <iframe
           src={embedUrl}
-          style={{ width: '100%', aspectRatio: String(ratio), border: 'none', display: 'block' }}
+          style={{ width, height, border: 'none', display: 'block' }}
           allowFullScreen
           title="exercise video"
         />
@@ -91,7 +82,7 @@ function VideoSection({ exercise, ratio, height, onRatio }) {
     return (
       <WebView
         source={{ uri: embedUrl }}
-        style={{ width: '100%', height }}
+        style={{ width, height }}
         allowsFullscreenVideo
         javaScriptEnabled
       />
@@ -100,7 +91,7 @@ function VideoSection({ exercise, ratio, height, onRatio }) {
 
   // No video
   return (
-    <View style={[styles.noVideo, { height }]}>
+    <View style={[styles.noVideo, { width, height }]}>
       <Text style={styles.noVideoIcon}>▶</Text>
       <Text style={styles.noVideoText}>No video added yet</Text>
     </View>
@@ -111,75 +102,160 @@ function VideoSection({ exercise, ratio, height, onRatio }) {
 
 export default function ExerciseDetailScreen({ route, navigation }) {
   const { exercise } = route.params;
+  // When opened from the workout-building exercise picker we're just previewing
+  // the movement, not authoring the catalog — hide EDIT so it can't be changed there.
+  const hideEdit = route.params?.hideEdit ?? false;
 
   // Default to 16:9 until the real video metadata loads, then snap to its ratio.
   const [ratio, setRatio] = useState(16 / 9);
+  // Measured size of the pager area — each page fills exactly this.
+  const [size, setSize] = useState(null);
+  // 0 = info (left screen), 1 = video (right screen). Land on the video first.
+  const [page, setPage] = useState(1);
+
+  const pagerRef = useRef(null);
+  const didInit = useRef(false);
 
   const cues = exercise.coaching_cues
     ? exercise.coaching_cues.split('\n').filter(line => line.trim().length > 0)
     : [];
 
-  const { w: videoW, h: videoH } = fitToViewport(ratio);
-  const cardWidth = Math.max(videoW, MIN_CARD_W);
+  // Once we know the page width, jump to the video page (rightmost) without a
+  // visible scroll animation.
+  useEffect(() => {
+    if (size && pagerRef.current && !didInit.current) {
+      didInit.current = true;
+      pagerRef.current.scrollTo({ x: size.width, animated: false });
+    }
+  }, [size]);
 
-  return (
-    <ScreenFrame maxWidth={920}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}>
-          <Text style={styles.backText}>← BACK</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>{exercise.name}</Text>
+  const onLayout = (e) => {
+    const { width, height } = e.nativeEvent.layout;
+    setSize((prev) => (prev && prev.width === width && prev.height === height ? prev : { width, height }));
+  };
+
+  const onScroll = (e) => {
+    if (!size) return;
+    const x = e.nativeEvent.contentOffset.x;
+    const p = Math.round(x / size.width);
+    if (p !== page) setPage(p);
+  };
+
+  const goToPage = (p) => {
+    if (size && pagerRef.current) {
+      pagerRef.current.scrollTo({ x: p * size.width, animated: true });
+    }
+    setPage(p);
+  };
+
+  // ── The two pages ──────────────────────────────────────────────────────────
+  const infoPage = size && (
+    <ScrollView
+      style={{ width: size.width, height: size.height }}
+      contentContainerStyle={styles.infoContent}
+      showsVerticalScrollIndicator={false}
+    >
+      <Text style={styles.title}>{exercise.name}</Text>
+
+      <View style={styles.typeBadge}>
+        <Text style={styles.typeText}>{exercise.movement_type}</Text>
       </View>
 
-      <View style={styles.body}>
-        <View style={[styles.card, { width: cardWidth }]}>
-          <View style={[styles.videoWrap, { width: videoW, alignSelf: 'center' }]}>
-            <VideoSection
-              exercise={exercise}
-              ratio={ratio}
-              height={videoH}
-              onRatio={setRatio}
-            />
+      {!!exercise.description && (
+        <>
+          <View style={styles.divider} />
+          <View style={styles.section}>
+            <SectionTitle>DESCRIPTION</SectionTitle>
+            <Text style={styles.bodyText}>{exercise.description}</Text>
+          </View>
+        </>
+      )}
+
+      {cues.length > 0 && (
+        <>
+          <View style={styles.divider} />
+          <View style={styles.section}>
+            <SectionTitle>COACHING CUES</SectionTitle>
+            {cues.map((cue, i) => (
+              <View key={i} style={styles.cueRow}>
+                <Text style={styles.cueBullet}>▸</Text>
+                <Text style={styles.cueText}>{cue.trim()}</Text>
+              </View>
+            ))}
+          </View>
+        </>
+      )}
+
+      {!!exercise.added_by_name && (
+        <Text style={styles.addedBy}>Added by {exercise.added_by_name}</Text>
+      )}
+    </ScrollView>
+  );
+
+  const videoPage = size && (() => {
+    const { w, h } = fitWithin(size.width - 24, size.height - 24, ratio);
+    return (
+      <View style={[styles.videoPage, { width: size.width, height: size.height }]}>
+        <View style={[styles.videoWrap, { width: w, height: h }]}>
+          <VideoSection
+            exercise={exercise}
+            ratio={ratio}
+            width={w}
+            height={h}
+            onRatio={setRatio}
+          />
+        </View>
+      </View>
+    );
+  })();
+
+  return (
+    <ScreenFrame fill maxWidth={720}>
+      <View style={styles.card}>
+        {/* Slim top bar: BACK · page dots · EDIT */}
+        <View style={styles.topBar}>
+          <TouchableOpacity onPress={() => navigation.goBack()} style={styles.pill}>
+            <Text style={styles.pillText}>← BACK</Text>
+          </TouchableOpacity>
+
+          <View style={styles.dots}>
+            <TouchableOpacity onPress={() => goToPage(0)} hitSlop={8}>
+              <View style={[styles.dot, page === 0 && styles.dotActive]} />
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => goToPage(1)} hitSlop={8}>
+              <View style={[styles.dot, page === 1 && styles.dotActive]} />
+            </TouchableOpacity>
           </View>
 
-          <View style={styles.content}>
-            {/* Movement Type Badge */}
-            <View style={styles.typeBadge}>
-              <Text style={styles.typeText}>{exercise.movement_type}</Text>
-            </View>
+          {hideEdit ? (
+            /* Spacer keeps the page dots centered when EDIT is hidden. */
+            <View style={styles.pillSpacer} />
+          ) : (
+            <TouchableOpacity
+              onPress={() => navigation.navigate('AddExercise', { exercise })}
+              style={styles.pill}
+            >
+              <Text style={styles.pillText}>✎ EDIT</Text>
+            </TouchableOpacity>
+          )}
+        </View>
 
-            {/* Description */}
-            {!!exercise.description && (
-              <>
-                <View style={styles.divider} />
-                <View style={styles.section}>
-                  <SectionTitle>DESCRIPTION</SectionTitle>
-                  <Text style={styles.bodyText}>{exercise.description}</Text>
-                </View>
-              </>
-            )}
-
-            {/* Coaching Cues */}
-            {cues.length > 0 && (
-              <>
-                <View style={styles.divider} />
-                <View style={styles.section}>
-                  <SectionTitle>COACHING CUES</SectionTitle>
-                  {cues.map((cue, i) => (
-                    <View key={i} style={styles.cueRow}>
-                      <Text style={styles.cueBullet}>▸</Text>
-                      <Text style={styles.cueText}>{cue.trim()}</Text>
-                    </View>
-                  ))}
-                </View>
-              </>
-            )}
-
-            {/* Added By */}
-            {!!exercise.added_by_name && (
-              <Text style={styles.addedBy}>Added by {exercise.added_by_name}</Text>
-            )}
-          </View>
+        {/* Swipeable pager — info (left) ⇄ video (right) */}
+        <View style={styles.pagerArea} onLayout={onLayout}>
+          {size && (
+            <ScrollView
+              ref={pagerRef}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              onScroll={onScroll}
+              scrollEventThrottle={16}
+              style={styles.pager}
+            >
+              {infoPage}
+              {videoPage}
+            </ScrollView>
+          )}
         </View>
       </View>
     </ScreenFrame>
@@ -187,62 +263,66 @@ export default function ExerciseDetailScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.bg },
+  card: { flex: 1, backgroundColor: C.bg },
 
-  header: {
-    paddingHorizontal: 22,
-    paddingTop: 26,
-    paddingBottom: 18,
-    borderBottomWidth: 1,
-    borderBottomColor: C.cardBorder,
+  // ── Top bar ──
+  topBar: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 14, paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: C.cardBorder,
   },
-  // Glowing ice pill.
-  back: {
-    alignSelf: 'flex-start', marginBottom: 14,
-    paddingHorizontal: 20, paddingVertical: 12,
-    borderRadius: 24, borderWidth: 1.5, borderColor: C.iceGlow,
+  // Glowing ice pill (BACK / EDIT).
+  pill: {
+    paddingHorizontal: 16, paddingVertical: 9,
+    borderRadius: 22, borderWidth: 1.5, borderColor: C.iceGlow,
     backgroundColor: 'rgba(74,158,191,0.10)',
     shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.45, shadowRadius: 10,
   },
-  backText: { fontFamily: F.heading, color: C.iceGlow, fontSize: 16, letterSpacing: 2 },
-  title: {
-    fontFamily: F.heading, fontSize: 30, color: C.iceGlow,
-    letterSpacing: 4, textTransform: 'uppercase', textAlign: 'center',
-    textShadowColor: 'rgba(74,158,191,0.5)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 18,
+  pillText: { fontFamily: F.heading, color: C.iceGlow, fontSize: 14, letterSpacing: 2 },
+  // Reserves the EDIT pill's footprint so the page dots stay centered when hidden.
+  pillSpacer: { width: 84 },
+
+  dots: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  dot: {
+    width: 9, height: 9, borderRadius: 999,
+    backgroundColor: 'rgba(74,158,191,0.28)',
+  },
+  dotActive: {
+    backgroundColor: C.iceGlow,
+    shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.8, shadowRadius: 8,
   },
 
-  body: { paddingTop: 28, paddingBottom: 44, paddingHorizontal: 16, alignItems: 'center' },
+  // ── Pager ──
+  pagerArea: { flex: 1 },
+  pager: { flex: 1 },
 
-  // ── Card shell ── (width is set dynamically from the video ratio)
-  card: {
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.cardBorder,
-    borderRadius: 18,
-    overflow: 'hidden',
-    shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.22, shadowRadius: 18,
+  // ── Video page ──
+  videoPage: {
+    justifyContent: 'center', alignItems: 'center',
+    backgroundColor: C.lockedBg,
   },
-
-  // ── Video ── (width/height set dynamically from the video ratio)
   videoWrap: {
     backgroundColor: C.lockedBg,
-    borderBottomWidth: 1,
-    borderBottomColor: C.cardBorder,
+    borderRadius: 14, overflow: 'hidden',
+    borderWidth: 1, borderColor: C.cardBorder,
   },
   noVideo: {
-    width: '100%',
     backgroundColor: C.lockedBg, justifyContent: 'center', alignItems: 'center', gap: 10,
   },
-  noVideoIcon: {
-    fontSize: 26, color: C.textMuted,
-  },
+  noVideoIcon: { fontSize: 30, color: C.textMuted },
   noVideoText: {
     fontFamily: F.bodyMed, fontSize: 12, color: C.textMuted, letterSpacing: 2,
     textTransform: 'uppercase',
   },
 
-  // ── Content ──
-  content: { paddingHorizontal: 22, paddingVertical: 22, gap: 20 },
+  // ── Info page ──
+  infoContent: { paddingHorizontal: 26, paddingVertical: 30, gap: 20 },
+
+  title: {
+    fontFamily: F.heading, fontSize: 30, color: C.iceGlow,
+    letterSpacing: 3, textTransform: 'uppercase',
+    textShadowColor: 'rgba(74,158,191,0.5)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 18,
+  },
 
   typeBadge: {
     alignSelf: 'flex-start',
@@ -256,9 +336,7 @@ const styles = StyleSheet.create({
     letterSpacing: 3, textTransform: 'uppercase',
   },
 
-  divider: {
-    height: 1, backgroundColor: C.cardBorder, marginHorizontal: -22,
-  },
+  divider: { height: 1, backgroundColor: C.cardBorder, marginHorizontal: -26 },
 
   section: { gap: 12 },
   sectionTitle: {
@@ -270,9 +348,7 @@ const styles = StyleSheet.create({
   },
 
   cueRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
-  cueBullet: {
-    fontFamily: F.body, fontSize: 16, color: C.iceGlow, lineHeight: 25,
-  },
+  cueBullet: { fontFamily: F.body, fontSize: 16, color: C.iceGlow, lineHeight: 25 },
   cueText: {
     fontFamily: F.body, fontSize: 16, color: C.text,
     lineHeight: 25, flex: 1, letterSpacing: 0.5,
@@ -280,6 +356,6 @@ const styles = StyleSheet.create({
 
   addedBy: {
     fontFamily: F.bodyMed, fontSize: 12, color: C.textMuted,
-    letterSpacing: 1.5, textAlign: 'center', marginTop: 8,
+    letterSpacing: 1.5, marginTop: 8,
   },
 });

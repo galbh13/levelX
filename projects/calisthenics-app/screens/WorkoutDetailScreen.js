@@ -6,6 +6,9 @@ import {
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { F } from '../constants/fonts';
+import ScreenFrame from '../components/ScreenFrame';
+import ScreenHeader from '../components/ScreenHeader';
+import PillButton from '../components/PillButton';
 
 const SL = {
   bg:     '#050912',
@@ -31,6 +34,8 @@ export default function WorkoutDetailScreen({ route, navigation }) {
   const [workoutPurpose,  setWorkoutPurpose]  = useState(workout.purpose      ?? '');
   const [coachFeedback,   setCoachFeedback]   = useState(workout.coachFeedback  ?? null);
   const [feedbackIsRead,  setFeedbackIsRead]  = useState(workout.feedbackIsRead ?? false);
+  // Fork paths: workouts.branches = [{key,label},{key,label}] (or empty/null).
+  const [branches,        setBranches]        = useState(workout.branches ?? []);
 
   const fetchExercises = useCallback(async () => {
     setLoading(true);
@@ -43,7 +48,7 @@ export default function WorkoutDetailScreen({ route, navigation }) {
           .order('letter', { ascending: true }),
         supabase
           .from('workouts')
-          .select('title, purpose')
+          .select('title, purpose, branches')
           .eq('id', workout.id)
           .single(),
         supabase
@@ -64,6 +69,7 @@ export default function WorkoutDetailScreen({ route, navigation }) {
       if (workoutRes.data) {
         setWorkoutTitle(workoutRes.data.title ?? '');
         setWorkoutPurpose(workoutRes.data.purpose ?? '');
+        setBranches(workoutRes.data.branches ?? []);
       }
       if (overrideRes?.data) {
         setCoachFeedback(overrideRes.data.coach_feedback ?? null);
@@ -114,61 +120,109 @@ export default function WorkoutDetailScreen({ route, navigation }) {
     setCompleting(false);
   }
 
-  return (
-    <View style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Text style={styles.backText}>← BACK</Text>
-        </TouchableOpacity>
-        <Text style={styles.workoutTitle}>{workoutTitle?.toUpperCase()}</Text>
-        {workoutPurpose ? (
-          <View style={styles.purposeRow}>
-            <View style={styles.purposeAccent} />
-            <Text style={styles.purposeText}>{workoutPurpose}</Text>
-          </View>
-        ) : null}
-        <View style={styles.divider} />
+  // One exercise card. `compact` shrinks it so two fit side by side in a fork path.
+  const renderExercise = (ex, compact = false) => (
+    <View key={ex.id} style={[styles.exCard, compact && styles.exCardCompact]}>
+      <View style={[styles.letterBadge, compact && styles.letterBadgeSm]}>
+        <Text style={[styles.letterText, compact && styles.letterTextSm]}>{ex.letter}</Text>
       </View>
+      <View style={styles.exBody}>
+        <Text style={[styles.exName, compact && styles.exNameSm]}>{ex.name?.toUpperCase()}</Text>
+        {ex.variation ? <Text style={styles.exVariation}>※ {ex.variation}</Text> : null}
+        <View style={styles.metaRow}>
+          {ex.superset_group != null ? (
+            <View style={[styles.metaChip, { borderColor: SL.accent }]}>
+              <Text style={styles.metaChipText}>⇄ SUPERSET</Text>
+            </View>
+          ) : null}
+          {ex.sets ? (
+            <View style={styles.metaChip}><Text style={styles.metaChipText}>{ex.sets} SETS</Text></View>
+          ) : null}
+          {ex.reps ? (
+            <View style={styles.metaChip}><Text style={styles.metaChipText}>{ex.reps} REPS</Text></View>
+          ) : null}
+        </View>
+        {ex.notes ? (
+          <Text style={styles.exNotes}>{ex.notes}</Text>
+        ) : null}
+        {ex.youtube_url ? (
+          <PillButton
+            label="▶ WATCH VIDEO"
+            size="sm"
+            onPress={() => Linking.openURL(ex.youtube_url)}
+            style={{ alignSelf: 'flex-start', marginTop: 8 }}
+          />
+        ) : null}
+      </View>
+    </View>
+  );
+
+  // Split exercises into the common trunk (branch = null), each fork path, and the
+  // merge (post-fork common "ending").
+  const trunk   = exercises.filter(e => !e.branch);
+  const mergeEx = exercises.filter(e => e.branch === 'merge');
+  const hasFork = Array.isArray(branches) && branches.length > 0;
+  const branchExercises = (key) => exercises.filter(e => e.branch === key);
+
+  return (
+    <ScreenFrame maxWidth={900} ready={!loading}>
+      <ScreenHeader title={workoutTitle} onBack={() => navigation.goBack()} />
+      {workoutPurpose ? (
+        <View style={styles.purposeRow}>
+          <View style={styles.purposeAccent} />
+          <Text style={styles.purposeText}>{workoutPurpose}</Text>
+        </View>
+      ) : null}
 
       {loading ? (
         <ActivityIndicator color={SL.accent} style={{ marginTop: 48 }} size="large" />
       ) : (
-        <ScrollView contentContainerStyle={styles.list}>
-          {/* Exercise list */}
-          {exercises.map((ex) => (
-            <View key={ex.id} style={styles.exCard}>
-              <View style={styles.letterBadge}>
-                <Text style={styles.letterText}>{ex.letter}</Text>
-              </View>
-              <View style={styles.exBody}>
-                <Text style={styles.exName}>{ex.name?.toUpperCase()}</Text>
-                <View style={styles.metaRow}>
-                  {ex.sets ? (
-                    <View style={styles.metaChip}><Text style={styles.metaChipText}>{ex.sets} SETS</Text></View>
-                  ) : null}
-                  {ex.reps ? (
-                    <View style={styles.metaChip}><Text style={styles.metaChipText}>{ex.reps} REPS</Text></View>
-                  ) : null}
-                </View>
-                {ex.notes ? (
-                  <Text style={styles.exNotes}>{ex.notes}</Text>
-                ) : null}
-                {ex.youtube_url ? (
-                  <TouchableOpacity
-                    style={styles.videoBtn}
-                    onPress={() => Linking.openURL(ex.youtube_url)}
-                    activeOpacity={0.8}
-                  >
-                    <Text style={styles.videoBtnText}>▶ WATCH VIDEO</Text>
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-            </View>
-          ))}
+        <View style={styles.list}>
+          {/* Common (trunk) exercises — done by everyone, single column */}
+          {trunk.map(ex => renderExercise(ex))}
 
           {exercises.length === 0 && (
             <Text style={styles.emptyText}>NO EXERCISES ADDED YET</Text>
+          )}
+
+          {/* Fork — the two paths the player chooses between, side by side */}
+          {hasFork && (
+            <>
+              <View style={styles.forkDivider}>
+                <View style={styles.forkLine} />
+                <Text style={styles.forkLabel}>⑂ FORK · CHOOSE ONE PATH</Text>
+                <View style={styles.forkLine} />
+              </View>
+              <View style={styles.branchColumns}>
+                {branches.map(branch => {
+                  const list = branchExercises(branch.key);
+                  return (
+                    <View key={branch.key} style={styles.branchColumn}>
+                      <View style={styles.branchHeader}>
+                        <Text style={styles.branchHeaderText} numberOfLines={2}>
+                          {(branch.label || `PATH ${branch.key?.toUpperCase()}`).toUpperCase()}
+                        </Text>
+                      </View>
+                      {list.length > 0
+                        ? list.map(ex => renderExercise(ex, true))
+                        : <Text style={styles.branchEmpty}>END HERE</Text>}
+                    </View>
+                  );
+                })}
+              </View>
+
+              {/* Merge — the shared ending both paths rejoin into */}
+              {mergeEx.length > 0 && (
+                <>
+                  <View style={styles.forkDivider}>
+                    <View style={styles.forkLine} />
+                    <Text style={styles.forkLabel}>⑃ COMMON ENDING</Text>
+                    <View style={styles.forkLine} />
+                  </View>
+                  {mergeEx.map(ex => renderExercise(ex))}
+                </>
+              )}
+            </>
           )}
 
           <View style={{ height: 16 }} />
@@ -183,21 +237,12 @@ export default function WorkoutDetailScreen({ route, navigation }) {
             ]}>
               <View style={styles.feedbackHeader}>
                 <Text style={styles.feedbackLabel}>COACH FEEDBACK</Text>
-                <TouchableOpacity
-                  style={[
-                    styles.feedbackReadBtn,
-                    { borderColor: feedbackIsRead ? SL.gold : SL.muted },
-                  ]}
+                <PillButton
+                  label={feedbackIsRead ? '👁 MARK AS UNREAD' : '👁 MARK AS READ'}
+                  tone={feedbackIsRead ? 'gold' : 'muted'}
+                  size="sm"
                   onPress={handleToggleFeedbackRead}
-                  activeOpacity={0.8}
-                >
-                  <Text style={[
-                    styles.feedbackReadBtnText,
-                    { color: feedbackIsRead ? SL.gold : SL.muted },
-                  ]}>
-                    {feedbackIsRead ? '👁 MARK AS UNREAD' : '👁 MARK AS READ'}
-                  </Text>
-                </TouchableOpacity>
+                />
               </View>
               <Text style={[
                 styles.feedbackText,
@@ -215,68 +260,42 @@ export default function WorkoutDetailScreen({ route, navigation }) {
                 <Text style={styles.completedText}>✅ MISSION COMPLETE</Text>
               </View>
             ) : (
-              <TouchableOpacity
-                style={[styles.primaryBtn, completing && { opacity: 0.6 }]}
+              <PillButton
+                label="MARK AS COMPLETE"
+                variant="solid"
+                size="lg"
                 onPress={handleMarkComplete}
                 disabled={completing}
-                activeOpacity={0.85}
-              >
-                {completing
-                  ? <ActivityIndicator color={SL.bg} />
-                  : <Text style={styles.primaryBtnText}>MARK AS COMPLETE</Text>
-                }
-              </TouchableOpacity>
+                loading={completing}
+                style={{ marginTop: 8 }}
+              />
             )
           ) : (
-            <TouchableOpacity
-              style={styles.secondaryBtn}
-              activeOpacity={0.8}
+            <PillButton
+              label="EDIT WORKOUT"
+              size="lg"
               onPress={() => navigation.navigate('WorkoutEdit', { workout, exercises })}
-            >
-              <Text style={styles.secondaryBtnText}>EDIT WORKOUT</Text>
-            </TouchableOpacity>
+              style={{ marginTop: 8, alignSelf: 'center' }}
+            />
           )}
 
           <View style={{ height: 32 }} />
-        </ScrollView>
+        </View>
       )}
-    </View>
+    </ScreenFrame>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SL.bg },
 
-  header: {
-    width: '100%',
-    maxWidth: 1440,
-    alignSelf: 'center',
-    paddingHorizontal: 24,
-    paddingTop: 60,
-    paddingBottom: 24,
-    borderBottomWidth: 1,
-    borderBottomColor: SL.border,
-  },
-  backText: {
-    fontFamily: F.bodyMed,
-    fontSize: 20,
-    color: SL.accent,
-    letterSpacing: 2,
-    marginBottom: 20,
-  },
-  workoutTitle: {
-    fontFamily: F.heading,
-    fontSize: 44,
-    color: SL.accent,
-    letterSpacing: 4,
-    textAlign: 'center',
-    textTransform: 'uppercase',
-  },
   purposeRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
-    marginTop: 14,
+    marginTop: -4,
+    marginBottom: 6,
+    paddingHorizontal: 22,
     justifyContent: 'center',
   },
   purposeAccent: {
@@ -291,37 +310,13 @@ const styles = StyleSheet.create({
     color: SL.muted,
     letterSpacing: 0.5,
   },
-  divider: {
-    height: 2,
-    backgroundColor: SL.accent,
-    opacity: 0.4,
-    marginTop: 20,
-    borderRadius: 1,
-    shadowColor: SL.accent,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.6,
-    shadowRadius: 6,
-  },
 
-  // Cool ice-glow frame wrapping the body, matching the Skills page.
+  // Inner content padding — the ScreenFrame provides the glowing outer frame.
   list: {
     paddingHorizontal: 16,
-    paddingTop: 20,
-    paddingBottom: 20,
+    paddingTop: 16,
+    paddingBottom: 24,
     gap: 12,
-    width: '100%',
-    maxWidth: 1440,
-    alignSelf: 'center',
-    marginTop: 16,
-    marginBottom: 28,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 18,
-    backgroundColor: SL.bg,
-    shadowColor: SL.accent,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.2,
-    shadowRadius: 20,
   },
 
   exCard: {
@@ -334,7 +329,7 @@ const styles = StyleSheet.create({
     borderColor: SL.border,
     borderLeftWidth: 4,
     borderLeftColor: SL.accent,
-    borderRadius: 10,
+    borderRadius: 12,
     shadowColor: SL.accent,
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.12,
@@ -361,6 +356,73 @@ const styles = StyleSheet.create({
     color: SL.accent,
     letterSpacing: 1,
   },
+
+  // ── Compact card + fork columns ───────────────────────────────────────────
+  exCardCompact: { padding: 12, gap: 12, borderLeftWidth: 3 },
+  letterBadgeSm: { width: 34, height: 34, borderRadius: 8 },
+  letterTextSm: { fontSize: 18 },
+  exNameSm: { fontSize: 19, letterSpacing: 1 },
+
+  forkDivider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 8,
+    marginBottom: 4,
+  },
+  forkLine: {
+    flex: 1,
+    height: 1.5,
+    borderRadius: 1,
+    backgroundColor: SL.accent,
+    opacity: 0.4,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 6,
+  },
+  forkLabel: {
+    fontFamily: F.heading,
+    fontSize: 16,
+    color: SL.accent,
+    letterSpacing: 2,
+  },
+  branchColumns: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  branchColumn: { flex: 1, gap: 10 },
+  branchHeader: {
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    backgroundColor: 'rgba(74,158,191,0.12)',
+    alignItems: 'center',
+    marginBottom: 2,
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+  },
+  branchHeaderText: {
+    fontFamily: F.heading,
+    fontSize: 18,
+    color: SL.accent,
+    letterSpacing: 1,
+    textAlign: 'center',
+  },
+  branchEmpty: {
+    fontFamily: F.bodyMed,
+    fontSize: 16,
+    color: SL.muted,
+    letterSpacing: 1,
+    textAlign: 'center',
+    paddingVertical: 16,
+    fontStyle: 'italic',
+  },
   exBody: { flex: 1, gap: 8 },
   exName: {
     fontFamily: F.heading,
@@ -373,10 +435,10 @@ const styles = StyleSheet.create({
   metaChip: {
     borderWidth: 1,
     borderColor: SL.border,
-    borderRadius: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-    backgroundColor: 'rgba(74,158,191,0.06)',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    backgroundColor: 'rgba(74,158,191,0.08)',
   },
   metaChipText: {
     fontFamily: F.bodyMed,
@@ -392,24 +454,13 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     marginTop: 2,
   },
-
-  videoBtn: {
-    marginTop: 8,
-    alignSelf: 'flex-start',
-    height: 38,
-    paddingHorizontal: 16,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(74,158,191,0.08)',
-  },
-  videoBtnText: {
+  exVariation: {
     fontFamily: F.bodyMed,
-    fontSize: 14,
+    fontSize: 15,
     color: SL.accent,
-    letterSpacing: 2,
+    letterSpacing: 0.5,
+    marginTop: 2,
+    marginBottom: 2,
   },
 
   emptyText: {
@@ -427,7 +478,7 @@ const styles = StyleSheet.create({
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 4,
+    borderRadius: 12,
     padding: 16,
     gap: 12,
   },
@@ -444,25 +495,6 @@ const styles = StyleSheet.create({
     letterSpacing: 2,
     textTransform: 'uppercase',
   },
-  feedbackReadBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderWidth: 1.5,
-    borderColor: SL.muted,
-    borderRadius: 4,
-  },
-  feedbackReadBtnRead: {
-    borderColor: SL.gold,
-  },
-  feedbackReadBtnText: {
-    fontFamily: F.bodyMed,
-    fontSize: 13,
-    color: SL.muted,
-    letterSpacing: 1.5,
-  },
-  feedbackReadBtnTextRead: {
-    color: SL.gold,
-  },
   feedbackText: {
     fontFamily: F.body,
     fontSize: 17,
@@ -471,44 +503,6 @@ const styles = StyleSheet.create({
     lineHeight: 25,
   },
 
-  // Buttons
-  primaryBtn: {
-    height: 54,
-    marginTop: 8,
-    backgroundColor: SL.accent,
-    borderRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: SL.accent,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.5,
-    shadowRadius: 14,
-  },
-  primaryBtnText: {
-    fontFamily: F.heading,
-    fontSize: 24,
-    color: SL.bg,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
-  },
-  secondaryBtn: {
-    height: 48,
-    marginTop: 8,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 10,
-    paddingHorizontal: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    alignSelf: 'center',
-    backgroundColor: 'rgba(74,158,191,0.06)',
-  },
-  secondaryBtnText: {
-    fontFamily: F.heading,
-    fontSize: 22,
-    color: SL.accent,
-    letterSpacing: 3,
-  },
   completedBanner: {
     height: 54,
     marginTop: 8,

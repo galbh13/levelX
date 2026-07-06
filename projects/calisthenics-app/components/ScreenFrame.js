@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useContext, useState } from 'react';
 import { View, ScrollView, StyleSheet } from 'react-native';
+import { NavigationContext } from '@react-navigation/native';
 import { C } from '../constants/colors';
 import { ShimmerFrame, BLUE } from './Shimmer';
 import FrameShatter from './FrameShatter';
@@ -33,12 +34,20 @@ export const FRAME_PAD = 12;
 // `ready`: when the screen's own data is still loading, pass `false` so the
 // hologram-build entrance holds (the card stays covered) until the content —
 // and therefore the card's final size — is settled.
-export default function ScreenFrame({ children, overlay = null, shatter = false, ready = true, colors = BLUE, maxWidth = 1100, duration = 4200, fill = false }) {
+export default function ScreenFrame({ children, overlay = null, shatter = false, ready = true, colors = BLUE, maxWidth = 1100, duration = 4200, fill = false, holoEntry = true }) {
   const [size, setSize] = useState(null);
   // Decide on the FIRST render (lazy initializer) so the build's covers are
   // painted immediately — otherwise the card flashes for a frame before they
   // appear. The first ScreenFrame to mount after login consumes the latch.
-  const [holo] = useState(() => consumeHoloEntry());
+  // Screens that pass `holoEntry={false}` opt out entirely — they neither consume
+  // nor play the build, so the latch is preserved for the real landing card.
+  // All four tab screens mount together at app start (swipe pager, lazy:false),
+  // so only the FOCUSED screen may consume the latch — otherwise an off-screen
+  // tab plays the build invisibly and the landing card gets nothing.
+  const navigation = useContext(NavigationContext);
+  const [holo] = useState(
+    () => holoEntry && (!navigation || navigation.isFocused()) && consumeHoloEntry()
+  );
   const onLayout = (e) => {
     const { width, height } = e.nativeEvent.layout;
     setSize((prev) => prev || { width, height });
@@ -47,14 +56,19 @@ export default function ScreenFrame({ children, overlay = null, shatter = false,
     ? <FrameShatter width={size.width} height={size.height} />
     : <ShimmerFrame style={styles.border} colors={colors} radius={18} thickness={4} duration={duration} active />;
 
+  // The border is overlaid as a sibling of the content-clip (not a child) so the
+  // card's rounded `overflow:hidden` — needed to clip the screen content — can't
+  // shave the frame thin at the corners. The content gets its own rounded clip.
   if (fill) {
     return (
       <View style={styles.outerFill}>
-        <View style={[styles.framedFill, { maxWidth }, shatter && styles.framedOpen]} onLayout={onLayout}>
-          {children}
-          {overlay}
+        <View style={[styles.frameBox, styles.frameBoxFill, { maxWidth }, shatter && styles.framedOpen]} onLayout={onLayout}>
+          <View style={[styles.contentClipFill, shatter && styles.framedOpen]}>
+            {children}
+            {overlay}
+            {holo && <HoloBuild ready={ready} />}
+          </View>
           {border}
-          {holo && <HoloBuild ready={ready} />}
         </View>
       </View>
     );
@@ -68,11 +82,13 @@ export default function ScreenFrame({ children, overlay = null, shatter = false,
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        <View style={[styles.framed, { maxWidth }, shatter && styles.framedOpen]} onLayout={onLayout}>
-          {children}
-          {overlay}
+        <View style={[styles.frameBox, { maxWidth }, shatter && styles.framedOpen]} onLayout={onLayout}>
+          <View style={[styles.contentClip, shatter && styles.framedOpen]}>
+            {children}
+            {overlay}
+            {holo && <HoloBuild ready={ready} />}
+          </View>
           {border}
-          {holo && <HoloBuild ready={ready} />}
         </View>
       </ScrollView>
     </View>
@@ -89,18 +105,25 @@ const styles = StyleSheet.create({
     flexGrow: 1, justifyContent: 'center', alignItems: 'center',
     paddingVertical: 18, paddingHorizontal: FRAME_PAD,
   },
-  framed: {
-    width: '100%', borderRadius: 18, overflow: 'hidden', backgroundColor: C.bg,
+  // Outer box: holds the rounded content-clip + the non-clipped border overlay.
+  // overflow VISIBLE so the border (a sibling) is never clipped at the corners.
+  // The glow lives here (the inner clip would clip its own shadow).
+  frameBox: {
+    width: '100%', borderRadius: 18,
     shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.3, shadowRadius: 18,
+  },
+  // The screen content, clipped to rounded corners (this is the only clip).
+  contentClip: {
+    width: '100%', borderRadius: 18, overflow: 'hidden', backgroundColor: C.bg,
   },
   // During the collapse, let the shattering pieces spill outside the card.
   framedOpen: { overflow: 'visible', backgroundColor: 'transparent' },
 
   // ── Fill mode ──
   outerFill: { flex: 1, backgroundColor: C.bg, paddingHorizontal: FRAME_PAD, paddingVertical: 12, alignItems: 'center' },
-  framedFill: {
+  frameBoxFill: { flex: 1, alignSelf: 'center' },
+  contentClipFill: {
     flex: 1, width: '100%', alignSelf: 'center', borderRadius: 18, overflow: 'hidden', backgroundColor: C.bg,
-    shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.3, shadowRadius: 18,
   },
 
   border: {

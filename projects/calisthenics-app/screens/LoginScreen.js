@@ -260,7 +260,7 @@ export default function LoginScreen() {
             onLayout={measure(setTitleSize)}
           >
             {collapsing && titleSize ? (
-              <BrickShatter width={titleSize.width} height={titleSize.height} cols={16} rows={4}>
+              <BrickShatter width={titleSize.width} height={titleSize.height} cols={12} rows={3}>
                 <Text style={[styles.logo, styles.shatterTitle]}>LevelX</Text>
               </BrickShatter>
             ) : (
@@ -281,7 +281,7 @@ export default function LoginScreen() {
           {/* Inputs */}
           <View style={styles.form}>
             {collapsing && emailSize ? (
-              <BrickShatter width={emailSize.width} height={emailSize.height} cols={14} rows={3} startDelay={90}>
+              <BrickShatter width={emailSize.width} height={emailSize.height} cols={11} rows={2} startDelay={90}>
                 <View style={[styles.input, styles.fieldGhost]}>
                   <Text style={styles.fieldGhostText} numberOfLines={1}>{email || 'Email'}</Text>
                 </View>
@@ -300,7 +300,7 @@ export default function LoginScreen() {
             )}
 
             {collapsing && pwSize ? (
-              <BrickShatter width={pwSize.width} height={pwSize.height} cols={14} rows={3} startDelay={150}>
+              <BrickShatter width={pwSize.width} height={pwSize.height} cols={11} rows={2} startDelay={150}>
                 <View style={[styles.input, styles.fieldGhost]}>
                   <Text style={styles.fieldGhostText} numberOfLines={1}>{password ? '•'.repeat(password.length) : 'Password'}</Text>
                 </View>
@@ -320,7 +320,7 @@ export default function LoginScreen() {
             {error ? <Text style={styles.error}>{error}</Text> : null}
 
             {collapsing && btnSize ? (
-              <BrickShatter width={btnSize.width} height={btnSize.height} cols={14} rows={3} startDelay={210}>
+              <BrickShatter width={btnSize.width} height={btnSize.height} cols={11} rows={2} startDelay={210}>
                 <View style={[styles.button, styles.btnGhost]}>
                   <View style={[styles.buttonFill, styles.btnSolidFill]} />
                   <Text style={styles.buttonText}>Login</Text>

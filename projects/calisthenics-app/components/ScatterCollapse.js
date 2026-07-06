@@ -12,7 +12,7 @@ const PALETTE = [
 ];
 
 function buildSpots() {
-  const n = 34 + Math.floor(Math.random() * 16); // 34–49
+  const n = 22 + Math.floor(Math.random() * 12); // 22–33
   return Array.from({ length: n }, (_, i) => ({
     key: `s${i}`,
     left: `${Math.random() * 100}%`,

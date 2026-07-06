@@ -3,24 +3,57 @@ import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
   FlatList, Image, ActivityIndicator, ScrollView, Platform, Alert, Dimensions,
 } from 'react-native';
+import Svg, { Path } from 'react-native-svg';
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
 import ScreenFrame, { FRAME_PAD } from '../components/ScreenFrame';
 
+// Video-game "upgrade" arrow (double chevron pointing up) — the placeholder icon
+// for exercises with no thumbnail.
+function UpgradeArrow({ size = 30, color = '#4A9EBF' }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Path
+        d="M6 13l6-6 6 6M6 18l6-6 6 6"
+        stroke={color}
+        strokeWidth={2.4}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
+}
+
 // ─── Responsive browse grid ─────────────────────────────────────────────────────
 // Fixed-width cards (no flex:1) so a lone card never stretches full-width, and the
 // column count adapts to the viewport (2 on phones, more on wide web layouts).
 const WIN_W     = Dimensions.get('window').width;
+const WIN_H     = Dimensions.get('window').height;
 const GRID_PAD  = 20;
 const GRID_GAP  = 18;
+// Fixed height for the grid/list scroll region in browse (hug) mode. The card's
+// height is then constant — header + tabs + filters + this region — so it never
+// jumps when data loads in (same idea as AdminDashboard's fixed listArea).
+// Adaptive so it never overflows shorter windows; the region scrolls internally.
+const GRID_AREA_H = Math.max(300, Math.min(460, WIN_H - 460));
+// Both browse tabs share ONE fixed body height so the frame never resizes when
+// switching. The Exercises tab carries the most controls above its grid (CLASS +
+// TYPE chips + search ≈ 300px); we reserve that on top of the grid region, and
+// let each tab's grid FLEX to fill whatever its own controls leave — so the
+// shorter Workouts tab simply gets a taller grid, keeping the outer height equal.
+const TAB_BODY_H = GRID_AREA_H + 320;
 // The screen is wrapped in a centered ScreenFrame (max-width), so the grid sizes
 // off the FRAMED width, not the raw window — otherwise columns overflow the frame
-// on wide screens. ~300px target → bigger, classic-looking cards.
+// on wide screens. ~210px target → compact cards, more per row.
 const FRAME_MAX = 1200;
 const FRAME_W   = Math.min(WIN_W - FRAME_PAD * 2, FRAME_MAX);
-const GRID_COLS = Math.max(2, Math.min(4, Math.floor((FRAME_W - GRID_PAD * 2) / 300)));
+// Exactly 2 nodes per row, always.
+const GRID_COLS = 2;
 const CARD_W    = Math.floor((FRAME_W - GRID_PAD * 2 - GRID_GAP * (GRID_COLS - 1)) / GRID_COLS);
+// Fixed node height: tall enough for a 2-line exercise name. Shorter (1-line)
+// names center vertically inside this constant box, so every node lines up.
+const NODE_H    = 104;
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
@@ -37,7 +70,7 @@ const SL = {
   danger:  '#FF4444',
 };
 
-const MOVEMENT_TYPES = ['All', 'Pull', 'Push', 'Balance', 'Legs', 'Mobility', 'Flexibility'];
+const MOVEMENT_TYPES = ['All', 'Pull', 'Push', 'Balance', 'Legs', 'Core', 'Mobility', 'Flexibility', 'Isolated'];
 
 // ─── Cross-platform confirm ───────────────────────────────────────────────────
 
@@ -56,7 +89,7 @@ function confirmAction(message, onConfirm) {
 
 function ClassChips({ classes, selectedId, onSelect, showAll = true }) {
   return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll} contentContainerStyle={styles.chipRow}>
+    <View style={styles.chipWrap}>
       {showAll && (
         <TouchableOpacity
           style={[styles.chip, selectedId === null && styles.chipActive]}
@@ -76,13 +109,13 @@ function ClassChips({ classes, selectedId, onSelect, showAll = true }) {
           </Text>
         </TouchableOpacity>
       ))}
-    </ScrollView>
+    </View>
   );
 }
 
 // ─── Workout card ─────────────────────────────────────────────────────────────
 
-function WorkoutCard({ workout, expanded, onToggle, onDelete }) {
+function WorkoutCard({ workout, expanded, onToggle, onEdit, onDelete, onRun, onImport, imported }) {
   return (
     <View style={styles.workoutCard}>
       <TouchableOpacity style={styles.workoutCardHeader} onPress={onToggle} activeOpacity={0.8}>
@@ -95,6 +128,15 @@ function WorkoutCard({ workout, expanded, onToggle, onDelete }) {
           )}
         </View>
         <View style={styles.workoutCardActions}>
+          {!!onEdit && (
+            <TouchableOpacity
+              style={styles.cardEditBtn}
+              onPress={onEdit}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={styles.cardEditText}>✎</Text>
+            </TouchableOpacity>
+          )}
           {!!onDelete && (
             <TouchableOpacity
               style={styles.cardDeleteBtn}
@@ -107,6 +149,25 @@ function WorkoutCard({ workout, expanded, onToggle, onDelete }) {
           <Text style={styles.workoutChevron}>{expanded ? '▲' : '▼'}</Text>
         </View>
       </TouchableOpacity>
+
+      {!!onRun && (
+        <TouchableOpacity style={styles.workoutRunBtn} onPress={onRun} activeOpacity={0.85}>
+          <Text style={styles.workoutRunBtnText}>⚔ ELITE WORKOUT</Text>
+        </TouchableOpacity>
+      )}
+
+      {!!onImport && (
+        <TouchableOpacity
+          style={[styles.workoutImportBtn, imported && styles.workoutImportBtnDone]}
+          onPress={onImport}
+          activeOpacity={0.85}
+          disabled={imported}
+        >
+          <Text style={[styles.workoutImportBtnText, imported && styles.workoutImportBtnTextDone]}>
+            {imported ? '✓ ADDED TO MY WORKOUTS' : '+ IMPORT TO MY WORKOUTS'}
+          </Text>
+        </TouchableOpacity>
+      )}
 
       {expanded && (
         <View style={styles.workoutExercises}>
@@ -136,9 +197,11 @@ function WorkoutCard({ workout, expanded, onToggle, onDelete }) {
 
 export default function ExerciseGalleryScreen({ route, navigation }) {
   const selectionMode = route.params?.selectionMode ?? false;
-  const { addExercise, pendingExercises } = useCoach();
+  const { addExercise, pendingExercises, selectedStudent } = useCoach();
 
-  const [activeTab,       setActiveTab]       = useState('exercises');
+  const [activeTab,       setActiveTab]       = useState(route.params?.initialTab ?? 'exercises');
+  // Gallery example-workouts the player has imported this visit → warehouse.
+  const [importedMap,     setImportedMap]     = useState({});
   const [classes,         setClasses]         = useState([]);
   const [exercises,       setExercises]       = useState([]);
   const [exampleWorkouts, setExampleWorkouts] = useState([]);
@@ -150,6 +213,8 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
 
   // Workouts tab
   const [workoutsClassId,  setWorkoutsClassId]  = useState(null);
+  const [workoutCategory,  setWorkoutCategory]  = useState('main'); // main | side | accessory | legs
+  const [workoutSearch,    setWorkoutSearch]    = useState('');
   const [expandedWorkout,  setExpandedWorkout]  = useState(null);
 
   // UI
@@ -183,7 +248,7 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
   async function loadExercises() {
     const { data } = await supabase
       .from('exercises_gallery')
-      .select('id, name, movement_type, youtube_url, video_url, description, coaching_cues, min_class_order')
+      .select('id, name, movement_type, youtube_url, video_url, description, coaching_cues, min_class_order, class_orders')
       .order('name', { ascending: true });
     setExercises(data ?? []);
   }
@@ -191,7 +256,7 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
   async function loadExampleWorkouts() {
     const { data } = await supabase
       .from('gallery_example_workouts')
-      .select('id, title, description, class_order, exercises')
+      .select('id, title, description, class_order, class_orders, exercises, branches, category')
       .order('class_order', { ascending: true })
       .order('created_at', { ascending: true });
     setExampleWorkouts(data ?? []);
@@ -217,6 +282,49 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
     if (!error) setExampleWorkouts(prev => prev.filter(w => w.id !== workout.id));
   }
 
+  // ── Import an example workout into the player's own warehouse ─────────────────
+  // Copies a gallery_example_workouts row (exercises/branches stored INLINE) into
+  // the player's own `workouts` + `exercises`, so it shows in All Workouts and can
+  // be assigned to weekdays from there. Independent copy — later admin edits don't
+  // propagate. Mirrors the old StudentDetail import path.
+  async function handleImportWorkout(template) {
+    if (!selectedStudent?.id) return;
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      const { data: w, error } = await supabase
+        .from('workouts')
+        .insert({
+          title:       template.title,
+          purpose:     template.description ?? '',
+          assigned_to: selectedStudent.id,
+          created_by:  user.id,
+          branches:    template.branches ?? null,
+        })
+        .select()
+        .single();
+      if (error) throw error;
+
+      const rows = (template.exercises ?? []).map((e, i) => ({
+        workout_id:     w.id,
+        letter:         String.fromCharCode(65 + i),
+        name:           e.name,
+        variation:      e.variation ?? null,
+        sets:           String(e.sets ?? '').trim(),
+        reps:           e.reps ?? '',
+        notes:          e.notes ?? '',
+        superset_group: e.superset_group ?? null,
+        branch:         e.branch ?? null,
+      }));
+      if (rows.length) {
+        const { error: exErr } = await supabase.from('exercises').insert(rows);
+        if (exErr) throw exErr;
+      }
+      setImportedMap(prev => ({ ...prev, [template.id]: true }));
+    } catch (e) {
+      alert('Import failed: ' + (e.message ?? 'Something went wrong.'));
+    }
+  }
+
   // ── Derived state ────────────────────────────────────────────────────────────
 
   const selectedExClass = useMemo(
@@ -227,10 +335,12 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
   const filteredExercises = useMemo(() => {
     let result = exercises;
     if (selectedExClass) {
-      result = result.filter(
-        e => e.min_class_order === null || e.min_class_order === undefined
-          || e.min_class_order === selectedExClass.order_index
-      );
+      result = result.filter(e => {
+        const set = e.class_orders
+          ?? (e.min_class_order != null ? [e.min_class_order] : null);
+        // null/empty = targets all classes.
+        return !set || set.length === 0 || set.includes(selectedExClass.order_index);
+      });
     }
     if (movFilter !== 'All') result = result.filter(e => e.movement_type === movFilter);
     if (search.trim())        result = result.filter(e =>
@@ -244,10 +354,18 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
     [classes, workoutsClassId]
   );
 
-  const shownWorkouts = useMemo(
-    () => exampleWorkouts.filter(w => w.class_order === (workoutsClass?.order_index ?? 0)),
-    [exampleWorkouts, workoutsClass]
-  );
+  const shownWorkouts = useMemo(() => {
+    const idx = workoutsClass?.order_index ?? 0;
+    const q = workoutSearch.trim().toLowerCase();
+    return exampleWorkouts.filter(w => {
+      const set = w.class_orders ?? (w.class_order != null ? [w.class_order] : []);
+      // Rows predating the category column default to 'main'.
+      const cat = w.category ?? 'main';
+      if (!(set.includes(idx) && cat === workoutCategory)) return false;
+      if (q && !(w.title ?? '').toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [exampleWorkouts, workoutsClass, workoutCategory, workoutSearch]);
 
   // ── Selection-mode handlers ──────────────────────────────────────────────────
 
@@ -267,19 +385,27 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
     const isAdded  = !!addedMap[item.id];
     return (
       <View style={styles.selCard}>
-        {thumbUri ? (
-          <Image source={{ uri: thumbUri }} style={styles.selThumb} resizeMode="cover" />
-        ) : (
-          <View style={[styles.selThumb, styles.thumbPlaceholder]}>
-            <Text style={styles.thumbIcon}>▶</Text>
+        {/* Tapping the thumbnail/name opens the full exercise detail (video +
+            cues); the + ADD button stays separate so it still just adds. */}
+        <TouchableOpacity
+          style={styles.selCardMain}
+          onPress={() => navigation.navigate('ExerciseDetail', { exercise: item, hideEdit: true })}
+          activeOpacity={0.75}
+        >
+          {thumbUri ? (
+            <Image source={{ uri: thumbUri }} style={styles.selThumb} resizeMode="cover" />
+          ) : (
+            <View style={[styles.selThumb, styles.thumbPlaceholder]}>
+              <UpgradeArrow size={30} color={SL.accent} />
+            </View>
+          )}
+          <View style={styles.selCardBody}>
+            <Text style={styles.selExName} numberOfLines={2}>{item.name}</Text>
+            <View style={styles.typeBadge}>
+              <Text style={styles.typeText}>{(item.movement_type ?? '').toUpperCase()}</Text>
+            </View>
           </View>
-        )}
-        <View style={styles.selCardBody}>
-          <Text style={styles.selExName} numberOfLines={2}>{item.name}</Text>
-          <View style={styles.typeBadge}>
-            <Text style={styles.typeText}>{(item.movement_type ?? '').toUpperCase()}</Text>
-          </View>
-        </View>
+        </TouchableOpacity>
         <TouchableOpacity
           style={[styles.addExBtn, isAdded && styles.addExBtnAdded]}
           onPress={() => handleAdd(item)}
@@ -294,69 +420,26 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
   }
 
   function renderBrowseCard({ item }) {
-    const thumbId  = getYouTubeId(item.youtube_url);
-    const thumbUri = thumbId ? `https://img.youtube.com/vi/${thumbId}/mqdefault.jpg` : null;
-    const hasVideo = !!item.video_url;
-    const className =
-      item.min_class_order !== null && item.min_class_order !== undefined
-        ? (classes.find(c => c.order_index === item.min_class_order)?.name ?? `Class ${item.min_class_order + 1}`)
-        : null;
-
     return (
-      <TouchableOpacity
-        style={styles.browseCard}
-        onPress={() => navigation.navigate('ExerciseDetail', { exercise: item })}
-        activeOpacity={0.8}
-      >
-        {/* Thumbnail */}
-        <View style={styles.thumbWrap}>
-          {thumbUri ? (
-            <Image source={{ uri: thumbUri }} style={styles.thumbFill} resizeMode="cover" />
-          ) : hasVideo && Platform.OS === 'web' ? (
-            // First frame of the uploaded video as a poster (muted, no controls)
-            <video
-              src={`${item.video_url}#t=0.1`}
-              muted
-              playsInline
-              preload="metadata"
-              style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover' }}
-            />
-          ) : (
-            <View style={[styles.thumbFill, styles.thumbPlaceholder]} />
-          )}
+      <View style={styles.browseCard}>
+        <TouchableOpacity
+          style={styles.browseCardInner}
+          onPress={() => navigation.navigate('ExerciseDetail', { exercise: item })}
+          activeOpacity={0.8}
+        >
+          {/* Name only — centered vertically + horizontally; up to two lines. */}
+          <Text style={styles.browseExName} numberOfLines={2}>{item.name}</Text>
+        </TouchableOpacity>
 
-          {/* Play overlay */}
-          <View style={styles.playOverlay} pointerEvents="none">
-            <View style={styles.playCircle}>
-              <Text style={styles.playIcon}>▶</Text>
-            </View>
-          </View>
-
-          {/* Delete button — admin browse only */}
-          <TouchableOpacity
-            style={styles.exDeleteBtn}
-            onPress={() => handleDeleteExercise(item)}
-            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-          >
-            <Text style={styles.exDeleteText}>✕</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Body */}
-        <View style={styles.browseCardBody}>
-          <Text style={styles.browseExName} numberOfLines={1}>{item.name}</Text>
-          <View style={styles.badgeRow}>
-            <View style={styles.typeBadge}>
-              <Text style={styles.typeText}>{(item.movement_type ?? '').toUpperCase()}</Text>
-            </View>
-            {className && (
-              <View style={styles.classBadge}>
-                <Text style={styles.classBadgeText}>{className}</Text>
-              </View>
-            )}
-          </View>
-        </View>
-      </TouchableOpacity>
+        {/* Delete button — admin browse only */}
+        <TouchableOpacity
+          style={styles.exDeleteBtn}
+          onPress={() => handleDeleteExercise(item)}
+          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+        >
+          <Text style={styles.exDeleteText}>✕</Text>
+        </TouchableOpacity>
+      </View>
     );
   }
 
@@ -365,12 +448,15 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
-    <ScreenFrame maxWidth={FRAME_MAX} fill>
-    <View style={styles.container}>
+    <ScreenFrame maxWidth={FRAME_MAX} fill={selectionMode}>
+    <View style={[styles.container, !selectionMode && styles.containerHug]}>
 
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity style={styles.navBtn} onPress={() => navigation.goBack()} activeOpacity={0.85}>
+        {/* popToTop (not goBack) so BACK always lands on the stack root — the admin
+            dashboard — regardless of how we got here (e.g. via Detail → Edit, which
+            re-enter the gallery and would otherwise make goBack retrace those). */}
+        <TouchableOpacity style={styles.navBtn} onPress={() => navigation.popToTop()} activeOpacity={0.85}>
           <Text style={styles.backText}>← BACK</Text>
         </TouchableOpacity>
         <Text style={styles.title}>
@@ -385,7 +471,13 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
             <View style={{ width: 48 }} />
           )
         ) : (
-          <TouchableOpacity style={styles.navBtn} onPress={() => navigation.navigate('AddExercise')} activeOpacity={0.85}>
+          <TouchableOpacity
+            style={styles.navBtn}
+            onPress={() => activeTab === 'workouts'
+              ? navigation.navigate('AddExampleWorkout', { defaultClassOrder: workoutsClass?.order_index ?? 0, defaultCategory: workoutCategory })
+              : navigation.navigate('AddExercise')}
+            activeOpacity={0.85}
+          >
             <Text style={styles.addNewText}>+ NEW</Text>
           </TouchableOpacity>
         )}
@@ -413,22 +505,12 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
         </View>
       )}
 
-      {loading ? (
-        <ActivityIndicator color={SL.accent} style={{ marginTop: 48 }} size="large" />
+      {selectionMode ? (
 
-      ) : activeTab === 'exercises' || selectionMode ? (
-
-        /* ─────────── EXERCISES TAB ─────────── */
+        /* ─────────── SELECTION MODE (fill, scrollable) ─────────── */
         <>
-          {!selectionMode && (
-            <>
-              <Text style={styles.sectionLabel}>CLASS</Text>
-              <ClassChips classes={classes} selectedId={exClassId} onSelect={setExClassId} showAll />
-            </>
-          )}
-
           <Text style={styles.sectionLabel}>TYPE</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll} contentContainerStyle={styles.chipRow}>
+          <View style={styles.chipWrap}>
             {MOVEMENT_TYPES.map(f => (
               <TouchableOpacity
                 key={f}
@@ -440,7 +522,7 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
                 </Text>
               </TouchableOpacity>
             ))}
-          </ScrollView>
+          </View>
 
           <View style={styles.searchWrap}>
             <TextInput
@@ -452,50 +534,91 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
             />
           </View>
 
-          {selectionMode ? (
-            <FlatList
-              data={filteredExercises}
-              keyExtractor={item => item.id}
-              renderItem={renderSelectionCard}
-              contentContainerStyle={styles.selList}
-              ListEmptyComponent={<Text style={styles.empty}>No exercises found.</Text>}
-            />
-          ) : (
-            <FlatList
-              data={filteredExercises}
-              keyExtractor={item => item.id}
-              renderItem={renderBrowseCard}
-              numColumns={GRID_COLS}
-              key={`grid-${GRID_COLS}`}
-              contentContainerStyle={styles.browseGrid}
-              columnWrapperStyle={styles.browseGridRow}
-              ListEmptyComponent={
-                <View style={styles.emptyBox}>
-                  <Text style={styles.empty}>No exercises yet.</Text>
-                  <Text style={styles.emptyHint}>Tap + NEW to add the first one.</Text>
-                </View>
-              }
-            />
-          )}
+          <FlatList
+            data={filteredExercises}
+            keyExtractor={item => item.id}
+            renderItem={renderSelectionCard}
+            contentContainerStyle={styles.selList}
+            ListEmptyComponent={
+              loading
+                ? <ActivityIndicator color={SL.accent} style={{ marginTop: 48 }} size="large" />
+                : <Text style={styles.empty}>No exercises found.</Text>
+            }
+          />
 
-          {selectionMode && (
-            <View style={styles.doneBar}>
-              <TouchableOpacity style={styles.doneBtn} onPress={() => navigation.goBack()} activeOpacity={0.85}>
-                <Text style={styles.doneBtnText}>
-                  {selectedCount > 0
-                    ? `DONE — ${selectedCount} EXERCISE${selectedCount !== 1 ? 'S' : ''} ADDED`
-                    : 'DONE — BACK TO WORKOUT'}
+          <View style={styles.doneBar}>
+            <TouchableOpacity style={styles.doneBtn} onPress={() => navigation.goBack()} activeOpacity={0.85}>
+              <Text style={styles.doneBtnText}>
+                {selectedCount > 0
+                  ? `DONE — ${selectedCount} EXERCISE${selectedCount !== 1 ? 'S' : ''} ADDED`
+                  : 'DONE — BACK TO WORKOUT'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </>
+
+      ) : activeTab === 'exercises' ? (
+
+        /* ─────────── EXERCISES TAB ─────────── */
+        /* Fixed body height (shared with the workouts tab) so the frame never
+           resizes on switch; the grid flexes to fill below the filters. */
+        <View style={styles.tabBody}>
+          <Text style={styles.sectionLabel}>CLASS</Text>
+          <ClassChips classes={classes} selectedId={exClassId} onSelect={setExClassId} showAll />
+
+          <Text style={styles.sectionLabel}>TYPE</Text>
+          <View style={styles.chipWrap}>
+            {MOVEMENT_TYPES.map(f => (
+              <TouchableOpacity
+                key={f}
+                style={[styles.chip, movFilter === f && styles.chipActive]}
+                onPress={() => setMovFilter(f)}
+              >
+                <Text style={[styles.chipText, movFilter === f && styles.chipTextActive]}>
+                  {f.toUpperCase()}
                 </Text>
               </TouchableOpacity>
-            </View>
-          )}
-        </>
+            ))}
+          </View>
+
+          <View style={styles.searchWrap}>
+            <TextInput
+              style={styles.search}
+              placeholder="Search exercises..."
+              placeholderTextColor={SL.muted}
+              value={search}
+              onChangeText={setSearch}
+            />
+          </View>
+
+          <View style={styles.gridArea}>
+            {loading ? (
+              <View style={styles.gridCenter}>
+                <ActivityIndicator color={SL.accent} size="large" />
+              </View>
+            ) : filteredExercises.length === 0 ? (
+              <View style={styles.emptyBox}>
+                <Text style={styles.empty}>No exercises yet.</Text>
+                <Text style={styles.emptyHint}>Tap + NEW to add the first one.</Text>
+              </View>
+            ) : (
+              <ScrollView style={styles.gridScroll} contentContainerStyle={styles.browseGrid} showsVerticalScrollIndicator={false}>
+                <View style={styles.browseGridWrap}>
+                  {filteredExercises.map(item => (
+                    <React.Fragment key={item.id}>{renderBrowseCard({ item })}</React.Fragment>
+                  ))}
+                </View>
+              </ScrollView>
+            )}
+          </View>
+        </View>
 
       ) : (
 
         /* ─────────── EXAMPLE WORKOUTS TAB ─────────── */
-        <>
-          {/* Class selector + New button row */}
+        <View style={styles.tabBody}>
+          {/* Class selector — workout creation now lives in the header + NEW */}
+          <Text style={styles.sectionLabel}>CLASS</Text>
           <View style={styles.workoutsTopRow}>
             <ClassChips
               classes={classes}
@@ -503,37 +626,78 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
               onSelect={id => { setWorkoutsClassId(id ?? classes[0]?.id); setExpandedWorkout(null); }}
               showAll={false}
             />
-            <TouchableOpacity
-              style={styles.newWorkoutBtn}
-              onPress={() => navigation.navigate('AddExampleWorkout', {
-                defaultClassOrder: workoutsClass?.order_index ?? 0,
-              })}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.newWorkoutBtnText}>+ NEW</Text>
-            </TouchableOpacity>
           </View>
 
-          <ScrollView contentContainerStyle={styles.workoutsList}>
-            {shownWorkouts.length === 0 ? (
-              <View style={styles.emptyBox}>
-                <Text style={styles.empty}>No example workouts yet.</Text>
-                <Text style={styles.emptyHint}>Tap + NEW to create one for this class.</Text>
+          {/* Goal filter within the class — categories mirror the workout builder
+              (AddExampleWorkoutScreen): MAIN QUEST / SIDE QUEST / ACCESSORIES. */}
+          <Text style={styles.sectionLabel}>GOAL</Text>
+          <View style={styles.chipWrap}>
+            {[
+              { k: 'main',      l: 'MAIN QUEST' },
+              { k: 'side',      l: 'SIDE QUEST' },
+              { k: 'accessory', l: 'ACCESSORIES' },
+              { k: 'legs',      l: 'LEGS' },
+            ].map(c => (
+              <TouchableOpacity
+                key={c.k}
+                style={[styles.chip, workoutCategory === c.k && styles.chipActive]}
+                onPress={() => { setWorkoutCategory(c.k); setExpandedWorkout(null); }}
+              >
+                <Text style={[styles.chipText, workoutCategory === c.k && styles.chipTextActive]}>
+                  {c.l}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <View style={styles.searchWrap}>
+            <TextInput
+              style={styles.search}
+              placeholder="Search workouts..."
+              placeholderTextColor={SL.muted}
+              value={workoutSearch}
+              onChangeText={setWorkoutSearch}
+            />
+          </View>
+
+          <View style={styles.gridArea}>
+            {loading ? (
+              <View style={styles.gridCenter}>
+                <ActivityIndicator color={SL.accent} size="large" />
               </View>
             ) : (
-              shownWorkouts.map(workout => (
-                <WorkoutCard
-                  key={workout.id}
-                  workout={workout}
-                  expanded={expandedWorkout === workout.id}
-                  onToggle={() => setExpandedWorkout(prev => prev === workout.id ? null : workout.id)}
-                  onDelete={() => handleDeleteWorkout(workout)}
-                />
-              ))
+              <ScrollView style={styles.gridScroll} contentContainerStyle={styles.workoutsList} showsVerticalScrollIndicator={false}>
+                {shownWorkouts.length === 0 ? (
+                  <View style={styles.emptyBox}>
+                    {workoutSearch.trim() ? (
+                      <>
+                        <Text style={styles.empty}>No workouts match "{workoutSearch.trim()}".</Text>
+                        <Text style={styles.emptyHint}>Try a different search or category.</Text>
+                      </>
+                    ) : (
+                      <>
+                        <Text style={styles.empty}>No example workouts yet.</Text>
+                        <Text style={styles.emptyHint}>Tap + NEW to create one for this class.</Text>
+                      </>
+                    )}
+                  </View>
+                ) : (
+                  shownWorkouts.map(workout => (
+                    <WorkoutCard
+                      key={workout.id}
+                      workout={workout}
+                      expanded={expandedWorkout === workout.id}
+                      onToggle={() => setExpandedWorkout(prev => prev === workout.id ? null : workout.id)}
+                      onEdit={() => navigation.navigate('AddExampleWorkout', { workout })}
+                      onDelete={() => handleDeleteWorkout(workout)}
+                    />
+                  ))
+                )}
+                <View style={{ height: 40 }} />
+              </ScrollView>
             )}
-            <View style={{ height: 40 }} />
-          </ScrollView>
-        </>
+          </View>
+        </View>
       )}
     </View>
     </ScreenFrame>
@@ -555,6 +719,9 @@ function getYouTubeId(url) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SL.bg },
+  // Browse mode hugs its content (no flex:1) so the frame shrinks to fit and
+  // centers, instead of stretching to the full viewport height like fill mode.
+  containerHug: { flex: 0 },
 
   // ── Header ───────────────────────────────────────────────────────────────────
 
@@ -575,14 +742,14 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(74,158,191,0.10)',
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.45, shadowRadius: 10,
   },
-  backText: { fontFamily: F.heading, fontSize: 16, color: SL.accent, letterSpacing: 2 },
+  backText: { fontFamily: F.heading, fontSize: 19, color: SL.accent, letterSpacing: 2 },
   title: {
-    fontFamily: F.heading, fontSize: 30, color: SL.accent,
+    fontFamily: F.heading, fontSize: 36, color: SL.accent,
     letterSpacing: 6, textTransform: 'uppercase', flex: 1, textAlign: 'center',
     textShadowColor: 'rgba(74,158,191,0.5)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 20,
   },
   addNewText: {
-    fontFamily: F.heading, fontSize: 16, color: SL.accent, letterSpacing: 2,
+    fontFamily: F.heading, fontSize: 19, color: SL.accent, letterSpacing: 2,
   },
   countBadge: {
     width: 48, height: 28, backgroundColor: SL.accent,
@@ -605,7 +772,7 @@ const styles = StyleSheet.create({
     borderBottomColor: SL.accent,
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.8, shadowRadius: 8,
   },
-  tabText: { fontFamily: F.heading, fontSize: 17, color: SL.muted, letterSpacing: 2.5 },
+  tabText: { fontFamily: F.heading, fontSize: 20, color: SL.muted, letterSpacing: 2.5 },
   tabTextActive: {
     color: SL.accent,
     textShadowColor: 'rgba(74,158,191,0.5)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
@@ -614,12 +781,16 @@ const styles = StyleSheet.create({
   // ── Section labels & chips ───────────────────────────────────────────────────
 
   sectionLabel: {
-    fontFamily: F.heading, fontSize: 14, color: SL.accent, opacity: 0.85,
+    fontFamily: F.heading, fontSize: 17, color: SL.accent, opacity: 0.85,
     letterSpacing: 3, textTransform: 'uppercase',
     paddingHorizontal: 22, paddingTop: 22, paddingBottom: 4,
   },
-  chipScroll: { flexGrow: 0 },
-  chipRow: { flexDirection: 'row', gap: 12, paddingHorizontal: 22, paddingVertical: 12 },
+  // Phone-friendly chip layout: wraps to multiple rows so no chip is clipped off
+  // the right edge (the old horizontal ScrollView cut chips on narrow screens).
+  chipWrap: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 12,
+    paddingHorizontal: 22, paddingVertical: 12,
+  },
   chip: {
     paddingVertical: 12, paddingHorizontal: 22,
     borderRadius: 999, borderWidth: 1.5, borderColor: SL.border, backgroundColor: SL.panel,
@@ -628,7 +799,7 @@ const styles = StyleSheet.create({
     borderColor: SL.accent, backgroundColor: 'rgba(74,158,191,0.16)',
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.5, shadowRadius: 10,
   },
-  chipText: { fontFamily: F.bodyMed, fontSize: 16, color: SL.muted, letterSpacing: 1.5 },
+  chipText: { fontFamily: F.bodyMed, fontSize: 19, color: SL.muted, letterSpacing: 1.5 },
   chipTextActive: { color: SL.accent, fontFamily: F.heading },
 
   // ── Search ───────────────────────────────────────────────────────────────────
@@ -637,16 +808,16 @@ const styles = StyleSheet.create({
   search: {
     height: 58, backgroundColor: SL.panel, borderWidth: 1.5,
     borderColor: SL.accent, borderRadius: 14, paddingHorizontal: 20,
-    fontFamily: F.body, fontSize: 19, color: SL.text,
+    fontFamily: F.body, fontSize: 22, color: SL.text,
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.18, shadowRadius: 10,
   },
 
   // ── Empty state ──────────────────────────────────────────────────────────────
 
   emptyBox: { alignItems: 'center', marginTop: 40, paddingHorizontal: 24 },
-  empty: { fontFamily: F.bodyMed, fontSize: 15, color: SL.muted, textAlign: 'center', letterSpacing: 1 },
+  empty: { fontFamily: F.bodyMed, fontSize: 18, color: SL.muted, textAlign: 'center', letterSpacing: 1 },
   emptyHint: {
-    fontFamily: F.body, fontSize: 13, color: SL.muted,
+    fontFamily: F.body, fontSize: 16, color: SL.muted,
     textAlign: 'center', marginTop: 8, letterSpacing: 0.5,
   },
 
@@ -658,31 +829,61 @@ const styles = StyleSheet.create({
     backgroundColor: SL.panel, borderWidth: 1.5, borderColor: SL.border,
     borderRadius: 4, overflow: 'hidden',
   },
+  selCardMain: { flex: 1, flexDirection: 'row', alignItems: 'center' },
   selThumb: { width: 72, height: 64, flexShrink: 0 },
   selCardBody: { flex: 1, paddingHorizontal: 12, paddingVertical: 10, gap: 6 },
   selExName: {
-    fontFamily: F.heading, fontSize: 14, color: SL.text,
+    fontFamily: F.heading, fontSize: 17, color: SL.text,
     letterSpacing: 0.5, textTransform: 'uppercase',
   },
+  // Same glowing ice-pill shape as the BACK button, so the two read as one family.
   addExBtn: {
-    marginRight: 12, paddingHorizontal: 14, paddingVertical: 10,
-    borderWidth: 1.5, borderColor: SL.accent, borderRadius: 4,
-    backgroundColor: 'transparent', minWidth: 76, alignItems: 'center',
+    marginRight: 12, paddingHorizontal: 18, paddingVertical: 10,
+    borderRadius: 24, borderWidth: 1.5, borderColor: SL.accent,
+    backgroundColor: 'rgba(74,158,191,0.10)',
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.45, shadowRadius: 10,
+    minWidth: 76, alignItems: 'center',
   },
-  addExBtnAdded: { borderColor: SL.green, backgroundColor: 'rgba(76,175,80,0.1)' },
-  addExBtnText: { fontFamily: F.body, fontSize: 13, color: SL.accent, letterSpacing: 1.5 },
+  addExBtnAdded: {
+    borderColor: SL.green, backgroundColor: 'rgba(76,175,80,0.10)', shadowColor: SL.green,
+  },
+  addExBtnText: { fontFamily: F.heading, fontSize: 16, color: SL.accent, letterSpacing: 1.5 },
   addExBtnTextAdded: { color: SL.green },
 
   // ── Browse grid ───────────────────────────────────────────────────────────────
 
+  // Shared fixed-height body for the two browse tabs → the frame stays the exact
+  // same size when switching tabs, regardless of how many filter rows each shows.
+  tabBody: { height: TAB_BODY_H },
+  // Scroll region fills whatever space the tab's controls leave inside tabBody, so
+  // both tabs end up the same outer height (shorter controls → taller grid).
+  gridArea: { flex: 1 },
+  gridScroll: { flex: 1 },
+  gridCenter: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+
   browseGrid: { padding: GRID_PAD, paddingTop: 12, paddingBottom: 32 },
-  browseGridRow: { gap: GRID_GAP, marginBottom: GRID_GAP },
-  // Classic media card: subtle border, soft shadow, rounded — not neon.
+  // Non-virtualized wrapping grid. Percentage-width cards + space-between so the
+  // two columns always fill the row edge-to-edge regardless of measured width.
+  browseGridWrap: {
+    flexDirection: 'row', flexWrap: 'wrap',
+    justifyContent: 'space-between', rowGap: GRID_GAP,
+  },
+  // Name-only node: fixed height so every card lines up; the name is centered
+  // inside, so a 1-line name sits mid-card and a 2-line name fills it evenly.
   browseCard: {
-    width: CARD_W,
+    width: '48%',
+    height: NODE_H,
+    position: 'relative',
     backgroundColor: SL.panel,
     borderWidth: 1, borderColor: SL.border, borderRadius: 16, overflow: 'hidden',
     shadowColor: '#000', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.35, shadowRadius: 14,
+  },
+  browseCardInner: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
   },
 
   // Thumbnail (square, uniform across the grid)
@@ -691,10 +892,10 @@ const styles = StyleSheet.create({
     backgroundColor: SL.panelAlt, position: 'relative', overflow: 'hidden',
   },
   thumbFill: { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' },
+  // No filled square anymore — the dumbbell icon sits on the card's own background.
   thumbPlaceholder: {
-    backgroundColor: SL.panelAlt, justifyContent: 'center', alignItems: 'center',
+    backgroundColor: 'transparent', justifyContent: 'center', alignItems: 'center',
   },
-  thumbIcon: { fontSize: 20, color: SL.muted },
   playOverlay: {
     ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center',
   },
@@ -707,10 +908,10 @@ const styles = StyleSheet.create({
   },
   playIcon: { fontSize: 22, color: '#E8F4FF', marginLeft: 4 },
 
-  browseCardBody: { paddingHorizontal: 16, paddingVertical: 16, gap: 12 },
   browseExName: {
-    fontFamily: F.heading, fontSize: 19, color: SL.text,
+    fontFamily: F.heading, fontSize: 22, color: SL.text,
     letterSpacing: 0.5, textTransform: 'uppercase',
+    textAlign: 'center', lineHeight: 28,
   },
   badgeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
 
@@ -722,14 +923,14 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: SL.accent, borderRadius: 999,
     paddingHorizontal: 12, paddingVertical: 5,
   },
-  typeText: { fontFamily: F.bodyMed, fontSize: 12, color: SL.accent, letterSpacing: 1 },
+  typeText: { fontFamily: F.bodyMed, fontSize: 15, color: SL.accent, letterSpacing: 1 },
   classBadge: {
     alignSelf: 'flex-start',
     backgroundColor: 'rgba(255,215,0,0.08)',
     borderWidth: 1, borderColor: 'rgba(255,215,0,0.5)', borderRadius: 999,
     paddingHorizontal: 12, paddingVertical: 5,
   },
-  classBadgeText: { fontFamily: F.bodyMed, fontSize: 12, color: SL.gold, letterSpacing: 1 },
+  classBadgeText: { fontFamily: F.bodyMed, fontSize: 15, color: SL.gold, letterSpacing: 1 },
 
   // Delete button on exercise browse card
   exDeleteBtn: {
@@ -768,21 +969,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
   },
-  newWorkoutBtn: {
-    marginRight: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 4,
-    backgroundColor: 'transparent',
-  },
-  newWorkoutBtnText: {
-    fontFamily: F.heading,
-    fontSize: 13,
-    color: SL.accent,
-    letterSpacing: 2,
-  },
 
   // ── Workout cards ─────────────────────────────────────────────────────────────
 
@@ -797,20 +983,55 @@ const styles = StyleSheet.create({
   workoutCardLeft: { flex: 1 },
   workoutCardActions: { flexDirection: 'row', alignItems: 'center', gap: 16 },
   workoutTitle: {
-    fontFamily: F.heading, fontSize: 18, color: SL.text,
+    fontFamily: F.heading, fontSize: 22, color: SL.text,
     letterSpacing: 2, textTransform: 'uppercase', marginBottom: 4,
   },
   workoutDesc: {
-    fontFamily: F.body, fontSize: 13, color: SL.muted, letterSpacing: 0.5, lineHeight: 18,
+    fontFamily: F.body, fontSize: 16, color: SL.muted, letterSpacing: 0.5, lineHeight: 22,
   },
   workoutChevron: { fontFamily: F.body, fontSize: 12, color: SL.muted },
-  cardDeleteBtn: {
-    width: 28, height: 28, borderRadius: 14,
-    backgroundColor: 'rgba(255,68,68,0.15)',
-    borderWidth: 1, borderColor: 'rgba(255,68,68,0.4)',
+  workoutRunBtn: {
+    marginHorizontal: 16, marginBottom: 14,
+    height: 44, borderRadius: 8,
+    backgroundColor: SL.accent,
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.4, shadowRadius: 12,
+  },
+  workoutRunBtnText: {
+    fontFamily: F.heading, fontSize: 16, color: SL.bg,
+    letterSpacing: 2, textTransform: 'uppercase',
+  },
+  workoutImportBtn: {
+    marginHorizontal: 16, marginBottom: 14,
+    height: 44, borderRadius: 8,
+    borderWidth: 1.5, borderColor: SL.accent,
+    backgroundColor: 'rgba(74,158,191,0.1)',
     justifyContent: 'center', alignItems: 'center',
   },
-  cardDeleteText: { fontFamily: F.body, fontSize: 13, color: SL.danger },
+  workoutImportBtnDone: {
+    borderColor: SL.green,
+    backgroundColor: 'rgba(76,175,80,0.12)',
+  },
+  workoutImportBtnText: {
+    fontFamily: F.heading, fontSize: 16, color: SL.accent,
+    letterSpacing: 2, textTransform: 'uppercase',
+  },
+  workoutImportBtnTextDone: { color: SL.green },
+  cardEditBtn: {
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: 'rgba(74,158,191,0.15)',
+    borderWidth: 1.5, borderColor: SL.accent,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  cardEditText: { fontFamily: F.body, fontSize: 20, color: SL.accent },
+  cardDeleteBtn: {
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: 'rgba(255,68,68,0.15)',
+    borderWidth: 1.5, borderColor: 'rgba(255,68,68,0.6)',
+    justifyContent: 'center', alignItems: 'center',
+  },
+  cardDeleteText: { fontFamily: F.body, fontSize: 20, color: SL.danger },
 
   workoutExercises: {
     borderTopWidth: 1, borderTopColor: SL.border,
@@ -824,16 +1045,16 @@ const styles = StyleSheet.create({
     flex: 1, flexDirection: 'row', alignItems: 'flex-start', gap: 12,
   },
   exerciseLetter: {
-    fontFamily: F.heading, fontSize: 16, color: SL.accent,
-    letterSpacing: 1, width: 20, marginTop: 1,
+    fontFamily: F.heading, fontSize: 19, color: SL.accent,
+    letterSpacing: 1, width: 24, marginTop: 1,
   },
   exerciseName: {
-    fontFamily: F.bodyMed, fontSize: 14, color: SL.text, letterSpacing: 0.5,
+    fontFamily: F.bodyMed, fontSize: 17, color: SL.text, letterSpacing: 0.5,
   },
   exerciseNotes: {
-    fontFamily: F.body, fontSize: 11, color: SL.muted, letterSpacing: 0.3, marginTop: 2,
+    fontFamily: F.body, fontSize: 14, color: SL.muted, letterSpacing: 0.3, marginTop: 2,
   },
   exerciseSetsReps: {
-    fontFamily: F.heading, fontSize: 13, color: SL.gold, letterSpacing: 1, marginTop: 2,
+    fontFamily: F.heading, fontSize: 16, color: SL.gold, letterSpacing: 1, marginTop: 2,
   },
 });

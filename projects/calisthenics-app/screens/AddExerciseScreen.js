@@ -19,15 +19,23 @@ const SL = {
   danger:  '#FF4444',
 };
 
-const MOVEMENT_TYPES = ['Pull', 'Push', 'Balance', 'Legs', 'Mobility', 'Flexibility'];
+const MOVEMENT_TYPES = ['Pull', 'Push', 'Balance', 'Legs', 'Core', 'Mobility', 'Flexibility', 'Isolated'];
 
-export default function AddExerciseScreen({ navigation }) {
-  const [name,         setName]         = useState('');
-  const [movementType, setMovementType] = useState('Pull');
-  const [videoUrl,     setVideoUrl]     = useState('');   // Supabase storage URL
-  const [description,  setDescription]  = useState('');
-  const [coachingCues, setCoachingCues] = useState('');
-  const [classOrder,   setClassOrder]   = useState(null);
+export default function AddExerciseScreen({ navigation, route }) {
+  // When opened with an `exercise`, the screen edits it in place; otherwise it
+  // creates a new gallery entry.
+  const editing = route.params?.exercise ?? null;
+
+  const [name,         setName]         = useState(editing?.name ?? '');
+  const [movementType, setMovementType] = useState(editing?.movement_type ?? 'Pull');
+  const [videoUrl,     setVideoUrl]     = useState(editing?.video_url ?? '');   // Supabase storage URL
+  const [description,  setDescription]  = useState(editing?.description ?? '');
+  const [coachingCues, setCoachingCues] = useState(editing?.coaching_cues ?? '');
+  // Target classes — an exercise can target several. Empty set = all classes.
+  // Prefer the new `class_orders` array; fall back to the legacy single column.
+  const [classOrders,  setClassOrders]  = useState(
+    editing?.class_orders ?? (editing?.min_class_order != null ? [editing.min_class_order] : [])
+  );
   const [classes,      setClasses]      = useState([]);
   const [uploading,    setUploading]    = useState(false);
   const [saving,       setSaving]       = useState(false);
@@ -40,6 +48,15 @@ export default function AddExerciseScreen({ navigation }) {
       .order('order_index')
       .then(({ data }) => setClasses(data ?? []));
   }, []);
+
+  // Tapping a class toggles it in/out of the set; tapping ALL clears the set.
+  function toggleClass(orderIndex) {
+    setClassOrders(prev =>
+      prev.includes(orderIndex)
+        ? prev.filter(o => o !== orderIndex)
+        : [...prev, orderIndex]
+    );
+  }
 
   // ── Video upload ──────────────────────────────────────────────────────────────
 
@@ -101,19 +118,36 @@ export default function AddExerciseScreen({ navigation }) {
     try {
       const { data: { user } } = await supabase.auth.getUser();
 
-      const payload = {
-        name:          name.trim(),
-        movement_type: movementType,
-        video_url:     videoUrl || null,
-        description:   description.trim() || null,
-        coaching_cues: coachingCues.trim() || null,
-        created_by:    user.id,
+      const sortedOrders = [...classOrders].sort((a, b) => a - b);
+      const fields = {
+        name:            name.trim(),
+        movement_type:   movementType,
+        video_url:       videoUrl || null,
+        description:     description.trim() || null,
+        coaching_cues:   coachingCues.trim() || null,
+        // Empty set = all classes. `class_orders` is the full set; `min_class_order`
+        // stays as the min so ordering & legacy readers keep working.
+        class_orders:    sortedOrders.length ? sortedOrders : null,
+        min_class_order: sortedOrders.length ? sortedOrders[0] : null,
       };
-      if (classOrder !== null) payload.min_class_order = classOrder;
 
-      const { error } = await supabase.from('exercises_gallery').insert(payload);
-      if (error) throw error;
-      navigation.goBack();
+      if (editing) {
+        const { error } = await supabase
+          .from('exercises_gallery')
+          .update(fields)
+          .eq('id', editing.id);
+        if (error) throw error;
+        // Return straight to the gallery (it's below in the stack and re-fetches
+        // on focus, so the edited values show). This pops the in-between detail
+        // screen too, matching the workout editor which also returns to the gallery.
+        navigation.navigate('ExerciseGallery');
+      } else {
+        const { error } = await supabase
+          .from('exercises_gallery')
+          .insert({ ...fields, created_by: user.id });
+        if (error) throw error;
+        navigation.goBack();
+      }
     } catch (e) {
       setErrorMsg(e.message ?? 'Failed to save. Please try again.');
     }
@@ -128,7 +162,7 @@ export default function AddExerciseScreen({ navigation }) {
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}>
           <Text style={styles.backText}>← BACK</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>NEW EXERCISE</Text>
+        <Text style={styles.title}>{editing ? 'EDIT EXERCISE' : 'NEW EXERCISE'}</Text>
         <View style={{ width: 122 }} />
       </View>
 
@@ -158,28 +192,34 @@ export default function AddExerciseScreen({ navigation }) {
           ))}
         </View>
 
-        {/* ── Target Class ── */}
+        {/* ── Target Classes ── */}
         <Text style={styles.label}>
-          TARGET CLASS <Text style={styles.optional}>(optional)</Text>
+          TARGET CLASSES <Text style={styles.optional}>(optional — pick one or more)</Text>
         </Text>
         <View style={styles.chipRow}>
+          {/* ALL = every class (mutually exclusive with the specific picks). */}
           <TouchableOpacity
-            style={[styles.chip, classOrder === null && styles.chipActive]}
-            onPress={() => setClassOrder(null)}
+            style={[styles.chip, classOrders.length === 0 && styles.chipActive]}
+            onPress={() => setClassOrders([])}
           >
-            <Text style={[styles.chipText, classOrder === null && styles.chipTextActive]}>ALL</Text>
+            <Text style={[styles.chipText, classOrders.length === 0 && styles.chipTextActive]}>ALL</Text>
           </TouchableOpacity>
-          {classes.map(c => (
-            <TouchableOpacity
-              key={c.id}
-              style={[styles.chip, classOrder === c.order_index && styles.chipActive]}
-              onPress={() => setClassOrder(c.order_index)}
-            >
-              <Text style={[styles.chipText, classOrder === c.order_index && styles.chipTextActive]}>
-                {c.name.toUpperCase()}
-              </Text>
-            </TouchableOpacity>
-          ))}
+          <View style={styles.chipDivider} />
+          {/* Specific classes — additive, pick as many as you like. */}
+          {classes.map(c => {
+            const on = classOrders.includes(c.order_index);
+            return (
+              <TouchableOpacity
+                key={c.id}
+                style={[styles.chip, on && styles.chipActive]}
+                onPress={() => toggleClass(c.order_index)}
+              >
+                <Text style={[styles.chipText, on && styles.chipTextActive]}>
+                  {c.name.toUpperCase()}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
 
         {/* ── Video Upload ── */}
@@ -258,7 +298,7 @@ export default function AddExerciseScreen({ navigation }) {
         >
           {saving
             ? <ActivityIndicator color={SL.bg} />
-            : <Text style={styles.saveBtnText}>SAVE EXERCISE</Text>
+            : <Text style={styles.saveBtnText}>{editing ? 'SAVE CHANGES' : 'SAVE EXERCISE'}</Text>
           }
         </TouchableOpacity>
 
@@ -308,7 +348,9 @@ const styles = StyleSheet.create({
   },
   multiline: { minHeight: 150, paddingTop: 18, lineHeight: 30 },
 
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, alignItems: 'center' },
+  // Separates the mutually-exclusive ALL chip from the additive class chips.
+  chipDivider: { width: 1.5, height: 30, backgroundColor: SL.border, marginHorizontal: 2 },
   chip: {
     paddingHorizontal: 26, paddingVertical: 15,
     borderRadius: 999, borderWidth: 1.5, borderColor: SL.border, backgroundColor: SL.panel,

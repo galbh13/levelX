@@ -6,6 +6,11 @@ import {
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
+import ScreenFrame from '../components/ScreenFrame';
+import ScreenHeader from '../components/ScreenHeader';
+import PillButton from '../components/PillButton';
+import { CARD_H, CARD_W } from '../constants/layout';
+import { WORKOUT_CATEGORIES, insertExercises } from '../lib/workouts';
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
@@ -18,6 +23,20 @@ const SL = {
   muted:  '#4a6a8a',
   danger: '#FF4444',
 };
+
+// Assign a shared superset_group number to each maximal run of exercises linked
+// by `linkedAbove`; runs of one get null (standalone).
+function computeGroups(links) {
+  const raw = [];
+  let run = 0;
+  for (let i = 0; i < links.length; i++) {
+    if (i > 0 && links[i]) raw[i] = raw[i - 1];
+    else { run += 1; raw[i] = run; }
+  }
+  const counts = {};
+  raw.forEach(r => { counts[r] = (counts[r] || 0) + 1; });
+  return raw.map(r => (counts[r] > 1 ? r : null));
+}
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
@@ -32,9 +51,15 @@ export default function CreateWorkoutScreen({ navigation }) {
 
   const [title,           setTitle]           = useState('');
   const [purpose,         setPurpose]         = useState('');
+  const [category,        setCategory]        = useState('main'); // workout type bucket
   // Keyed by ex._uid for stability when exercises are removed mid-list
   const [exerciseDetails, setExerciseDetails] = useState({});
   const [saving,          setSaving]          = useState(false);
+
+  // Fork (branch) authoring
+  const [forkEnabled, setForkEnabled] = useState(false);
+  const [branchA,     setBranchA]     = useState('');
+  const [branchB,     setBranchB]     = useState('');
 
   // Clear any leftover exercises from a previous session
   useEffect(() => { clearExercises(); }, []);
@@ -43,6 +68,20 @@ export default function CreateWorkoutScreen({ navigation }) {
     setExerciseDetails(prev => ({
       ...prev,
       [uid]: { ...prev[uid], [field]: value },
+    }));
+  }
+
+  function toggleLink(uid) {
+    setExerciseDetails(prev => ({
+      ...prev,
+      [uid]: { ...prev[uid], linkedAbove: !prev[uid]?.linkedAbove },
+    }));
+  }
+
+  function setBranch(uid, branch) {
+    setExerciseDetails(prev => ({
+      ...prev,
+      [uid]: { ...prev[uid], branch },
     }));
   }
 
@@ -70,6 +109,9 @@ export default function CreateWorkoutScreen({ navigation }) {
       const { data: { user }, error: userError } = await supabase.auth.getUser();
       if (userError) throw userError;
 
+      const branches = forkEnabled
+        ? [{ key: 'a', label: branchA.trim() || 'OPTION A' }, { key: 'b', label: branchB.trim() || 'OPTION B' }]
+        : null;
       const { data: workout, error: workoutError } = await supabase
         .from('workouts')
         .insert({
@@ -77,6 +119,8 @@ export default function CreateWorkoutScreen({ navigation }) {
           purpose:     purpose.trim(),
           assigned_to: selectedStudent.id,
           created_by:  user.id,
+          branches,
+          category,
         })
         .select()
         .single();
@@ -107,17 +151,28 @@ export default function CreateWorkoutScreen({ navigation }) {
         if (tmplError) throw tmplError;
       }
 
-      for (let i = 0; i < pendingExercises.length; i++) {
-        const ex      = pendingExercises[i];
+      const groups = computeGroups(
+        pendingExercises.map(ex => !!exerciseDetails[ex._uid]?.linkedAbove)
+      );
+      const exRows = pendingExercises.map((ex, i) => {
         const details = exerciseDetails[ex._uid] ?? {};
-        const { error: exError } = await supabase.from('exercises').insert({
-          workout_id: workout.id,
-          letter:     String.fromCharCode(65 + i),
-          name:       ex.name,
-          sets:       parseInt(details.sets) || 0,
-          reps:       details.reps  ?? '',
-          notes:      details.notes ?? '',
-        });
+        return {
+          workout_id:     workout.id,
+          letter:         String.fromCharCode(65 + i),
+          name:           ex.name,
+          // Stable link to the catalog exercise this was picked from — lets Workout
+          // Mode open the right how-to card regardless of later name drift.
+          gallery_id:     ex.id ?? null,
+          variation:      details.variation?.trim() || null,
+          sets:           String(details.sets ?? '').trim(),
+          reps:           details.reps  ?? '',
+          notes:          details.notes ?? '',
+          superset_group: groups[i],
+          branch:         forkEnabled ? (details.branch ?? null) : null,
+        };
+      });
+      if (exRows.length) {
+        const { error: exError } = await insertExercises(exRows);
         if (exError) throw exError;
       }
 
@@ -133,68 +188,68 @@ export default function CreateWorkoutScreen({ navigation }) {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <View style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Text style={styles.backText}>← BACK</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>CREATE WORKOUT</Text>
-        {selectedStudent && (
-          <Text style={styles.studentCtx}>
-            FOR: <Text style={styles.studentCtxName}>{selectedStudent.full_name?.toUpperCase()}</Text>
-          </Text>
-        )}
-        {selectedDay && (
-          <Text style={styles.dayCtx}>
-            {selectedDay.label}{selectedDay.dateStr ? ` · ${selectedDay.dateStr}` : ' · EVERY WEEK'}
-          </Text>
-        )}
-        <View style={styles.divider} />
-      </View>
+    <ScreenFrame maxWidth={CARD_W}>
+      <View style={styles.card}>
+      <ScreenHeader
+        title="CREATE WORKOUT"
+        titleStyle={styles.bigTitle}
+        onBack={() => navigation.goBack()}
+      />
 
-      <ScrollView contentContainerStyle={styles.form} keyboardShouldPersistTaps="handled">
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.form} keyboardShouldPersistTaps="handled">
 
-        {/* Workout Title */}
-        <Text style={styles.inputLabel}>WORKOUT TITLE</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="e.g. PULL DAY A"
-          placeholderTextColor={SL.muted}
-          value={title}
-          onChangeText={setTitle}
-        />
+        {/* Workout Title + Goal — side by side */}
+        <View style={styles.fieldRow}>
+          <View style={styles.fieldCol}>
+            <Text style={styles.inputLabel}>WORKOUT TITLE</Text>
+            <TextInput
+              style={styles.input}
+              placeholder=""
+              placeholderTextColor={SL.muted}
+              value={title}
+              onChangeText={setTitle}
+            />
+          </View>
+          <View style={styles.fieldCol}>
+            <Text style={styles.inputLabel}>GOAL / PURPOSE</Text>
+            <TextInput
+              style={styles.input}
+              placeholder=""
+              placeholderTextColor={SL.muted}
+              value={purpose}
+              onChangeText={setPurpose}
+            />
+          </View>
+        </View>
 
-        {/* Purpose */}
-        <Text style={styles.inputLabel}>
-          GOAL / PURPOSE{'  '}
-          <Text style={styles.optional}>(OPTIONAL)</Text>
-        </Text>
-        <TextInput
-          style={styles.input}
-          placeholder="e.g. BUILD PULLING STRENGTH"
-          placeholderTextColor={SL.muted}
-          value={purpose}
-          onChangeText={setPurpose}
-        />
+        {/* Workout type — labels the card in My Workouts */}
+        <Text style={styles.inputLabel}>TYPE</Text>
+        <View style={styles.typeRow}>
+          {WORKOUT_CATEGORIES.map(c => {
+            const on = category === c.k;
+            return (
+              <TouchableOpacity
+                key={c.k}
+                style={[styles.typeChip, on && styles.typeChipOn]}
+                onPress={() => setCategory(c.k)}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.typeChipText, on && styles.typeChipTextOn]}>{c.l}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
 
-        {/* Exercise count header */}
-        <View style={styles.exercisesHeader}>
-          <Text style={styles.inputLabel} style={styles.exercisesLabel}>EXERCISES</Text>
-          {pendingExercises.length > 0 && (
+        {/* Exercise count header — only once exercises exist (the empty node
+            stands on its own without a label above it) */}
+        {pendingExercises.length > 0 && (
+          <View style={styles.exercisesHeader}>
+            <Text style={styles.exercisesLabel}>EXERCISES</Text>
             <View style={styles.exCountBadge}>
               <Text style={styles.exCountText}>
                 {pendingExercises.length} ADDED
               </Text>
             </View>
-          )}
-        </View>
-
-        {/* Empty state */}
-        {pendingExercises.length === 0 && (
-          <View style={styles.emptyExWrap}>
-            <Text style={styles.emptyExText}>NO EXERCISES YET</Text>
-            <Text style={styles.emptyExSub}>Tap + ADD EXERCISE below to build your workout</Text>
           </View>
         )}
 
@@ -204,20 +259,65 @@ export default function CreateWorkoutScreen({ navigation }) {
           return (
             <View key={uid} style={styles.exCard}>
 
+              {/* Superset link with the exercise above (parallel, any order) */}
+              {i > 0 && (
+                <TouchableOpacity
+                  style={[styles.linkToggle, exerciseDetails[uid]?.linkedAbove && styles.linkToggleOn]}
+                  onPress={() => toggleLink(uid)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[styles.linkToggleText, exerciseDetails[uid]?.linkedAbove && styles.linkToggleTextOn]}>
+                    {exerciseDetails[uid]?.linkedAbove ? '⇄ SUPERSET WITH ABOVE' : '⇄ MAKE SUPERSET WITH ABOVE'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+
+              {/* Branch tag (only when the workout is forked) */}
+              {forkEnabled && (
+                <View style={styles.branchRow}>
+                  {[
+                    { k: null,    l: 'COMMON' },
+                    { k: 'a',     l: branchA.trim() ? branchA.trim().toUpperCase() : 'OPTION A' },
+                    { k: 'b',     l: branchB.trim() ? branchB.trim().toUpperCase() : 'OPTION B' },
+                    { k: 'merge', l: 'ENDING' },
+                  ].map(opt => {
+                    const on = (exerciseDetails[uid]?.branch ?? null) === opt.k;
+                    return (
+                      <TouchableOpacity
+                        key={String(opt.k)}
+                        style={[styles.branchChip, on && styles.branchChipOn]}
+                        onPress={() => setBranch(uid, opt.k)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={[styles.branchChipText, on && styles.branchChipTextOn]} numberOfLines={1}>
+                          {opt.l}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
+
               {/* Card header: letter badge + name + remove */}
               <View style={styles.exCardHead}>
                 <View style={styles.letterBadge}>
                   <Text style={styles.letterText}>{String.fromCharCode(65 + i)}</Text>
                 </View>
                 <Text style={styles.exName} numberOfLines={2}>{ex.name?.toUpperCase()}</Text>
-                <TouchableOpacity
-                  style={styles.removeBtn}
-                  onPress={() => handleRemove(i, uid)}
-                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                >
-                  <Text style={styles.removeBtnText}>✕</Text>
-                </TouchableOpacity>
+                <PillButton label="✕" tone="danger" size="sm" onPress={() => handleRemove(i, uid)} />
               </View>
+
+              {/* Variation — free-text per-exercise focus, editable any time and
+                  independent of the library exercise (changes cycle to cycle). */}
+              <Text style={styles.fieldLabel}>VARIATION</Text>
+              <TextInput
+                style={[styles.input, styles.inputMultiline]}
+                placeholder="Focus / variation this cycle (optional)"
+                placeholderTextColor={SL.muted}
+                multiline
+                value={exerciseDetails[uid]?.variation ?? ''}
+                onChangeText={v => updateDetail(uid, 'variation', v)}
+              />
 
               {/* Sets + Reps row */}
               <View style={styles.exRow}>
@@ -259,32 +359,72 @@ export default function CreateWorkoutScreen({ navigation }) {
         })}
 
         {/* Add Exercise */}
-        <TouchableOpacity
-          style={styles.addExBtn}
+        <PillButton
+          label="+ ADD EXERCISE"
           onPress={() => navigation.navigate('ExerciseGallery', { selectionMode: true })}
+          style={{ marginTop: 16, alignSelf: 'center', paddingHorizontal: 40 }}
+        />
+
+        {/* Fork / branch the workout */}
+        <TouchableOpacity
+          style={[styles.forkToggle, forkEnabled && styles.forkToggleOn]}
+          onPress={() => setForkEnabled(v => !v)}
           activeOpacity={0.8}
         >
-          <Text style={styles.addExBtnText}>+ ADD EXERCISE</Text>
+          <View style={[styles.forkCheckbox, forkEnabled && styles.forkCheckboxOn]}>
+            {forkEnabled && <Text style={styles.forkCheckMark}>✓</Text>}
+          </View>
+          <Text style={[styles.forkGlyph, forkEnabled && styles.forkToggleTextOn]}>⑂</Text>
+          <View style={styles.forkTextWrap}>
+            <Text style={[styles.forkToggleText, forkEnabled && styles.forkToggleTextOn]}>
+              FORK THE PATH
+            </Text>
+            <Text style={styles.forkToggleSub}>Let the player choose their route</Text>
+          </View>
         </TouchableOpacity>
 
+        {forkEnabled && (
+          <View style={styles.forkBox}>
+            <Text style={styles.fieldLabel}>OPTION A LABEL</Text>
+            <TextInput
+              style={styles.input}
+              value={branchA}
+              onChangeText={setBranchA}
+              placeholder="e.g. FEELING STRONG"
+              placeholderTextColor={SL.muted}
+            />
+            <View style={{ height: 10 }} />
+            <Text style={styles.fieldLabel}>OPTION B LABEL</Text>
+            <TextInput
+              style={styles.input}
+              value={branchB}
+              onChangeText={setBranchB}
+              placeholder="e.g. FATIGUED / END HERE"
+              placeholderTextColor={SL.muted}
+            />
+            <Text style={styles.forkHint}>
+              Tag each exercise as COMMON, A, B, or ENDING. COMMON is done first by everyone;
+              then the player picks a path; ENDING exercises are done by everyone after the path
+              (a shared finish, so you don't rebuild it in both paths). A branch with no exercises just ends there.
+            </Text>
+          </View>
+        )}
+
         {/* Save Workout */}
-        <TouchableOpacity
-          style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
+        <PillButton
+          label="SAVE WORKOUT"
+          variant="solid"
+          size="lg"
           onPress={handleSave}
           disabled={!canSave}
-          activeOpacity={0.85}
-        >
-          {saving
-            ? <ActivityIndicator color={SL.bg} />
-            : <Text style={[styles.saveBtnText, !canSave && styles.saveBtnTextDisabled]}>
-                SAVE WORKOUT
-              </Text>
-          }
-        </TouchableOpacity>
+          loading={saving}
+          style={{ marginTop: 20, alignSelf: 'center', paddingHorizontal: 56 }}
+        />
 
         <View style={{ height: 40 }} />
       </ScrollView>
-    </View>
+      </View>
+    </ScreenFrame>
   );
 }
 
@@ -293,107 +433,73 @@ export default function CreateWorkoutScreen({ navigation }) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SL.bg },
 
-  // ── Header ──────────────────────────────────────────────────────────────────
+  // Fixed card height so the frame matches the other workout cards.
+  card: { height: CARD_H },
 
-  header: {
-    width: '100%',
-    maxWidth: 1440,
-    alignSelf: 'center',
-    paddingHorizontal: 24,
-    paddingTop: 60,
-    paddingBottom: 24,
-    borderBottomWidth: 1,
-    borderBottomColor: SL.border,
-  },
-  backText: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 2,
-    marginBottom: 14,
-  },
-  title: {
-    fontFamily: F.heading,
-    fontSize: 32,
-    color: SL.accent,
+  // CREATE WORKOUT title — sized to clear the BACK pill on either side.
+  bigTitle: {
+    fontSize: 30,
     letterSpacing: 4,
-    textAlign: 'center',
-    textTransform: 'uppercase',
-  },
-  studentCtx: {
-    fontFamily: F.bodyMed,
-    fontSize: 16,
-    color: SL.muted,
-    letterSpacing: 2,
-    textAlign: 'center',
-    marginTop: 8,
-  },
-  studentCtxName: { color: SL.text },
-  dayCtx: {
-    fontFamily: F.bodyMed,
-    fontSize: 15,
-    color: SL.muted,
-    letterSpacing: 1,
-    textAlign: 'center',
-    marginTop: 4,
-  },
-  divider: {
-    height: 1,
-    backgroundColor: SL.accent,
-    opacity: 0.3,
-    marginTop: 18,
   },
 
-  // ── Form ────────────────────────────────────────────────────────────────────
-
-  // Cool ice-glow frame wrapping the whole form, matching the Skills page.
+  // ── Form ── inner padding; the ScreenFrame provides the glowing outer frame.
   form: {
     padding: 20,
     gap: 0,
     paddingBottom: 24,
-    width: '100%',
-    maxWidth: 1440,
-    alignSelf: 'center',
-    marginTop: 16,
-    marginBottom: 28,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 18,
-    backgroundColor: SL.bg,
-    shadowColor: SL.accent,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.2,
-    shadowRadius: 20,
   },
+
+  // Workout title + goal share one row.
+  fieldRow: {
+    flexDirection: 'row',
+    gap: 14,
+  },
+  fieldCol: { flex: 1 },
 
   inputLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 12,
+    fontSize: 15,
     color: SL.muted,
     letterSpacing: 2,
     textTransform: 'uppercase',
     marginTop: 18,
     marginBottom: 6,
   },
-  optional: {
-    fontSize: 11,
-    color: SL.muted,
-    opacity: 0.7,
+  // ── Workout type chips ──────────────────────────────────────────────────────
+  typeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  typeChip: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    backgroundColor: SL.panel,
   },
+  typeChipOn: {
+    borderColor: SL.accent,
+    backgroundColor: 'rgba(74,158,191,0.16)',
+  },
+  typeChipText: {
+    fontFamily: F.bodyMed,
+    fontSize: 14,
+    color: SL.muted,
+    letterSpacing: 1.5,
+  },
+  typeChipTextOn: { color: SL.accent },
 
   input: {
-    height: 46,
+    height: 52,
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 4,
+    borderRadius: 12,
     paddingHorizontal: 14,
     fontFamily: F.body,
-    fontSize: 16,
+    fontSize: 18,
     color: SL.text,
   },
   inputMultiline: {
-    height: 76,
+    height: 86,
     paddingTop: 12,
     textAlignVertical: 'top',
   },
@@ -409,7 +515,7 @@ const styles = StyleSheet.create({
   },
   exercisesLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 12,
+    fontSize: 15,
     color: SL.muted,
     letterSpacing: 2,
     textTransform: 'uppercase',
@@ -426,34 +532,9 @@ const styles = StyleSheet.create({
   },
   exCountText: {
     fontFamily: F.body,
-    fontSize: 12,
+    fontSize: 14,
     color: SL.accent,
     letterSpacing: 1.5,
-  },
-
-  emptyExWrap: {
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    borderStyle: 'dashed',
-    paddingVertical: 28,
-    alignItems: 'center',
-    gap: 8,
-  },
-  emptyExText: {
-    fontFamily: F.heading,
-    fontSize: 16,
-    color: SL.muted,
-    letterSpacing: 2,
-  },
-  emptyExSub: {
-    fontFamily: F.bodyMed,
-    fontSize: 13,
-    color: SL.muted,
-    letterSpacing: 0.5,
-    textAlign: 'center',
-    paddingHorizontal: 20,
-    opacity: 0.7,
   },
 
   // ── Exercise card ────────────────────────────────────────────────────────────
@@ -462,7 +543,7 @@ const styles = StyleSheet.create({
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 4,
+    borderRadius: 12,
     padding: 16,
     marginTop: 12,
     gap: 10,
@@ -477,7 +558,7 @@ const styles = StyleSheet.create({
     height: 36,
     borderWidth: 1.5,
     borderColor: SL.accent,
-    borderRadius: 4,
+    borderRadius: 10,
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: 'rgba(74,158,191,0.08)',
@@ -485,30 +566,69 @@ const styles = StyleSheet.create({
   },
   letterText: {
     fontFamily: F.heading,
-    fontSize: 18,
+    fontSize: 22,
     color: SL.accent,
   },
   exName: {
     fontFamily: F.heading,
-    fontSize: 20,
+    fontSize: 24,
     color: SL.text,
     letterSpacing: 1,
     flex: 1,
   },
-  removeBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 4,
-    borderWidth: 1.5,
-    borderColor: SL.danger,
-    justifyContent: 'center',
-    alignItems: 'center',
-    flexShrink: 0,
+  linkToggle: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 12, paddingVertical: 6,
+    borderWidth: 1.5, borderColor: SL.border, borderRadius: 999,
+    backgroundColor: 'rgba(74,158,191,0.04)',
+    marginBottom: 4,
   },
-  removeBtnText: {
-    fontFamily: F.body,
-    fontSize: 13,
-    color: SL.danger,
+  linkToggleOn: {
+    borderColor: SL.accent, backgroundColor: 'rgba(74,158,191,0.16)',
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.4, shadowRadius: 8,
+  },
+  linkToggleText: { fontFamily: F.bodyMed, fontSize: 15, color: SL.muted, letterSpacing: 1.5 },
+  linkToggleTextOn: { fontFamily: F.heading, color: SL.accent },
+
+  // Branch tag chips on each card
+  branchRow: { flexDirection: 'row', gap: 6, marginBottom: 4 },
+  branchChip: {
+    flex: 1, paddingVertical: 7, borderRadius: 6,
+    borderWidth: 1.5, borderColor: SL.border, backgroundColor: 'rgba(74,158,191,0.04)',
+    alignItems: 'center',
+  },
+  branchChipOn: { borderColor: SL.accent, backgroundColor: 'rgba(74,158,191,0.16)' },
+  branchChipText: { fontFamily: F.bodyMed, fontSize: 14, color: SL.muted, letterSpacing: 1 },
+  branchChipTextOn: { fontFamily: F.heading, color: SL.accent },
+
+  // Fork toggle + label box
+  forkToggle: {
+    flexDirection: 'row', alignItems: 'center', gap: 14, marginTop: 16,
+    paddingVertical: 12, paddingHorizontal: 16, borderRadius: 10,
+    borderWidth: 1.5, borderColor: SL.border, borderStyle: 'dashed',
+  },
+  forkToggleOn: { borderColor: SL.accent, borderStyle: 'solid', backgroundColor: 'rgba(74,158,191,0.06)' },
+  forkCheckbox: {
+    width: 24, height: 24, borderRadius: 6, borderWidth: 1.5, borderColor: SL.muted,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  forkCheckboxOn: { borderColor: SL.accent, backgroundColor: 'rgba(74,158,191,0.2)' },
+  forkCheckMark: { fontFamily: F.heading, fontSize: 17, color: SL.accent },
+  forkGlyph: { fontFamily: F.heading, fontSize: 26, color: SL.muted, marginTop: -2 },
+  forkTextWrap: { flex: 1 },
+  forkToggleText: { fontFamily: F.heading, fontSize: 18, color: SL.muted, letterSpacing: 3 },
+  forkToggleTextOn: { color: SL.accent },
+  forkToggleSub: {
+    fontFamily: F.bodyMed, fontSize: 13, color: SL.muted, opacity: 0.7,
+    letterSpacing: 0.5, marginTop: 2,
+  },
+  forkBox: {
+    marginTop: 12, padding: 14, borderRadius: 6,
+    borderWidth: 1.5, borderColor: SL.border, backgroundColor: SL.panel,
+  },
+  forkHint: {
+    fontFamily: F.bodyMed, fontSize: 15, color: SL.muted, letterSpacing: 0.5,
+    lineHeight: 22, marginTop: 12,
   },
 
   exRow: { flexDirection: 'row', gap: 12 },
@@ -516,50 +636,11 @@ const styles = StyleSheet.create({
 
   fieldLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 12,
+    fontSize: 15,
     color: SL.muted,
     letterSpacing: 2,
     textTransform: 'uppercase',
     marginBottom: 4,
   },
 
-  // ── Buttons ──────────────────────────────────────────────────────────────────
-
-  addExBtn: {
-    height: 40,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 16,
-  },
-  addExBtnText: {
-    fontFamily: F.heading,
-    fontSize: 16,
-    color: SL.accent,
-    letterSpacing: 3,
-  },
-
-  saveBtn: {
-    height: 48,
-    backgroundColor: SL.accent,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginTop: 14,
-  },
-  saveBtnDisabled: {
-    backgroundColor: SL.border,
-  },
-  saveBtnText: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.bg,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
-  },
-  saveBtnTextDisabled: {
-    color: SL.muted,
-  },
 });
