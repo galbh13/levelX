@@ -663,9 +663,8 @@ export default function WorkoutsScreen({ navigation, route }) {
               ]}>
                 {day.date.getDate()}
               </Text>
-              <Text style={[styles.dayMonth, allDone && styles.dayMonthDone]}>
-                {day.month}
-              </Text>
+              {/* Month is shown once in the week-range pill above — repeating it
+                  in every cell was noise on a phone. */}
 
               {/* A rest day is simply a day with no accent dot below — no label. */}
 
@@ -743,7 +742,7 @@ export default function WorkoutsScreen({ navigation, route }) {
                   ) : null}
                   {locked && (
                     <View style={styles.lockedBadge}>
-                      <Text style={styles.lockedBadgeText}>🔒 LOCKED (7+ DAYS OLD)</Text>
+                      <Text style={styles.lockedBadgeText}>🔒 LOCKED</Text>
                     </View>
                   )}
                 </View>
@@ -911,7 +910,6 @@ export default function WorkoutsScreen({ navigation, route }) {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
   // Fixed card size so the frame matches the Weekly Plan and never resizes with data.
   card: { height: CARD_H },
 
@@ -1064,70 +1062,6 @@ const styles = StyleSheet.create({
     marginLeft: 2,
   },
 
-  // ── Checkup banner ──────────────────────────────────────────────────────────
-
-  checkupBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginHorizontal: 16,
-    marginTop: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 6,
-    backgroundColor: 'rgba(74,158,191,0.08)',
-  },
-  checkupBannerText: {
-    fontFamily: F.heading,
-    fontSize: 20,
-    color: SL.accent,
-    letterSpacing: 2,
-  },
-  checkupBannerDate: {
-    fontFamily: F.bodyMed,
-    fontSize: 20,
-    color: SL.accent,
-    letterSpacing: 1,
-  },
-
-  coachResponseBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginHorizontal: 16,
-    marginTop: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 6,
-    backgroundColor: 'rgba(74,158,191,0.08)',
-  },
-  coachResponseBannerText: {
-    fontFamily: F.heading,
-    fontSize: 20,
-    letterSpacing: 2,
-  },
-  newBadge: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    backgroundColor: SL.gold,
-    borderRadius: 3,
-  },
-  newBadgeText: {
-    fontFamily: F.bodyMed,
-    fontSize: 14,
-    color: SL.bg,
-    letterSpacing: 1,
-  },
-  responseReadToggleText: {
-    fontFamily: F.bodyMed,
-    fontSize: 16,
-    letterSpacing: 1.5,
-  },
-
   // ── Week nav ────────────────────────────────────────────────────────────────
 
   calendarNav: {
@@ -1196,7 +1130,7 @@ const styles = StyleSheet.create({
   },
   dayNode: {
     flex: 1,
-    minHeight: 124,
+    minHeight: 108,
     backgroundColor: SL.panel,
     borderRadius: 10,
     borderWidth: 1.5,
@@ -1249,14 +1183,6 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 12,
   },
-  dayMonth: {
-    fontFamily: F.bodyMed,
-    fontSize: 15,
-    color: SL.muted,
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-  },
-  dayMonthDone: { color: SL.accent },
   todayBar: {
     position: 'absolute',
     bottom: 0,
@@ -1308,21 +1234,6 @@ const styles = StyleSheet.create({
   dayCardEditBtn: {
     flexShrink: 0,
   },
-  editDayBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 6,
-    backgroundColor: 'rgba(74,158,191,0.08)',
-  },
-  editDayBtnText: {
-    fontFamily: F.heading,
-    fontSize: 16,
-    color: SL.accent,
-    letterSpacing: 1.5,
-  },
-
   // ── Per-date edit modal ───────────────────────────────────────────────────
   modalOverlay: {
     flex: 1,
@@ -1427,53 +1338,6 @@ const styles = StyleSheet.create({
     lineHeight: 26,
   },
   editorButtons: { flexDirection: 'row', gap: 10 },
-  editorCancelBtn: {
-    flex: 1,
-    height: 44,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 6,
-  },
-  editorCancelText: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.muted,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-  },
-  editorSaveBtn: {
-    flex: 2,
-    height: 44,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: SL.accent,
-    borderRadius: 6,
-  },
-  editorSaveText: {
-    fontFamily: F.heading,
-    fontSize: 20,
-    color: SL.bg,
-    letterSpacing: 3,
-    textTransform: 'uppercase',
-  },
-  resetBtn: {
-    marginTop: 14,
-    height: 44,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: SL.muted,
-    borderRadius: 6,
-  },
-  resetBtnText: {
-    fontFamily: F.bodyMed,
-    fontSize: 16,
-    color: SL.muted,
-    letterSpacing: 2,
-    textTransform: 'uppercase',
-  },
 
   // Stacked: workout info on top, action buttons centered below — so the buttons
   // never overflow the card the way a single side-by-side row did.
@@ -1541,58 +1405,6 @@ const styles = StyleSheet.create({
   // Compact action buttons so WORKOUT MODE + VIEW + MARK DONE fit one row.
   actionBtn: { paddingHorizontal: 12 },
   actionBtnText: { fontSize: 14, letterSpacing: 1 },
-  modeBtn: {
-    height: 44,
-    paddingHorizontal: 20,
-    backgroundColor: SL.accent,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: SL.accent,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.5,
-    shadowRadius: 12,
-  },
-  modeBtnText: {
-    fontFamily: F.heading,
-    fontSize: 17,
-    color: SL.bg,
-    letterSpacing: 2,
-  },
-  viewBtn: {
-    height: 44,
-    paddingHorizontal: 20,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(74,158,191,0.06)',
-  },
-  viewBtnText: {
-    fontFamily: F.heading,
-    fontSize: 17,
-    color: SL.accent,
-    letterSpacing: 2,
-  },
-  markDoneBtn: {
-    height: 44,
-    paddingHorizontal: 24,
-    backgroundColor: SL.accent,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: SL.accent,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.5,
-    shadowRadius: 12,
-  },
-  markDoneBtnText: {
-    fontFamily: F.heading,
-    fontSize: 17,
-    color: SL.bg,
-    letterSpacing: 2,
-  },
   // Shining ice-blue "completed" badge — replaces the action buttons once done.
   completedTag: {
     paddingVertical: 8,
@@ -1612,21 +1424,6 @@ const styles = StyleSheet.create({
     fontFamily: F.heading,
     fontSize: 15,
     color: SL.accent,
-    letterSpacing: 2,
-  },
-  undoBtn: {
-    height: 44,
-    paddingHorizontal: 16,
-    borderWidth: 1.5,
-    borderColor: SL.muted,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  undoBtnText: {
-    fontFamily: F.body,
-    fontSize: 16,
-    color: SL.muted,
     letterSpacing: 2,
   },
 

@@ -60,7 +60,6 @@ const NODE_H    = 104;
 const SL = {
   bg:      '#050912',
   panel:   '#070d1a',
-  panelAlt:'#0a1424',
   border:  '#1a3a5c',
   accent:  '#4A9EBF',
   text:    '#E8F4FF',
@@ -115,7 +114,7 @@ function ClassChips({ classes, selectedId, onSelect, showAll = true }) {
 
 // ─── Workout card ─────────────────────────────────────────────────────────────
 
-function WorkoutCard({ workout, expanded, onToggle, onEdit, onDelete, onRun, onImport, imported }) {
+function WorkoutCard({ workout, expanded, onToggle, onEdit, onDelete }) {
   return (
     <View style={styles.workoutCard}>
       <TouchableOpacity style={styles.workoutCardHeader} onPress={onToggle} activeOpacity={0.8}>
@@ -150,25 +149,6 @@ function WorkoutCard({ workout, expanded, onToggle, onEdit, onDelete, onRun, onI
         </View>
       </TouchableOpacity>
 
-      {!!onRun && (
-        <TouchableOpacity style={styles.workoutRunBtn} onPress={onRun} activeOpacity={0.85}>
-          <Text style={styles.workoutRunBtnText}>⚔ ELITE WORKOUT</Text>
-        </TouchableOpacity>
-      )}
-
-      {!!onImport && (
-        <TouchableOpacity
-          style={[styles.workoutImportBtn, imported && styles.workoutImportBtnDone]}
-          onPress={onImport}
-          activeOpacity={0.85}
-          disabled={imported}
-        >
-          <Text style={[styles.workoutImportBtnText, imported && styles.workoutImportBtnTextDone]}>
-            {imported ? '✓ ADDED TO MY WORKOUTS' : '+ IMPORT TO MY WORKOUTS'}
-          </Text>
-        </TouchableOpacity>
-      )}
-
       {expanded && (
         <View style={styles.workoutExercises}>
           {(workout.exercises ?? []).map((ex, i) => (
@@ -197,11 +177,9 @@ function WorkoutCard({ workout, expanded, onToggle, onEdit, onDelete, onRun, onI
 
 export default function ExerciseGalleryScreen({ route, navigation }) {
   const selectionMode = route.params?.selectionMode ?? false;
-  const { addExercise, pendingExercises, selectedStudent } = useCoach();
+  const { addExercise, pendingExercises } = useCoach();
 
   const [activeTab,       setActiveTab]       = useState(route.params?.initialTab ?? 'exercises');
-  // Gallery example-workouts the player has imported this visit → warehouse.
-  const [importedMap,     setImportedMap]     = useState({});
   const [classes,         setClasses]         = useState([]);
   const [exercises,       setExercises]       = useState([]);
   const [exampleWorkouts, setExampleWorkouts] = useState([]);
@@ -280,49 +258,6 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
       .delete()
       .eq('id', workout.id);
     if (!error) setExampleWorkouts(prev => prev.filter(w => w.id !== workout.id));
-  }
-
-  // ── Import an example workout into the player's own warehouse ─────────────────
-  // Copies a gallery_example_workouts row (exercises/branches stored INLINE) into
-  // the player's own `workouts` + `exercises`, so it shows in All Workouts and can
-  // be assigned to weekdays from there. Independent copy — later admin edits don't
-  // propagate. Mirrors the old StudentDetail import path.
-  async function handleImportWorkout(template) {
-    if (!selectedStudent?.id) return;
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      const { data: w, error } = await supabase
-        .from('workouts')
-        .insert({
-          title:       template.title,
-          purpose:     template.description ?? '',
-          assigned_to: selectedStudent.id,
-          created_by:  user.id,
-          branches:    template.branches ?? null,
-        })
-        .select()
-        .single();
-      if (error) throw error;
-
-      const rows = (template.exercises ?? []).map((e, i) => ({
-        workout_id:     w.id,
-        letter:         String.fromCharCode(65 + i),
-        name:           e.name,
-        variation:      e.variation ?? null,
-        sets:           String(e.sets ?? '').trim(),
-        reps:           e.reps ?? '',
-        notes:          e.notes ?? '',
-        superset_group: e.superset_group ?? null,
-        branch:         e.branch ?? null,
-      }));
-      if (rows.length) {
-        const { error: exErr } = await supabase.from('exercises').insert(rows);
-        if (exErr) throw exErr;
-      }
-      setImportedMap(prev => ({ ...prev, [template.id]: true }));
-    } catch (e) {
-      alert('Import failed: ' + (e.message ?? 'Something went wrong.'));
-    }
   }
 
   // ── Derived state ────────────────────────────────────────────────────────────
@@ -499,7 +434,7 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
             onPress={() => setActiveTab('workouts')}
           >
             <Text style={[styles.tabText, activeTab === 'workouts' && styles.tabTextActive]}>
-              EXAMPLE WORKOUTS
+              WORKOUTS
             </Text>
           </TouchableOpacity>
         </View>
@@ -886,34 +821,16 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
   },
 
-  // Thumbnail (square, uniform across the grid)
-  thumbWrap: {
-    width: '100%', aspectRatio: 1,
-    backgroundColor: SL.panelAlt, position: 'relative', overflow: 'hidden',
-  },
-  thumbFill: { position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' },
-  // No filled square anymore — the dumbbell icon sits on the card's own background.
+  // Icon placeholder for exercises with no thumbnail (selection cards).
   thumbPlaceholder: {
     backgroundColor: 'transparent', justifyContent: 'center', alignItems: 'center',
   },
-  playOverlay: {
-    ...StyleSheet.absoluteFillObject, justifyContent: 'center', alignItems: 'center',
-  },
-  // Clean, classic play button — white triangle on a soft dark disc.
-  playCircle: {
-    width: 60, height: 60, borderRadius: 30,
-    backgroundColor: 'rgba(5,9,18,0.5)',
-    borderWidth: 2, borderColor: 'rgba(232,244,255,0.92)',
-    justifyContent: 'center', alignItems: 'center',
-  },
-  playIcon: { fontSize: 22, color: '#E8F4FF', marginLeft: 4 },
 
   browseExName: {
     fontFamily: F.heading, fontSize: 22, color: SL.text,
     letterSpacing: 0.5, textTransform: 'uppercase',
     textAlign: 'center', lineHeight: 28,
   },
-  badgeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
 
   // ── Shared badges ─────────────────────────────────────────────────────────────
 
@@ -924,13 +841,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12, paddingVertical: 5,
   },
   typeText: { fontFamily: F.bodyMed, fontSize: 15, color: SL.accent, letterSpacing: 1 },
-  classBadge: {
-    alignSelf: 'flex-start',
-    backgroundColor: 'rgba(255,215,0,0.08)',
-    borderWidth: 1, borderColor: 'rgba(255,215,0,0.5)', borderRadius: 999,
-    paddingHorizontal: 12, paddingVertical: 5,
-  },
-  classBadgeText: { fontFamily: F.bodyMed, fontSize: 15, color: SL.gold, letterSpacing: 1 },
 
   // Delete button on exercise browse card
   exDeleteBtn: {
@@ -990,34 +900,6 @@ const styles = StyleSheet.create({
     fontFamily: F.body, fontSize: 16, color: SL.muted, letterSpacing: 0.5, lineHeight: 22,
   },
   workoutChevron: { fontFamily: F.body, fontSize: 12, color: SL.muted },
-  workoutRunBtn: {
-    marginHorizontal: 16, marginBottom: 14,
-    height: 44, borderRadius: 8,
-    backgroundColor: SL.accent,
-    justifyContent: 'center', alignItems: 'center',
-    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.4, shadowRadius: 12,
-  },
-  workoutRunBtnText: {
-    fontFamily: F.heading, fontSize: 16, color: SL.bg,
-    letterSpacing: 2, textTransform: 'uppercase',
-  },
-  workoutImportBtn: {
-    marginHorizontal: 16, marginBottom: 14,
-    height: 44, borderRadius: 8,
-    borderWidth: 1.5, borderColor: SL.accent,
-    backgroundColor: 'rgba(74,158,191,0.1)',
-    justifyContent: 'center', alignItems: 'center',
-  },
-  workoutImportBtnDone: {
-    borderColor: SL.green,
-    backgroundColor: 'rgba(76,175,80,0.12)',
-  },
-  workoutImportBtnText: {
-    fontFamily: F.heading, fontSize: 16, color: SL.accent,
-    letterSpacing: 2, textTransform: 'uppercase',
-  },
-  workoutImportBtnTextDone: { color: SL.green },
   cardEditBtn: {
     width: 44, height: 44, borderRadius: 22,
     backgroundColor: 'rgba(74,158,191,0.15)',

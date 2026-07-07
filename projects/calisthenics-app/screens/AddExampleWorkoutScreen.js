@@ -750,15 +750,6 @@ const styles = StyleSheet.create({
     fontFamily: F.body, fontSize: 14, color: SL.muted, letterSpacing: 1,
   },
 
-  columnHeaders: {
-    flexDirection: 'row', alignItems: 'center',
-    gap: 8, marginBottom: 8, paddingHorizontal: 2,
-  },
-  colHeader: {
-    fontFamily: F.bodyMed, fontSize: 12, color: SL.muted,
-    letterSpacing: 1.5, textTransform: 'uppercase',
-  },
-
   // ── Exercise row ──────────────────────────────────────────────────────────────
 
   exRow: {
@@ -837,13 +828,6 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: SL.border, borderRadius: 8,
     paddingHorizontal: 12, textAlign: 'center',
     fontFamily: F.body, fontSize: 16, color: SL.text,
-  },
-  exInputNotes: {
-    flex: 1, height: 42,
-    backgroundColor: SL.panel,
-    borderWidth: 1.5, borderColor: SL.border, borderRadius: 8,
-    paddingHorizontal: 12,
-    fontFamily: F.body, fontSize: 15, color: SL.text,
   },
   // Right-side controls: reorder up/down within the section + remove.
   exSideCol: { alignItems: 'center', justifyContent: 'flex-start', gap: 2, marginLeft: 2 },

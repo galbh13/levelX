@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, Modal,
+  ActivityIndicator, Modal, Platform, Alert,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
@@ -194,14 +194,24 @@ export default function AllWorkoutsScreen({ navigation }) {
     setSavingAssign(false);
   }
 
-  const handleDelete = async (workoutId) => {
-    if (window.confirm('Delete this workout?')) {
+  // Cross-platform confirm — window.confirm only exists on web; the APK build
+  // needs Alert.alert or the delete button would crash the screen.
+  const handleDelete = (workoutId) => {
+    const doDelete = async () => {
       const { error } = await supabase
         .from('workouts')
         .delete()
         .eq('id', workoutId);
       if (error) { alert('Error: ' + error.message); return; }
       setWorkouts(prev => prev.filter(w => w.id !== workoutId));
+    };
+    if (Platform.OS === 'web') {
+      if (window.confirm('Delete this workout?')) doDelete();
+    } else {
+      Alert.alert('Delete workout', 'Delete this workout?', [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: doDelete },
+      ]);
     }
   };
 
@@ -453,8 +463,6 @@ function FilterChip({ active, color, label, count, onPress }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
-
   // ── Header workout counter ────────────────────────────────────────────────
   countBadge: { alignItems: 'flex-end' },
   countBadgeNum: {
@@ -771,14 +779,6 @@ const styles = StyleSheet.create({
   dayPickTextOn: { color: SL.accent },
   assignButtons: { flexDirection: 'row', gap: 10 },
 
-  center: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 32,
-    gap: 16,
-    marginTop: 60,
-  },
   emptyText: {
     fontFamily: F.heading,
     fontSize: 24,

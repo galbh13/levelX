@@ -13,6 +13,7 @@ import { F } from '../constants/fonts';
 import { ShimmerText, ShimmerFill, ShimmerFrame, BLUE, GOLD } from '../components/Shimmer';
 import ScreenFrame from '../components/ScreenFrame';
 import { CARD_W } from '../constants/layout';
+import { hapticSuccess } from '../lib/haptics';
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
@@ -589,6 +590,53 @@ function QuestCard({ onPress, style, children, delay = 0, disabled = false }) {
   );
 }
 
+// ─── Prestige ceremony ────────────────────────────────────────────────────────
+// The class-up moment. A full-screen gold rite: "✦ ASCENDED ✦" over the NEW
+// class's gem medallion, stamping in from oversized with a spring while a gold
+// halo breathes behind it. Shown once right after a successful prestige; any tap
+// dismisses. Pure overlay — the screen beneath is already reloading the new class.
+function PrestigeCeremony({ className, onDone }) {
+  const stamp = useRef(new Animated.Value(0)).current;
+  const glow  = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const enter = Animated.spring(stamp, {
+      toValue: 1, useNativeDriver: true, speed: 14, bounciness: 11, delay: 200,
+    });
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(glow, { toValue: 1, duration: 1200, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(glow, { toValue: 0, duration: 1200, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    enter.start(); loop.start();
+    return () => { enter.stop(); loop.stop(); };
+  }, [stamp, glow]);
+
+  const parts  = (className ?? '').trim().split(/\s+/).filter(Boolean);
+  const rank   = parts.length > 1 ? parts[parts.length - 1] : (parts[0] ?? '');
+  const scale  = stamp.interpolate({ inputRange: [0, 1], outputRange: [2.6, 1] });
+  const haloOp = glow.interpolate({ inputRange: [0, 1], outputRange: [0.25, 0.7] });
+
+  return (
+    <Modal visible transparent animationType="fade" onRequestClose={onDone}>
+      <TouchableOpacity style={styles.riteBackdrop} activeOpacity={1} onPress={onDone}>
+        <Animated.View style={{ alignItems: 'center', opacity: stamp, transform: [{ scale }] }}>
+          <ShimmerText text="✦ ASCENDED ✦" style={styles.riteTitle} colors={GOLD} direction="ltr" active />
+
+          <View style={styles.riteMedallionWrap}>
+            <Animated.View style={[styles.riteHalo, { opacity: haloOp }]} />
+            <View style={styles.riteMedallion} />
+            <View style={styles.riteMedallionInner} />
+            <Text style={styles.riteRank}>{toRoman(rank).toUpperCase()}</Text>
+          </View>
+
+          <Text style={styles.riteClassName}>{(className ?? '').toUpperCase()}</Text>
+          <Text style={styles.riteHint}>TAP TO CONTINUE</Text>
+        </Animated.View>
+      </TouchableOpacity>
+    </Modal>
+  );
+}
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function SkillsScreen({ navigation, route }) {
@@ -623,6 +671,8 @@ export default function SkillsScreen({ navigation, route }) {
   const [classListOpen, setClassListOpen] = useState(false);
   const [assigning,   setAssigning]   = useState(false);
   const [showPrestige, setShowPrestige] = useState(false);
+  // Name of the class just ascended into → shows the full-screen gold ceremony.
+  const [ceremony,    setCeremony]    = useState(null);
 
   const fetchData = useCallback(async () => {
     try {
@@ -784,6 +834,10 @@ export default function SkillsScreen({ navigation, route }) {
         .eq('id', userId);
       if (error) throw error;
 
+      // The class-up moment: success thump + full-screen gold ceremony while the
+      // screen reloads the new class underneath.
+      hapticSuccess();
+      setCeremony(nextClass.name);
       setLoading(true);
       fetchData();
     } catch (e) {
@@ -799,6 +853,8 @@ export default function SkillsScreen({ navigation, route }) {
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
           <ActivityIndicator size="large" color={SL.accent} />
         </View>
+        {/* Keep the ceremony alive across the post-prestige reload spinner. */}
+        {ceremony && <PrestigeCeremony className={ceremony} onDone={() => setCeremony(null)} />}
       </ScreenFrame>
     );
   }
@@ -1001,13 +1057,13 @@ export default function SkillsScreen({ navigation, route }) {
           prestigeReady={prestigeReady.ok}
           play={introKey}
         />
-        {prestigeReady.ok ? (
-          <Text style={[styles.barLabel, { color: SL.gold }]}>⭐ PRESTIGE UNLOCKED</Text>
-        ) : (
-          <Text style={styles.barLabel}>
-            <Text style={styles.barLabelNum}>{lvl} / {maxLvl}</Text>
+        {/* One label: the number. (Prestige readiness is announced by the gold
+            banner right below — saying it here too was double messaging.) */}
+        <Text style={styles.barLabel}>
+          <Text style={[styles.barLabelNum, prestigeReady.ok && { color: SL.gold, textShadowColor: 'rgba(255,215,0,0.7)' }]}>
+            {lvl} / {maxLvl}
           </Text>
-        )}
+        </Text>
 
         <View style={styles.headerDivider} />
       </View>
@@ -1244,6 +1300,9 @@ export default function SkillsScreen({ navigation, route }) {
           </View>
         </View>
       </Modal>
+
+      {/* ── Prestige ceremony — the class-up rite ── */}
+      {ceremony && <PrestigeCeremony className={ceremony} onDone={() => setCeremony(null)} />}
     </ScrollView>
     </ScreenFrame>
     </ScrollVizContext.Provider>
@@ -1253,7 +1312,6 @@ export default function SkillsScreen({ navigation, route }) {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
   // The scroll lives INSIDE the shared ScreenFrame (fill mode) now — the frame
   // supplies the animated ice-glow border + glow, matching Home/Workouts. This
   // scrolls within the fixed frame so all the quest sections stay reachable.
@@ -1270,7 +1328,7 @@ const styles = StyleSheet.create({
   // Just the inner padding now — the border/glow/rounding come from ScreenFrame.
   body: {
     width: '100%',
-    paddingHorizontal: 10,
+    paddingHorizontal: 14,
     paddingBottom: 16,
   },
 
@@ -1819,7 +1877,6 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: SL.accent,
   },
-  gateBarFillOk: { backgroundColor: SL.gold },
   gateBarText: {
     fontFamily: F.bodyMed,
     fontSize: 16,
@@ -2138,16 +2195,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.7)',
     justifyContent: 'flex-end',
   },
-  modalBox: {
-    backgroundColor: SL.panel,
-    borderTopWidth: 1.5,
-    borderTopColor: SL.accent,
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    paddingHorizontal: 20,
-    paddingTop: 24,
-    paddingBottom: 40,
-  },
   modalTitle: {
     fontFamily: F.heading,
     fontSize: 30,
@@ -2156,42 +2203,94 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 16,
   },
-  modalDivider: {
-    height: 1,
-    backgroundColor: SL.border,
-    marginBottom: 16,
-  },
-  classOption: {
-    paddingVertical: 16,
-    paddingHorizontal: 16,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    marginBottom: 8,
-    gap: 4,
-  },
-  classOptionSelected: {
-    borderColor: SL.gold,
-    backgroundColor: 'rgba(255,215,0,0.06)',
-  },
-  classOptionName: {
-    fontFamily: F.heading,
-    fontSize: 30,
-    color: SL.text,
-    letterSpacing: 2,
-  },
-  classOptionNameSelected: { color: SL.gold },
-  modalCancel: {
-    marginTop: 8,
-    height: 44,
-    justifyContent: 'center',
+  // ── Prestige ceremony (the class-up rite) ───────────────────────────────────
+  riteBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(1,3,8,0.96)',
     alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
   },
-  modalCancelText: {
-    fontFamily: F.bodyMed,
+  riteTitle: {
+    fontFamily: F.displayHeavy,
+    fontSize: 34,
+    color: SL.gold,
+    letterSpacing: 6,
+    textAlign: 'center',
+    marginBottom: 28,
+    textShadowColor: 'rgba(255,215,0,0.8)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 22,
+  },
+  riteMedallionWrap: {
+    width: 150,
+    height: 150,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // Breathing gold aura behind the gem.
+  riteHalo: {
+    position: 'absolute',
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: 'rgba(255,215,0,0.10)',
+    shadowColor: SL.gold,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 60,
+  },
+  riteMedallion: {
+    position: 'absolute',
+    width: 110,
+    height: 110,
+    borderRadius: 16,
+    borderWidth: 3,
+    borderColor: SL.gold,
+    backgroundColor: 'rgba(255,215,0,0.08)',
+    transform: [{ rotate: '45deg' }],
+    shadowColor: SL.gold,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.95,
+    shadowRadius: 28,
+  },
+  riteMedallionInner: {
+    position: 'absolute',
+    width: 80,
+    height: 80,
+    borderRadius: 11,
+    borderWidth: 1.5,
+    borderColor: SL.gold,
+    opacity: 0.4,
+    transform: [{ rotate: '45deg' }],
+  },
+  riteRank: {
+    fontFamily: F.displayHeavy,
+    fontSize: 52,
+    color: SL.gold,
+    letterSpacing: 1,
+    textShadowColor: 'rgba(255,215,0,0.9)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 20,
+  },
+  riteClassName: {
+    fontFamily: F.displayHeavy,
     fontSize: 26,
+    color: SL.gold,
+    letterSpacing: 8,
+    paddingLeft: 8,
+    marginTop: 26,
+    textAlign: 'center',
+    textShadowColor: 'rgba(255,215,0,0.6)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 12,
+  },
+  riteHint: {
+    fontFamily: F.bodyMed,
+    fontSize: 14,
     color: SL.muted,
-    letterSpacing: 2,
+    letterSpacing: 3,
+    marginTop: 34,
   },
 
   // ── Prestige confirm modal ──────────────────────────────────────────────────

@@ -345,7 +345,7 @@ export default function CreateWorkoutScreen({ navigation }) {
               </View>
 
               {/* Notes */}
-              <Text style={styles.fieldLabel}>COACHING NOTES</Text>
+              <Text style={styles.fieldLabel}>NOTES</Text>
               <TextInput
                 style={[styles.input, styles.inputMultiline]}
                 placeholder="Focus cues, technique notes..."
@@ -403,9 +403,8 @@ export default function CreateWorkoutScreen({ navigation }) {
               placeholderTextColor={SL.muted}
             />
             <Text style={styles.forkHint}>
-              Tag each exercise as COMMON, A, B, or ENDING. COMMON is done first by everyone;
-              then the player picks a path; ENDING exercises are done by everyone after the path
-              (a shared finish, so you don't rebuild it in both paths). A branch with no exercises just ends there.
+              Tag each exercise: COMMON first, then the chosen path (A or B), then ENDING —
+              done by everyone after their path. An empty path just ends the workout.
             </Text>
           </View>
         )}
@@ -431,8 +430,6 @@ export default function CreateWorkoutScreen({ navigation }) {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
-
   // Fixed card height so the frame matches the other workout cards.
   card: { height: CARD_H },
 

@@ -262,8 +262,6 @@ export default function AdminDashboard({ navigation }) {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
-
   // Top bar — vertical stack: ADMIN title on top, the actions in a row below.
   topBar: {
     alignItems: 'center',

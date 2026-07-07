@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, TextInput,
+  ActivityIndicator, TextInput, Animated, Easing,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { materializeDay } from '../lib/schedule';
@@ -11,7 +11,9 @@ import {
 } from '../lib/workoutSession';
 import ScreenFrame from '../components/ScreenFrame';
 import PillButton from '../components/PillButton';
+import PopCheck from '../components/PopCheck';
 import { ShimmerFill, BLUE } from '../components/Shimmer';
+import { hapticTap, hapticSuccess } from '../lib/haptics';
 
 const SL = {
   bg:     '#050912',
@@ -139,6 +141,53 @@ function buildGroups(exercises) {
 // True when every exercise in the group has its REQUIRED sets done (or skipped).
 function groupComplete(group, log, skipped) {
   return group.items.every(ex => exComplete(ex, log, skipped));
+}
+
+// A set row that flashes a soft green wash when its `done` flips true — the
+// most-repeated tap in the app gets a moment of feedback. The overlay is
+// absolute (doesn't disturb the flex row) and native-driver opacity only.
+function SetFlashRow({ done, style, children }) {
+  const flash = useRef(new Animated.Value(0)).current;
+  const prev  = useRef(done);
+  useEffect(() => {
+    if (done && !prev.current) {
+      flash.setValue(1);
+      Animated.timing(flash, {
+        toValue: 0, duration: 650, easing: Easing.out(Easing.quad), useNativeDriver: true,
+      }).start();
+    }
+    prev.current = done;
+  }, [done, flash]);
+  return (
+    <View style={style}>
+      <Animated.View
+        pointerEvents="none"
+        style={[StyleSheet.absoluteFillObject, styles.setFlash, { opacity: flash }]}
+      />
+      {children}
+    </View>
+  );
+}
+
+// Gentle breathing scale while `active` — used to pull the eye to FINISH once
+// the progress bar hits 100%. Sits at rest (scale 1) when inactive.
+function Breathe({ active, children }) {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (!active) { v.setValue(0); return; }
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(v, { toValue: 1, duration: 850, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(v, { toValue: 0, duration: 850, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [active, v]);
+  const scale = v.interpolate({ inputRange: [0, 1], outputRange: [1, 1.035] });
+  return (
+    <Animated.View style={{ transform: [{ scale }] }}>
+      {children}
+    </Animated.View>
+  );
 }
 
 // ─── Screen ─────────────────────────────────────────────────────────────────
@@ -355,6 +404,7 @@ export default function WorkoutModeScreen({ route, navigation }) {
   }
 
   async function handleFinish() {
+    hapticSuccess();
     finishedRef.current = true;
     const closed = withClosedSegment(sessionRef.current);
     const summary = buildSummary(closed);
@@ -475,13 +525,13 @@ export default function WorkoutModeScreen({ route, navigation }) {
         {sets.map((set, si) => {
           const optional = si >= required;
           return (
-          <View key={si} style={[styles.setRow, optional && styles.setRowOptional]}>
+          <SetFlashRow key={si} done={set.done} style={[styles.setRow, optional && styles.setRowOptional]}>
             <TouchableOpacity
               style={[styles.checkbox, optional && styles.checkboxOptional, set.done && styles.checkboxDone]}
-              onPress={() => updateSet(ex.id, si, { done: !set.done })}
+              onPress={() => { if (!set.done) hapticTap(); updateSet(ex.id, si, { done: !set.done }); }}
               activeOpacity={0.8}
             >
-              {set.done && <Text style={styles.checkboxMark}>✓</Text>}
+              {set.done && <PopCheck><Text style={styles.checkboxMark}>✓</Text></PopCheck>}
             </TouchableOpacity>
             <Text style={[
               styles.setLabel,
@@ -500,7 +550,7 @@ export default function WorkoutModeScreen({ route, navigation }) {
               maxLength={4}
             />
             <Text style={styles.repsUnit}>REPS</Text>
-          </View>
+          </SetFlashRow>
           );
         })}
 
@@ -508,7 +558,7 @@ export default function WorkoutModeScreen({ route, navigation }) {
             Only on the live (current) card, or as an UNDO once skipped. */}
         {hot && (
           <PillButton
-            label="⏭ SKIP THIS EXERCISE"
+            label="⏭ SKIP TODAY"
             tone="muted"
             size="sm"
             onPress={() => toggleSkip(ex.id)}
@@ -538,7 +588,7 @@ export default function WorkoutModeScreen({ route, navigation }) {
         style={[styles.groupWrap, current && styles.groupWrapCurrent, done && styles.groupWrapDone]}
       >
         <View style={styles.groupHeader}>
-          <Text style={styles.groupHeaderText}>⇄ SUPERSET · ANY ORDER · COMPLETE ALL</Text>
+          <Text style={styles.groupHeaderText}>⇄ SUPERSET · ANY ORDER</Text>
           {current && !done && <Text style={styles.nowTag}>NOW</Text>}
           {done && <Text style={styles.doneTag}>✓</Text>}
         </View>
@@ -582,7 +632,8 @@ export default function WorkoutModeScreen({ route, navigation }) {
           const forkOpen = trunkDone || forceFork;
           return (
           <View style={[styles.forkCard, forkOpen && styles.forkCardActive]}>
-            <Text style={styles.forkTitle}>CHOOSE YOUR PATH ACCORDING TO YOUR BODY ABILITY</Text>
+            <Text style={styles.forkTitle}>CHOOSE YOUR PATH</Text>
+            <Text style={styles.forkSub}>Pick what fits your body today.</Text>
             {branches.map(b => (
               <PillButton
                 key={b.key}
@@ -639,13 +690,16 @@ export default function WorkoutModeScreen({ route, navigation }) {
           <Text style={styles.emptyText}>NO EXERCISES IN THIS WORKOUT</Text>
         )}
 
-        <PillButton
-          label="FINISH WORKOUT"
-          variant="solid"
-          size="lg"
-          onPress={handleFinish}
-          style={{ marginTop: 8 }}
-        />
+        {/* Breathes once every required set is done — the eye lands on the exit. */}
+        <Breathe active={allSets > 0 && doneSets >= allSets}>
+          <PillButton
+            label="FINISH WORKOUT"
+            variant="solid"
+            size="lg"
+            onPress={handleFinish}
+            style={{ marginTop: 8 }}
+          />
+        </Breathe>
         <Text style={styles.finishHint}>Exit anytime — your progress is saved and you can resume.</Text>
 
         <View style={{ height: 32 }} />
@@ -655,8 +709,6 @@ export default function WorkoutModeScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
-
   // Header
   header: {
     width: '100%', maxWidth: 1440, alignSelf: 'center',
@@ -785,6 +837,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: 12,
     paddingTop: 10, borderTopWidth: 1, borderTopColor: 'rgba(26,58,92,0.5)',
   },
+  // The one-shot green wash SetFlashRow fades out after a set is checked.
+  setFlash: { backgroundColor: 'rgba(76,175,80,0.16)', borderRadius: 8 },
   checkbox: {
     width: 34, height: 34, borderWidth: 2, borderColor: SL.muted, borderRadius: 8,
     justifyContent: 'center', alignItems: 'center',

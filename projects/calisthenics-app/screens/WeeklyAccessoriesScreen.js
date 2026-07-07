@@ -697,7 +697,6 @@ const styles = StyleSheet.create({
     gap: 12, paddingLeft: 24, borderLeftWidth: 1, borderLeftColor: T.border,
   },
   midActions: { flexDirection: 'row', gap: 8, marginLeft: 'auto' },
-  sectionLabel: { fontFamily: F.bodyMed, fontSize: 12, color: T.muted, letterSpacing: 2.5 },
 
   // ── Rep cells ──
   cellRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
@@ -728,12 +727,6 @@ const styles = StyleSheet.create({
   fieldLabel: {
     fontFamily: F.bodyMed, fontSize: 12, color: T.muted, letterSpacing: 2,
     marginBottom: 8, marginTop: 4,
-  },
-  input: {
-    fontFamily: F.body, fontSize: 16, color: T.text,
-    borderWidth: 1.5, borderColor: T.border, borderRadius: 12,
-    paddingVertical: 12, paddingHorizontal: 16, backgroundColor: T.panel,
-    marginBottom: 18,
   },
   // ── Workout picker (in the add/edit modal) ──
   picker: { maxHeight: 240, marginBottom: 18 },

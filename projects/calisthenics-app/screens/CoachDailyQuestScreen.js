@@ -162,7 +162,6 @@ export default function CoachDailyQuestScreen({ route, navigation }) {
   const total     = quests.length;
   const doneCount = quests.reduce((n, q) => n + (todayDoneIds.has(q.id) ? 1 : 0), 0);
   const allDone   = total > 0 && doneCount === total;
-  const pct       = total ? doneCount / total : 0;
   const barColors = allDone ? GOLD : BLUE;
 
   return (
@@ -251,13 +250,13 @@ export default function CoachDailyQuestScreen({ route, navigation }) {
 
                     {isEditing ? (
                       <>
-                        <IconBtn glyph="✓" tone="green" onPress={saveEdit} />
-                        <IconBtn glyph="✕" tone="muted" onPress={() => { setEditingId(null); setEditingTitle(''); }} />
+                        <IconBtn glyph="✓" onPress={saveEdit} />
+                        <IconBtn glyph="✕" onPress={() => { setEditingId(null); setEditingTitle(''); }} />
                       </>
                     ) : (
                       <>
-                        <IconBtn glyph="✎" tone="accent" onPress={() => startEdit(q)} />
-                        <IconBtn glyph="✕" tone="danger" onPress={() => confirmDelete(q)} />
+                        <IconBtn glyph="✎" onPress={() => startEdit(q)} />
+                        <IconBtn glyph="✕" onPress={() => confirmDelete(q)} />
                       </>
                     )}
                   </View>
@@ -374,24 +373,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingBottom: 16,
   },
-  emblem: {
-    width: 58, height: 58, borderRadius: 18,
-    borderWidth: 1.5, borderColor: SL.accent,
-    backgroundColor: 'rgba(74,158,191,0.12)',
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.6, shadowRadius: 14,
-  },
-  emblemDone: { borderColor: SL.gold, backgroundColor: 'rgba(255,215,0,0.14)', shadowColor: SL.gold },
-  // faint inner ring that frames the glyph
-  emblemRing: {
-    position: 'absolute',
-    width: 40, height: 40, borderRadius: 12,
-    borderWidth: 1, borderColor: 'rgba(74,158,191,0.4)',
-    transform: [{ rotate: '45deg' }],
-  },
-  emblemRingDone: { borderColor: 'rgba(255,215,0,0.45)' },
-  emblemGlyph: { fontSize: 26, color: SL.accent },
   title: {
     fontFamily: F.heading,
     fontSize: 30,
@@ -399,66 +380,6 @@ const styles = StyleSheet.create({
     letterSpacing: 4.5,
     textAlign: 'center',
   },
-  closeBtn: {
-    width: 34, height: 34, borderRadius: 17,
-    borderWidth: 1, borderColor: SL.border,
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: SL.panel2,
-  },
-  closeGlyph: { color: SL.muted, fontSize: 15, fontFamily: F.body, marginTop: -1 },
-
-  meterBlock: {
-    borderWidth: 1,
-    borderColor: 'rgba(26,58,92,0.7)',
-    backgroundColor: 'rgba(8,16,30,0.6)',
-    borderRadius: 16,
-    paddingHorizontal: 18,
-    paddingTop: 16,
-    paddingBottom: 16,
-    marginBottom: 14,
-    gap: 13,
-  },
-  meterBlockDone: {
-    borderColor: 'rgba(255,215,0,0.4)',
-    backgroundColor: 'rgba(255,215,0,0.05)',
-  },
-  meterTop: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    justifyContent: 'space-between',
-  },
-  dateLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 17,
-    color: SL.muted,
-    letterSpacing: 2.5,
-  },
-  progressText: {
-    fontFamily: F.heading,
-    letterSpacing: 1.5,
-  },
-  progressNum: { fontSize: 36 },
-  progressSep: { fontSize: 24, color: SL.muted },
-  meterTrack: {
-    height: 16,
-    borderRadius: 999,
-    backgroundColor: '#0c1726',
-    borderWidth: 1,
-    borderColor: 'rgba(26,58,92,0.7)',
-    overflow: 'hidden',
-  },
-  meterFill: {
-    height: '100%',
-    borderRadius: 999,
-  },
-  meterCaption: {
-    fontFamily: F.bodyMed,
-    fontSize: 16,
-    color: SL.muted,
-    letterSpacing: 2.5,
-    textTransform: 'uppercase',
-  },
-
   loadingBox: { paddingVertical: 64, alignItems: 'center' },
 
   list: { flexGrow: 0 },

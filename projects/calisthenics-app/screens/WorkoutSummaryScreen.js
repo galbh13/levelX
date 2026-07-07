@@ -1,5 +1,5 @@
-import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import React, { useEffect, useRef } from 'react';
+import { View, Text, StyleSheet, Animated } from 'react-native';
 import { F } from '../constants/fonts';
 import ScreenFrame from '../components/ScreenFrame';
 import PillButton from '../components/PillButton';
@@ -37,6 +37,26 @@ function fmtDate(dateStr) {
   });
 }
 
+// Game-clear stamp: presses down onto the recap (big → settled, slight tilt)
+// a beat after the screen opens — so screenshots read like a boss-clear card.
+function ClearedStamp() {
+  const anim = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.spring(anim, {
+      toValue: 1, useNativeDriver: true, speed: 16, bounciness: 9, delay: 300,
+    }).start();
+  }, [anim]);
+  const scale = anim.interpolate({ inputRange: [0, 1], outputRange: [2.4, 1] });
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[styles.stamp, { opacity: anim, transform: [{ rotate: '-8deg' }, { scale }] }]}
+    >
+      <Text style={styles.stampText}>✦ CLEARED ✦</Text>
+    </Animated.View>
+  );
+}
+
 export default function WorkoutSummaryScreen({ route, navigation }) {
   const { summary } = route.params;
   const {
@@ -54,6 +74,7 @@ export default function WorkoutSummaryScreen({ route, navigation }) {
   return (
     <ScreenFrame fill maxWidth={560}>
       <View style={styles.body}>
+        <ClearedStamp />
         {/* Banner */}
         <View style={styles.banner}>
           <Text style={styles.bannerTitle}>{title?.toUpperCase()}</Text>
@@ -80,7 +101,7 @@ export default function WorkoutSummaryScreen({ route, navigation }) {
           </View>
           <View style={styles.statChip}>
             <Text style={styles.statValue}>{segments.length}</Text>
-            <Text style={styles.statLabel}>NUMBER OF SESSIONS</Text>
+            <Text style={styles.statLabel}>SESSIONS</Text>
           </View>
         </View>
 
@@ -153,11 +174,36 @@ export default function WorkoutSummaryScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
   // Fills the whole frame; the EXERCISES section (flex:1) absorbs the slack.
   body: { flex: 1, paddingHorizontal: 16, paddingVertical: 10, gap: 6, width: '100%' },
 
   banner: { alignItems: 'center', gap: 2 },
+  // The gold clear-stamp, pressed over the top-right corner of the recap.
+  stamp: {
+    position: 'absolute',
+    top: 8,
+    right: 10,
+    zIndex: 5,
+    borderWidth: 2,
+    borderColor: SL.gold,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    backgroundColor: 'rgba(255,215,0,0.08)',
+    shadowColor: SL.gold,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6,
+    shadowRadius: 12,
+  },
+  stampText: {
+    fontFamily: F.displayHeavy,
+    fontSize: 13,
+    color: SL.gold,
+    letterSpacing: 2,
+    textShadowColor: 'rgba(255,215,0,0.7)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 8,
+  },
   bannerTitle: { fontFamily: F.heading, fontSize: 24, color: SL.accent, letterSpacing: 3, textAlign: 'center', textTransform: 'uppercase' },
   bannerDate: { fontFamily: F.bodyMed, fontSize: 13, color: SL.muted, letterSpacing: 1 },
   pathChip: {

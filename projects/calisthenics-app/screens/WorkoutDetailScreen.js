@@ -28,8 +28,6 @@ export default function WorkoutDetailScreen({ route, navigation }) {
 
   const [exercises,      setExercises]      = useState([]);
   const [loading,        setLoading]        = useState(true);
-  const [completed,       setCompleted]       = useState(workout.completed    ?? false);
-  const [completing,      setCompleting]      = useState(false);
   const [workoutTitle,    setWorkoutTitle]    = useState(workout.title        ?? '');
   const [workoutPurpose,  setWorkoutPurpose]  = useState(workout.purpose      ?? '');
   const [coachFeedback,   setCoachFeedback]   = useState(workout.coachFeedback  ?? null);
@@ -103,21 +101,6 @@ export default function WorkoutDetailScreen({ route, navigation }) {
       setFeedbackIsRead(!newVal);
       alert('Failed to update: ' + error.message);
     }
-  }
-
-  async function handleMarkComplete() {
-    setCompleting(true);
-    try {
-      const { error } = await supabase
-        .from('workouts')
-        .update({ completed: true })
-        .eq('id', workout.id);
-      if (!error) setCompleted(true);
-      else        alert('Could not mark workout as complete.');
-    } catch {
-      alert('Something went wrong.');
-    }
-    setCompleting(false);
   }
 
   // One exercise card. `compact` shrinks it so two fit side by side in a fork path.
@@ -236,9 +219,9 @@ export default function WorkoutDetailScreen({ route, navigation }) {
                 : { borderColor: SL.gold, shadowColor: SL.gold, shadowOpacity: 0.15, shadowRadius: 8 },
             ]}>
               <View style={styles.feedbackHeader}>
-                <Text style={styles.feedbackLabel}>COACH FEEDBACK</Text>
+                <Text style={styles.feedbackLabel}>FEEDBACK</Text>
                 <PillButton
-                  label={feedbackIsRead ? '👁 MARK AS UNREAD' : '👁 MARK AS READ'}
+                  label={feedbackIsRead ? 'MARK AS UNREAD' : 'MARK AS READ'}
                   tone={feedbackIsRead ? 'gold' : 'muted'}
                   size="sm"
                   onPress={handleToggleFeedbackRead}
@@ -253,22 +236,15 @@ export default function WorkoutDetailScreen({ route, navigation }) {
             </View>
           ) : null}
 
-          {/* CTA */}
+          {/* CTA — the detail view is read-only for the player: completion happens
+              on the day panel (DONE) or by finishing a Workout Mode session. The
+              old MARK AS COMPLETE button here wrote to the wrong table and was
+              removed. A completed dated workout still shows its banner. */}
           {studentView ? (
-            completed ? (
+            (workout.completed ?? false) && (
               <View style={styles.completedBanner}>
-                <Text style={styles.completedText}>✅ MISSION COMPLETE</Text>
+                <Text style={styles.completedText}>✓ MISSION COMPLETE</Text>
               </View>
-            ) : (
-              <PillButton
-                label="MARK AS COMPLETE"
-                variant="solid"
-                size="lg"
-                onPress={handleMarkComplete}
-                disabled={completing}
-                loading={completing}
-                style={{ marginTop: 8 }}
-              />
             )
           ) : (
             <PillButton
@@ -287,8 +263,6 @@ export default function WorkoutDetailScreen({ route, navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
-
   purposeRow: {
     flexDirection: 'row',
     alignItems: 'center',

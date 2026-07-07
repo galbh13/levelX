@@ -17,7 +17,6 @@ import { supabase } from './lib/supabase';
 
 import HomeScreen        from './screens/HomeScreen';
 import SkillsScreen      from './screens/SkillsScreen';
-import SkillTreeScreen   from './screens/SkillTreeScreen';
 import WorkoutsScreen    from './screens/WorkoutsScreen';
 import ProfileScreen     from './screens/ProfileScreen';
 import LoginScreen           from './screens/LoginScreen';
@@ -27,7 +26,6 @@ import StudentDetailScreen   from './screens/StudentDetailScreen';
 import WorkoutDetailScreen   from './screens/WorkoutDetailScreen';
 import WorkoutModeScreen     from './screens/WorkoutModeScreen';
 import WorkoutSummaryScreen  from './screens/WorkoutSummaryScreen';
-import AddWorkoutScreen      from './screens/AddWorkoutScreen';
 import ExerciseGalleryScreen    from './screens/ExerciseGalleryScreen';
 import ExerciseDetailScreen     from './screens/ExerciseDetailScreen';
 import AddExerciseScreen        from './screens/AddExerciseScreen';
@@ -176,7 +174,6 @@ function SkillsNavigator() {
   return (
     <SkillsStack.Navigator screenOptions={{ headerShown: false }}>
       <SkillsStack.Screen name="SkillsList"  component={SkillsScreen} />
-      <SkillsStack.Screen name="SkillTree"   component={SkillTreeScreen} />
       <SkillsStack.Screen name="QuestTree"   component={QuestTreeScreen} />
     </SkillsStack.Navigator>
   );
@@ -194,7 +191,6 @@ function WorkoutsNavigator() {
       <WorkoutsStack.Screen name="WorkoutSummary" component={WorkoutSummaryScreen} />
       <WorkoutsStack.Screen name="Manage"         component={StudentDetailScreen} options={({ route }) => ({ animation: route.params?.fromForge ? 'none' : 'default' })} />
       <WorkoutsStack.Screen name="CreateWorkout"  component={CreateWorkoutScreen} />
-      <WorkoutsStack.Screen name="AddWorkout"     component={AddWorkoutScreen} />
       <WorkoutsStack.Screen name="WorkoutEdit"    component={WorkoutEditScreen} />
       <WorkoutsStack.Screen name="ExerciseGallery" component={ExerciseGalleryScreen} />
       <WorkoutsStack.Screen name="ExerciseDetail"  component={ExerciseDetailScreen} />
@@ -233,7 +229,6 @@ function AdminNavigator() {
         <AdminStack.Screen name="EliteWorkouts"      component={EliteWorkoutsScreen} />
         <AdminStack.Screen name="WeeklyAccessories"  component={WeeklyAccessoriesScreen} />
         <AdminStack.Screen name="CreateWorkout"      component={CreateWorkoutScreen} />
-        <AdminStack.Screen name="AddWorkout"         component={AddWorkoutScreen} />
         <AdminStack.Screen name="WorkoutEdit"        component={WorkoutEditScreen} />
         <AdminStack.Screen name="WorkoutDetail"      component={WorkoutDetailScreen} />
       </AdminStack.Navigator>

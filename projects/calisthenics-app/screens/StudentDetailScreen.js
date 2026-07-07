@@ -382,8 +382,6 @@ export default function StudentDetailScreen({ navigation, route }) {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
-
   // Fixed card height so the frame is the same size regardless of data/loading.
   card: { height: CARD_H },
   body: { flex: 1, width: '100%', paddingBottom: 12 },
@@ -592,12 +590,6 @@ const styles = StyleSheet.create({
     color: SL.accent,
     letterSpacing: 3,
     textTransform: 'uppercase',
-  },
-  dayCardDate: {
-    fontFamily: F.bodyMed,
-    fontSize: 20,
-    color: SL.muted,
-    letterSpacing: 1,
   },
   // Session card — matches the Workouts day panel: title left, action pills right.
   workoutCard: {

@@ -10,6 +10,7 @@ import { F } from '../constants/fonts';
 import { ShimmerFrame, ShimmerText, ShimmerFill, GOLD, BLUE } from '../components/Shimmer';
 import PillButton from '../components/PillButton';
 import { requiredMainQuestIds } from '../lib/prestige';
+import { hapticSuccess, hapticTap } from '../lib/haptics';
 
 // An SVG path whose props (here strokeDashoffset) can be driven by an Animated
 // value — lets completed connectors carry a travelling "energy" dash.
@@ -574,17 +575,6 @@ function computeLayout(quests, { applyTiers = false, chain = null } = {}) {
   const effRank = {};
   quests.forEach(q => { effRank[q.id] = rankOf[q.id] ?? 0; });
 
-  // TEMP DIAG — remove once branch-layout matching is confirmed.
-  if (typeof console !== 'undefined') {
-    console.log('[QuestTreeScreen] chain =', JSON.stringify(chain));
-    console.log('[QuestTreeScreen] branches =', JSON.stringify(branches));
-    console.log('[QuestTreeScreen] floating =', JSON.stringify([...floatingBranches]));
-    [...new Set(quests.map(q => q.branch))].forEach(b => {
-      const key = `${chain}.${b}`.toLowerCase();
-      console.log('[QuestTreeScreen] cfg', JSON.stringify(key), '→', JSON.stringify(BRANCH_LAYOUT[key] ?? null));
-    });
-  }
-
   // Child lookup — keeps spreading safe: a branch that feeds an intra-tier
   // convergence (or the main spine) must NOT be stretched, or its leaf could
   // slide BELOW the fixed-rank merge node and invert the connector.
@@ -954,7 +944,7 @@ function QuestHUD({ done, total, earnedLvl }) {
 // from roots to leaves. On press it DIPS to 0.95 under the finger — the tactile
 // "tap me" cue locked nodes deliberately don't get. All the visual states (done /
 // locked / required frame) are unchanged; only motion is added on top.
-function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, onPress }) {
+function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, celebrate = false, onPress }) {
   const isDone   = state === 'done';
   const isLocked = state === 'locked';
 
@@ -962,6 +952,19 @@ function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, onPre
   const press = useRef(new Animated.Value(0)).current;
   const pulse = useRef(new Animated.Value(0)).current;
   const gate  = useRef(new Animated.Value(0)).current;
+  const burst = useRef(new Animated.Value(0)).current;
+
+  // Completion burst — the moment THIS node is confirmed done, a gold halo
+  // flashes and the card gives a little punch, then both decay away. One-shot.
+  useEffect(() => {
+    if (!celebrate) return;
+    burst.setValue(1);
+    const anim = Animated.timing(burst, {
+      toValue: 0, duration: 1000, easing: Easing.out(Easing.quad), useNativeDriver: true,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [celebrate, burst]);
 
   useEffect(() => {
     const anim = Animated.timing(enter, {
@@ -1001,7 +1004,8 @@ function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, onPre
   const translateY = enter.interpolate({ inputRange: [0, 1], outputRange: [16, 0] });
   const enterScale = enter.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] });
   const pressScale = press.interpolate({ inputRange: [0, 1], outputRange: [1, 0.95] });
-  const scale = Animated.multiply(enterScale, pressScale);
+  const burstScale = burst.interpolate({ inputRange: [0, 1], outputRange: [1, 1.07] });
+  const scale = Animated.multiply(Animated.multiply(enterScale, pressScale), burstScale);
   const dip = to => Animated.timing(press, {
     toValue: to, duration: to ? 90 : 150, easing: Easing.out(Easing.quad), useNativeDriver: true,
   }).start();
@@ -1031,6 +1035,9 @@ function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, onPre
           ]}
         />
       )}
+
+      {/* One-shot gold completion flash (see the `burst` clock above). */}
+      <Animated.View pointerEvents="none" style={[styles.burstHalo, { opacity: burst }]} />
       <TouchableOpacity
         style={[
           styles.questCard,
@@ -1112,6 +1119,8 @@ export default function QuestTreeScreen({ route, navigation }) {
   const [studentId,   setStudentId]   = useState(null);
   const [pendingQuest, setPendingQuest] = useState(null);
   const [toggling,     setToggling]     = useState(false);
+  // The node that JUST got confirmed done — fires its gold completion burst.
+  const [celebrateId,  setCelebrateId]  = useState(null);
   // Available width inside the frame → used to fit the whole tree to the phone.
   const [availW,       setAvailW]       = useState(0);
 
@@ -1247,12 +1256,16 @@ export default function QuestTreeScreen({ route, navigation }) {
           .eq('quest_id', quest.id);
         if (delErr) throw delErr;
         setCompletions(prev => { const s = new Set(prev); s.delete(quest.id); return s; });
+        hapticTap();
       } else {
         const { error: insErr } = await supabase
           .from('student_quest_completions')
           .insert({ student_id: studentId, quest_id: quest.id });
         if (insErr) throw insErr;
         setCompletions(prev => new Set([...prev, quest.id]));
+        // The payoff: gold burst on the node + a success thump in the hand.
+        setCelebrateId(quest.id);
+        hapticSuccess();
       }
     } catch (e) {
       console.error('[QuestTreeScreen] toggleQuest:', e);
@@ -1461,6 +1474,7 @@ export default function QuestTreeScreen({ route, navigation }) {
                     nodeWidth={nodeWidth ?? NODE_W}
                     delay={Math.min((p.rank ?? 0) * 80, 720)}
                     disabled={toggling}
+                    celebrate={celebrateId === q.id}
                     onPress={() => setPendingQuest(q)}
                   />
                 </View>
@@ -1878,6 +1892,20 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 1,
     shadowRadius: 16,
+  },
+  // The one-shot gold flash a node fires the moment it's confirmed complete —
+  // hotter than the gate halo so the payoff outshines the ambient glows.
+  burstHalo: {
+    position: 'absolute',
+    top: -5, left: -5, right: -5, bottom: -5,
+    borderRadius: 15,
+    borderWidth: 2.5,
+    borderColor: SL.gold,
+    backgroundColor: 'rgba(255,215,0,0.14)',
+    shadowColor: SL.gold,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 26,
   },
 
   // Floating "✦ CLASS GATE ✦" crown ribbon, centered above the node's top edge.

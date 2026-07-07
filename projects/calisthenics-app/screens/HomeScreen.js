@@ -14,6 +14,8 @@ import { categoryMeta } from '../lib/workouts';
 import { ShimmerText, ShimmerFill, GOLD } from '../components/Shimmer';
 import Svg, { Circle, Defs, RadialGradient, LinearGradient, Stop } from 'react-native-svg';
 import ScreenFrame, { FRAME_PAD } from '../components/ScreenFrame';
+import PopCheck from '../components/PopCheck';
+import { hapticTap } from '../lib/haptics';
 import { CARD_W, CARD_H } from '../constants/layout';
 import { sessionKey, activeSessionKeys } from '../lib/workoutSession';
 
@@ -440,6 +442,7 @@ export default function HomeScreen({ navigation }) {
   }, [fetchData]));
 
   async function toggleDailyQuest(quest) {
+    hapticTap();
     const isDone = doneTodayIds.has(quest.id);
     const today = israelToday();
     const { data: { user } } = await supabase.auth.getUser();
@@ -472,6 +475,7 @@ export default function HomeScreen({ navigation }) {
 
   // Toggle a workout's completion straight from Home (same write WorkoutsScreen uses).
   async function toggleWorkout(workout) {
+    hapticTap();
     // Real override row → just flip completed (optimistic).
     if (workout.overrideId) {
       const next = !workout.completed;
@@ -528,8 +532,6 @@ export default function HomeScreen({ navigation }) {
 
   const missionLive  = !!activeMission && inProgress.has(sessionKey(TODAY, activeMission.id));
   const allDone      = workouts.length > 0 && workouts.every(w => w.completed);
-  const lvlPct       = maxLvl > 0 ? Math.min(lvl / maxLvl, 1) : 0;
-  const lvlPctLabel  = Math.round(lvlPct * 100);
   const toNext       = Math.max(0, maxLvl - lvl);
   const missionsDone = workouts.filter(w => w.completed).length;
   const dqDone       = dailyQuests.filter(q => doneTodayIds.has(q.id)).length;
@@ -562,7 +564,6 @@ export default function HomeScreen({ navigation }) {
           <View style={styles.powerRing} />
           <View style={styles.powerStem} />
         </View>
-        <Text style={styles.signOutText}>SIGN OUT</Text>
       </TouchableOpacity>
 
       {/* The full layout ALWAYS renders, so the card never collapses to a spinner
@@ -609,7 +610,9 @@ export default function HomeScreen({ navigation }) {
             <View style={[styles.statCard, d.statCard]}>
               <View style={styles.levelTopRow}>
                 <Text style={[styles.levelKicker, d.levelKicker]}>CURRENT LEVEL</Text>
-                {prestigeReady ? (
+                {/* The % pill was dropped — the bar + "x / y" below already show
+                    progress; one number less to read. */}
+                {prestigeReady && (
                   <View style={styles.prestigePill}>
                     <ShimmerText
                       text="★ PRESTIGE READY"
@@ -619,15 +622,10 @@ export default function HomeScreen({ navigation }) {
                       active
                     />
                   </View>
-                ) : (
-                  <View style={styles.pctPill}>
-                    <Text style={styles.pctPillText}>{lvlPctLabel}%</Text>
-                  </View>
                 )}
               </View>
 
               <ShimmerText text={String(displayLvl)} style={[styles.statNumber, d.statNumber]} active={prestigeReady} />
-              <Text style={[styles.statLabel, d.statLabel]}>LEVEL</Text>
 
               <View style={styles.progressBg}>
                 <ShimmerFill
@@ -720,7 +718,9 @@ export default function HomeScreen({ navigation }) {
                         hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                         activeOpacity={0.7}
                       >
-                        {workout.completed && <Text style={styles.missionCheckMark}>✓</Text>}
+                        {workout.completed && (
+                          <PopCheck><Text style={styles.missionCheckMark}>✓</Text></PopCheck>
+                        )}
                       </TouchableOpacity>
                     </TouchableOpacity>
                     );
@@ -757,7 +757,7 @@ export default function HomeScreen({ navigation }) {
                       activeOpacity={0.7}
                     >
                       <View style={[styles.dqCheckbox, done && styles.dqCheckboxDone]}>
-                        {done && <Text style={styles.dqCheckMark}>✓</Text>}
+                        {done && <PopCheck><Text style={styles.dqCheckMark}>✓</Text></PopCheck>}
                       </View>
                       <Text style={[styles.dqTitle, done && styles.dqTitleDone]} numberOfLines={2}>
                         {q.title}
@@ -862,16 +862,14 @@ function makeDyn(s) {
     statCard:       { paddingHorizontal: r(22), paddingVertical: r(18) },
     levelKicker:    { fontSize: rt(22) },
     statNumber:     { fontSize: r(88), lineHeight: r(96) },
-    statLabel:      { fontSize: r(18) },
     sectionsRow:    { gap: r(18) },
-    sectionPanel:   { minHeight: r(220), paddingHorizontal: r(12) },
+    sectionPanel:   { minHeight: r(220), paddingHorizontal: r(16) },
     panelHeaderText:{ fontSize: r(32) },
     restDayText:    { fontSize: r(36) },
   };
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: SL.bg },
   // Fixed-height card (matches the Workouts/Weekly-Plan CARD_H) so the frame is a
   // constant full-screen size from the first render — it never resizes with data
   // or loading state. Content sits from the top; any slack is dead space below,
@@ -893,30 +891,23 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
+  // Icon-only power pill — quiet chrome so the hero owns the top of the screen.
   signOutBtn: {
     alignSelf: 'flex-end',
-    flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingVertical: 11,
-    paddingHorizontal: 20,
+    justifyContent: 'center',
+    width: 44,
+    height: 44,
     marginBottom: 10,
-    borderRadius: 24,
+    borderRadius: 22,
     borderWidth: 1.5,
     borderColor: SL.accent,
     backgroundColor: 'rgba(74,158,191,0.10)',
-    // Ice-glow halo so it reads as a premium, tappable control.
     shadowColor: SL.accent,
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.55,
-    shadowRadius: 12,
-    elevation: 6,
-  },
-  signOutText: {
-    fontFamily: F.heading,
-    fontSize: 15,
-    color: SL.accent,
-    letterSpacing: 3,
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 4,
   },
   // Power symbol drawn from primitives (no icon font): a ring with a vertical
   // stem through its top center — the universal power/exit glyph.
@@ -947,13 +938,6 @@ const styles = StyleSheet.create({
   hero: {
     alignItems: 'center',
     paddingVertical: 28,
-  },
-  heroKicker: {
-    fontFamily: F.bodyMed,
-    fontSize: 18,
-    color: SL.muted,
-    letterSpacing: 6,
-    marginBottom: 10,
   },
   playerName: {
     fontFamily: F.heading,
@@ -1080,13 +1064,6 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 10,
   },
-  prestigeStars: {
-    fontSize: 20,
-    color: SL.gold,
-    letterSpacing: 4,
-    marginTop: 8,
-  },
-
   // ── Stats row ─────────────────────────────────────────────────────────────
 
   statsRow: {
@@ -1126,28 +1103,6 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 10,
   },
-  pctPill: {
-    paddingHorizontal: 16,
-    paddingVertical: 7,
-    borderRadius: 16,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    backgroundColor: 'rgba(74,158,191,0.18)',
-    shadowColor: SL.accent,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.9,
-    shadowRadius: 12,
-    elevation: 6,
-  },
-  pctPillText: {
-    fontFamily: F.heading,
-    fontSize: 20,
-    color: '#BFEFFF',
-    letterSpacing: 2,
-    textShadowColor: 'rgba(74,158,191,0.9)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 10,
-  },
   prestigePill: {
     paddingHorizontal: 12,
     paddingVertical: 4,
@@ -1171,16 +1126,6 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(74,158,191,0.85)',
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 30,
-  },
-  statLabel: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 4,
-    textAlign: 'center',
-    textShadowColor: 'rgba(74,158,191,0.7)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 14,
   },
   progressBg: {
     width: '100%',
@@ -1227,14 +1172,6 @@ const styles = StyleSheet.create({
 
   // ── Today's Missions ──────────────────────────────────────────────────────
 
-  sectionLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 22,
-    color: SL.muted,
-    letterSpacing: 3,
-    marginBottom: 12,
-  },
-
   // Today's Missions on top, Daily Quests below — stacked in one column,
   // each in a glowing ice-panel.
   sectionsRow: {
@@ -1248,7 +1185,7 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: SL.border,
     borderRadius: 12,
-    paddingHorizontal: 12,
+    paddingHorizontal: 16,
     paddingTop: 16,
     paddingBottom: 18,
     shadowColor: SL.accent,
