@@ -2,12 +2,13 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useFocusEffect } from '@react-navigation/native';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Pressable,
-  ActivityIndicator, RefreshControl, Modal, Animated, Easing, Dimensions,
+  ActivityIndicator, RefreshControl, Modal, Animated,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { useCoach } from '../context/CoachContext';
 import { computeLvl } from '../lib/computeLvl';
 import { materializeDay, isDateOverridden } from '../lib/schedule';
-import { categoryMeta } from '../lib/workouts';
+import { categoryMeta, WORKOUT_CATEGORIES } from '../lib/workouts';
 import { F } from '../constants/fonts';
 
 // Off-program ACCESSORIES / LEGS workouts get their type's signature glow; the
@@ -16,13 +17,10 @@ import { F } from '../constants/fonts';
 const accentFor = (category) =>
   (category === 'accessory' || category === 'legs') ? categoryMeta(category).color : null;
 
-// Full window width — how far the body slides off-screen during the swipe exit.
-const WIN_W = Dimensions.get('window').width;
-// Shared swipe duration so the Workouts ↔ Manage transition has one consistent pace.
-const SWIPE_MS = 300;
 import ScreenFrame from '../components/ScreenFrame';
 import PillButton from '../components/PillButton';
-import { ShimmerText, ShimmerFrame, BLUE } from '../components/Shimmer';
+import { useTourTarget } from '../lib/tourTargets';
+import { ShimmerText, BLUE } from '../components/Shimmer';
 import { CARD_H, CARD_W } from '../constants/layout';
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
@@ -37,6 +35,26 @@ const SL = {
   green: '#4CAF50',
   gold:  '#FFD700',
 };
+
+// ─── Direct action tile (player) ──────────────────────────────────────────────
+// The player's Workouts screen skips the Training Forge swipe entirely — DAILY
+// QUESTS and MY WORKOUTS are reached straight from here. A dark "system" panel
+// with a bright static ice edge + glow halo and a tactile press punch (mirrors
+// StudentDetailScreen's ForgeButton so the two screens read the same).
+function ActionTile({ label, onPress }) {
+  const press = useRef(new Animated.Value(0)).current;
+  const onIn  = () => Animated.spring(press, { toValue: 1, useNativeDriver: true, speed: 50, bounciness: 0 }).start();
+  const onOut = () => Animated.spring(press, { toValue: 0, useNativeDriver: true, speed: 18, bounciness: 14 }).start();
+  const scale = press.interpolate({ inputRange: [0, 1], outputRange: [1, 0.94] });
+  return (
+    <Pressable style={{ flex: 1 }} onPressIn={onIn} onPressOut={onOut} onPress={onPress}>
+      <Animated.View style={[styles.actionTile, { transform: [{ scale }] }]}>
+        <View pointerEvents="none" style={styles.actionTileInner} />
+        <Text style={styles.actionTileText} numberOfLines={2}>{label}</Text>
+      </Animated.View>
+    </Pressable>
+  );
+}
 
 // ─── Date helpers ─────────────────────────────────────────────────────────────
 
@@ -129,6 +147,17 @@ export default function WorkoutsScreen({ navigation, route }) {
   // player's own Workouts tab, unchanged.
   const overrideStudentId = route?.params?.studentId ?? null;
   const adminMode = !!overrideStudentId;
+  // Elements the guided tour measures + points its arrow at (player mode only).
+  const tourWeekRef       = useTourTarget('workouts.week');
+  const tourMyWorkoutsRef = useTourTarget('workouts.myworkouts');
+  const tourDailyRef      = useTourTarget('workouts.daily');
+  const tourEditDayRef    = useTourTarget('workouts.editday');
+  // Self player (CoachContext, seeded by SelfStudentSync) — passed to DailyQuest,
+  // which is scoped by its `student` param. Only used in player mode.
+  // `isAdmin` = we're under the coach-side CoachProvider (AdminNavigator).
+  // WORKOUTS LIBRARY is coach-only: players never see the tile, and the route
+  // isn't registered in their stack.
+  const { selectedStudent, isAdmin } = useCoach();
   const resolveTargetId = useCallback(async () => {
     if (overrideStudentId) return overrideStudentId;
     const { data: { user } } = await supabase.auth.getUser();
@@ -150,7 +179,16 @@ export default function WorkoutsScreen({ navigation, route }) {
   // Per-date edit modal
   const [editVisible,    setEditVisible]    = useState(false);
   const [editPending,    setEditPending]    = useState(undefined);
-  const [editSaving,     setEditSaving]     = useState(false);
+  const [editFilter,     setEditFilter]     = useState('main'); // category key (MAIN QUEST default; no "ALL")
+
+  // Optimistic per-date edits: dateStr → ordered workout-id list to show RIGHT NOW,
+  // before the slow materialize + DB write + refetch chain finishes. Keeps the
+  // add/remove UI instant instead of frozen for the round-trip. Cleared once the
+  // real data catches up. `editSeq` tags each date's latest op so a stale op's
+  // cleanup never wipes a newer optimistic value.
+  const [optimisticDays, setOptimisticDays] = useState({});
+  const editSeq  = useRef({});
+  const editChain = useRef(Promise.resolve());
 
   const [weekOffset, setWeekOffset] = useState(0);
   const weekDays = useMemo(() => getWeekDays(weekOffset), [weekOffset]);
@@ -161,62 +199,11 @@ export default function WorkoutsScreen({ navigation, route }) {
 
   const [marking, setMarking] = useState({});
 
-  // ── Training Forge press juice ──
-  // `forgePress` (0→1) is held while the finger is down → scale punch, chip pop,
-  // chevron dart. `forgeSweep` is a one-shot light streak fired on press-in.
-  const forgePress = useRef(new Animated.Value(0)).current;
-  const forgeSweep = useRef(new Animated.Value(0)).current;
-  const [forgeW, setForgeW] = useState(0);
-
-  const onForgeIn = useCallback(() => {
-    Animated.spring(forgePress, {
-      toValue: 1, useNativeDriver: true, speed: 50, bounciness: 0,
-    }).start();
-    forgeSweep.setValue(0);
-    Animated.timing(forgeSweep, {
-      toValue: 1, duration: 600, easing: Easing.out(Easing.cubic), useNativeDriver: true,
-    }).start();
-  }, [forgePress, forgeSweep]);
-
-  const onForgeOut = useCallback(() => {
-    // Spring back with a little overshoot for that satisfying "release" pop.
-    Animated.spring(forgePress, {
-      toValue: 0, useNativeDriver: true, speed: 18, bounciness: 14,
-    }).start();
-  }, [forgePress]);
-
-  const forgeScale  = forgePress.interpolate({ inputRange: [0, 1], outputRange: [1, 0.955] });
-  const forgeChipS  = forgePress.interpolate({ inputRange: [0, 1], outputRange: [1, 1.14] });
-  const forgeChevX  = forgePress.interpolate({ inputRange: [0, 1], outputRange: [0, 5] });
-  const forgeSweepX = forgeSweep.interpolate({ inputRange: [0, 1], outputRange: [-70, forgeW + 70] });
-  const forgeSweepO = forgeSweep.interpolate({ inputRange: [0, 0.12, 0.85, 1], outputRange: [0, 0.55, 0.4, 0] });
-
-  // ── Forge → Manage "System seal" exit ──
-  // Pressing TRAINING FORGE swipes the BODY off to the left while the headline
-  // (name + LVL · CLASS + divider) stays put — Manage then slides its identical
-  // body in from the right, so the header reads as one continuous, unmoved element.
-  const exitAnim   = useRef(new Animated.Value(0)).current;
-  const exitingRef = useRef(false);
-  const exitedRef  = useRef(false);   // did we leave via the Forge swipe?
-
-  const onForgePress = useCallback(() => {
-    if (exitingRef.current) return;
-    exitingRef.current = true;
-    exitedRef.current  = true;
-    Animated.timing(exitAnim, {
-      toValue: 1, duration: SWIPE_MS, easing: Easing.in(Easing.cubic), useNativeDriver: true,
-    }).start(({ finished }) => {
-      // `fromForge` triggers the matching slide-in; pass lvl/class we already have
-      // so Manage's header renders instantly with no refetch flash.
-      if (finished) navigation.navigate('Manage', { fromForge: true, lvl, className });
-    });
-  }, [exitAnim, navigation, lvl, className]);
-
   // ── HUD chrome (entrance removed) ──
   // The staggered boot-up was retired when tab swiping landed: the neighbouring
   // page is VISIBLE mid-drag (before focus fires), so the chrome must sit fully
   // built at all times — values live at 1 and never replay. The Animated.Values
-  // are kept (at rest) because the layout binds to them for the Forge exit slide.
+  // are kept (at rest) because the entrance layout still binds to them.
   const boot = useRef({
     header:  new Animated.Value(1),
     divider: new Animated.Value(1),
@@ -225,24 +212,6 @@ export default function WorkoutsScreen({ navigation, route }) {
     cells:   Array.from({ length: 7 }, () => new Animated.Value(1)),
     panel:   new Animated.Value(1),
   }).current;
-
-  // On return: if we left via the Forge swipe, swipe the body back IN from the left
-  // (completing the page swipe, same pace). Otherwise just sit in place.
-  useFocusEffect(useCallback(() => {
-    exitingRef.current = false;
-    if (exitedRef.current) {
-      exitedRef.current = false;
-      exitAnim.setValue(1);               // start off-screen left
-      Animated.timing(exitAnim, {
-        toValue: 0, duration: SWIPE_MS, easing: Easing.out(Easing.cubic), useNativeDriver: true,
-      }).start();
-    } else {
-      exitAnim.setValue(0);
-    }
-  }, [exitAnim]));
-
-  const exitBodyX = exitAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -WIN_W] });
-  const exitBodyO = exitAnim.interpolate({ inputRange: [0, 0.7, 1], outputRange: [1, 1, 0] });
 
   // ── Fetch week data ────────────────────────────────────────────────────────
 
@@ -344,6 +313,36 @@ export default function WorkoutsScreen({ navigation, route }) {
   // ── Day workout lookup ─────────────────────────────────────────────────────
 
   function getDayWorkouts(day) {
+    const resolved = resolveDayWorkouts(day);
+    // An in-flight optimistic edit for this date overrides what the DB currently
+    // says, so add/remove shows immediately. Reuse the resolved rows (to keep
+    // completion state) and synthesize a placeholder for a freshly-added workout.
+    const opt = optimisticDays[day.dateStr];
+    if (!opt) return resolved;
+    const byId = Object.fromEntries(resolved.map(r => [r.id, r]));
+    return opt
+      .map(id => {
+        if (byId[id]) return byId[id];
+        const w = workoutsById[id];
+        if (!w) return null;
+        return {
+          id:             w.id,
+          title:          w.title,
+          purpose:        w.purpose,
+          scheduled_date: w.scheduled_date,
+          category:       w.category,
+          overrideId:     null,
+          completed:      false,
+          specific_date:  day.dateStr,
+          coachFeedback:  null,
+          feedbackIsRead: false,
+          fromTemplate:   false,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function resolveDayWorkouts(day) {
     const dayOverrides = overrideWorkouts.filter(o => o.specific_date === day.dateStr);
     if (dayOverrides.length > 0) {
       // Per-date override wins for this date (this is how a single day is edited).
@@ -394,19 +393,57 @@ export default function WorkoutsScreen({ navigation, route }) {
   const selectedDayWorkouts = useMemo(
     () => getDayWorkouts(selectedDay),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedDay, overrideWorkouts, templateRows, workoutsById]
+    [selectedDay, overrideWorkouts, templateRows, workoutsById, optimisticDays]
   );
 
   const activeDailyIds = useMemo(() => new Set(dailyQuestIds), [dailyQuestIds]);
+
+  // ── Edit-modal ADD WORKOUT picker ──────────────────────────────────────────
+  // Candidates = workouts not already on the selected date, bucketed by TYPE so
+  // the modal offers the same MAIN/SIDE/ACCESSORIES filter as My Workouts.
+  const editCatKey = (w) => w?.category && WORKOUT_CATEGORIES.some(c => c.k === w.category)
+    ? w.category
+    : '__none';
+  const { editCandidates, editCats, editCounts } = useMemo(() => {
+    const editCandidates = allWorkouts.filter(w => !selectedDayWorkouts.some(dw => dw.id === w.id));
+    const editCounts = {};
+    for (const w of editCandidates) {
+      const k = editCatKey(w);
+      editCounts[k] = (editCounts[k] ?? 0) + 1;
+    }
+    const editCats = [...WORKOUT_CATEGORIES.map(c => c.k), '__none'].filter(k => editCounts[k]);
+    return { editCandidates, editCats, editCounts };
+  }, [allWorkouts, selectedDayWorkouts]);
+  // The picker has NO "ALL" — it always shows exactly one TYPE (default MAIN QUEST).
+  // Fall back to the first available type when the current filter has nothing on
+  // offer (e.g. no main-quest candidates on this day), so the list is never blank.
+  const editDefaultFilter = editCats.includes('main') ? 'main' : (editCats[0] ?? 'main');
+  const editActiveFilter = editCats.includes(editFilter) ? editFilter : editDefaultFilter;
+  const editVisibleWorkouts = editCandidates.filter(w => editCatKey(w) === editActiveFilter);
+
+  // Switch the picker filter; drop a pending pick the new filter would hide.
+  function pickEditFilter(k) {
+    setEditFilter(k);
+    if (editPending && editCatKey(editPending) !== k) setEditPending(undefined);
+  }
 
   // ── Mark a workout as done ─────────────────────────────────────────────────
 
   const mkKey = (w) => w.overrideId ?? `t:${w.id}`;
 
+  // Dates known to already have override rows. Mirrors overrideWorkouts, but is a
+  // synchronous ref so two edits queued on the same not-yet-materialized day (before
+  // any refetch lands) can't BOTH materialize it — materializeDay isn't idempotent.
+  const materializedRef = useRef(new Set());
+  useEffect(() => {
+    materializedRef.current = new Set(overrideWorkouts.map(o => o.specific_date));
+  }, [overrideWorkouts]);
+
   // Ensure a date has its own override rows (copying the weekday's skeleton in the
   // first time it's touched), so completion / edits can attach to that date.
   async function ensureMaterialized(dateStr) {
-    if (isDateOverridden(dateStr, overrideWorkouts)) return;
+    if (materializedRef.current.has(dateStr) || isDateOverridden(dateStr, overrideWorkouts)) return;
+    materializedRef.current.add(dateStr);  // claim synchronously before the awaits
     const tid = await resolveTargetId();
     const dow = new Date(dateStr + 'T00:00:00').getDay();
     const ids = templateRows.filter(t => t.day_of_week === dow).map(t => t.workout_id);
@@ -463,48 +500,82 @@ export default function WorkoutsScreen({ navigation, route }) {
 
   // ── Per-date editing (override the weekly skeleton for one date) ────────────
 
-  async function addWorkoutToDate(dateStr, workoutId) {
-    setEditSaving(true);
-    try {
+  // Run a per-date DB mutation in the background while the UI already shows the
+  // optimistic result. Writes are serialized (editChain) so two quick edits on a
+  // template-derived day can't both try to materialize it. `nextIds` is what the
+  // date should show; it's cleared once the mutation + refetch land, unless a newer
+  // edit for the same date has superseded it.
+  function runDayEdit(dateStr, nextIds, mutate) {
+    const seq = (editSeq.current[dateStr] = (editSeq.current[dateStr] ?? 0) + 1);
+    setEditPending(undefined);
+    setOptimisticDays(prev => ({ ...prev, [dateStr]: nextIds }));  // instant feedback
+    const run = editChain.current.then(async () => {
+      try {
+        await mutate();
+        await fetchData();
+      } catch (e) {
+        alert('Error: ' + (e.message ?? 'Something went wrong.'));
+        await fetchData().catch(() => {});
+      } finally {
+        // Only drop the overlay if this is still the latest edit for the date.
+        if (editSeq.current[dateStr] === seq) {
+          setOptimisticDays(prev => {
+            const next = { ...prev };
+            delete next[dateStr];
+            return next;
+          });
+        }
+      }
+    });
+    editChain.current = run.catch(() => {});
+    return run;
+  }
+
+  function addWorkoutToDate(dateStr, workoutId) {
+    const current = getDayWorkouts(selectedDay).map(w => w.id);
+    const nextIds = current.includes(workoutId) ? current : [...current, workoutId];
+    return runDayEdit(dateStr, nextIds, async () => {
       const tid = await resolveTargetId();
       await ensureMaterialized(dateStr);  // copy skeleton first so siblings are kept
       const { error } = await supabase
         .from('workout_override_workouts')
         .insert({ student_id: tid, coach_id: tid, specific_date: dateStr, workout_id: workoutId });
-      if (error) alert('Error: ' + error.message);
-      setEditPending(undefined);
-      await fetchData();
-    } catch (e) {
-      alert('Error: ' + (e.message ?? 'Something went wrong.'));
-    }
-    setEditSaving(false);
+      if (error) throw new Error(error.message);
+    });
   }
 
-  async function removeWorkoutFromDate(day, workout) {
-    const tid = await resolveTargetId();
-    // Template-derived day: materialize first so removing one keeps the others.
-    if (!workout.overrideId) await ensureMaterialized(day.dateStr);
-    const { error } = await supabase
-      .from('workout_override_workouts')
-      .delete()
-      .eq('student_id', tid)
-      .eq('specific_date', day.dateStr)
-      .eq('workout_id', workout.id);
-    if (error) alert('Error: ' + error.message);
-    await fetchData();
+  function removeWorkoutFromDate(day, workout) {
+    const nextIds = getDayWorkouts(day).map(w => w.id).filter(id => id !== workout.id);
+    return runDayEdit(day.dateStr, nextIds, async () => {
+      const tid = await resolveTargetId();
+      // Template-derived day: materialize first so removing one keeps the others.
+      if (!workout.overrideId) await ensureMaterialized(day.dateStr);
+      const { error } = await supabase
+        .from('workout_override_workouts')
+        .delete()
+        .eq('student_id', tid)
+        .eq('specific_date', day.dateStr)
+        .eq('workout_id', workout.id);
+      if (error) throw new Error(error.message);
+    });
   }
 
   // Drop all per-date overrides for a date → it falls back to the weekly skeleton.
-  async function resetDayToPlan(dateStr) {
-    const tid = await resolveTargetId();
-    const { error } = await supabase
-      .from('workout_override_workouts')
-      .delete()
-      .eq('student_id', tid)
-      .eq('specific_date', dateStr);
-    if (error) alert('Error: ' + error.message);
+  function resetDayToPlan(dateStr) {
+    // Optimistically show the weekday skeleton the date will fall back to.
+    const day = weekDays.find(d => d.dateStr === dateStr) ?? selectedDay;
+    const dow = day.date.getDay();
+    const nextIds = templateRows.filter(t => t.day_of_week === dow).map(t => t.workout_id);
     setEditVisible(false);
-    await fetchData();
+    return runDayEdit(dateStr, nextIds, async () => {
+      const tid = await resolveTargetId();
+      const { error } = await supabase
+        .from('workout_override_workouts')
+        .delete()
+        .eq('student_id', tid)
+        .eq('specific_date', dateStr);
+      if (error) throw new Error(error.message);
+    });
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -545,44 +616,42 @@ export default function WorkoutsScreen({ navigation, route }) {
         <Animated.View style={[styles.headerDivider, { transform: [{ scaleX: boot.divider }] }]} />
       </Animated.View>
 
-      {/* Everything below the headline swipes off to the left on the Forge exit
-          (the headline itself stays put). */}
-      <Animated.View style={[styles.swipeBody, { transform: [{ translateX: exitBodyX }], opacity: exitBodyO }]}>
+      {/* Everything below the hero. The hero itself stays put above. */}
+      <View style={styles.swipeBody}>
 
-      {/* ── Training upgrade console (self-coach) ──
-          Reframed as a game-style "forge / upgrade station": a glowing panel with
-          a live ice-shimmer frame, a power chip, and a build/upgrade subtitle. */}
-      <Animated.View style={[styles.manageRow, {
+      {/* ── Training console ──
+          DAILY QUESTS and MY WORKOUTS are reached DIRECTLY from here by both
+          roles. The old admin-only TRAINING FORGE → Manage swipe was retired
+          2026-08-13 (Accessories + the weekly-skeleton editor went with it).
+          WORKOUTS LIBRARY is the one COACH-ONLY tile — players have no permission
+          for it, so it renders only under the admin CoachProvider. */}
+      <Animated.View style={[styles.manageRow, styles.actionTileRow, {
         opacity: boot.forge,
         transform: [
           { translateY: boot.forge.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) },
           { scale: boot.forge.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] }) },
         ],
       }]}>
-        <Pressable onPressIn={onForgeIn} onPressOut={onForgeOut} onPress={onForgePress}>
-          <Animated.View
-            style={[styles.forgeBtn, { transform: [{ scale: forgeScale }] }]}
-            onLayout={e => setForgeW(e.nativeEvent.layout.width)}
-          >
-            <ShimmerFrame
-              style={StyleSheet.absoluteFill}
-              colors={BLUE}
-              radius={14}
-              thickness={2}
-              active
+        <View ref={tourDailyRef} style={styles.actionTileWrap}>
+          <ActionTile
+            label="DAILY QUESTS"
+            onPress={() => navigation.navigate('DailyQuest', { student: selectedStudent })}
+          />
+        </View>
+        <View ref={tourMyWorkoutsRef} style={styles.actionTileWrap}>
+          <ActionTile
+            label="MY WORKOUTS"
+            onPress={() => navigation.navigate('AllWorkouts')}
+          />
+        </View>
+        {isAdmin && (
+          <View style={styles.actionTileWrap}>
+            <ActionTile
+              label="WORKOUTS LIBRARY"
+              onPress={() => navigation.navigate('EliteWorkouts')}
             />
-            <Animated.View style={[styles.forgeChip, { transform: [{ scale: forgeChipS }] }]}>
-              <Text style={styles.forgeChipGlyph}>▲</Text>
-            </Animated.View>
-            <Text style={styles.forgeTitle}>TRAINING FORGE</Text>
-            <Animated.Text style={[styles.forgeChevron, { transform: [{ translateX: forgeChevX }] }]}>›</Animated.Text>
-            {/* one-shot light streak that sweeps across on press (holo shine) */}
-            <Animated.View
-              pointerEvents="none"
-              style={[styles.forgeSweep, { opacity: forgeSweepO, transform: [{ translateX: forgeSweepX }, { skewX: '-18deg' }] }]}
-            />
-          </Animated.View>
-        </Pressable>
+          </View>
+        )}
       </Animated.View>
 
       {/* ── Week nav ── */}
@@ -612,7 +681,10 @@ export default function WorkoutsScreen({ navigation, route }) {
       </Animated.View>
 
       {/* ── Calendar grid ── */}
+      {/* Outer keeps the 28px side inset; the tour highlights the INNER row so its
+          box hugs SUN→SAT (the day cells) instead of spanning the full padded width. */}
       <View style={styles.calendarGrid}>
+       <View ref={tourWeekRef} style={styles.calendarRow}>
         {weekDays.map((day, i) => {
           const dayWorkouts = getDayWorkouts(day);
           const isSelected  = day.dateStr === selectedDay?.dateStr;
@@ -649,7 +721,11 @@ export default function WorkoutsScreen({ navigation, route }) {
               onPress={() => setSelectedDay(day)}
               activeOpacity={0.75}
             >
-              <Text style={[
+              <Text
+                allowFontScaling={false}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                style={[
                 styles.dayLabel,
                 (isSelected || isToday) && styles.dayLabelSel,
                 allDone && styles.dayLabelDone,
@@ -688,6 +764,7 @@ export default function WorkoutsScreen({ navigation, route }) {
             </Animated.View>
           );
         })}
+       </View>
       </View>
 
       {/* ── Day detail panel ── */}
@@ -697,11 +774,11 @@ export default function WorkoutsScreen({ navigation, route }) {
       }]}>
         <View style={styles.dayCardHead}>
           <Text style={styles.dayCardDate}>{fmtDisplayDate(selectedDay?.dateStr)}</Text>
-          <View style={styles.dayCardEditBtn}>
+          <View ref={tourEditDayRef} style={styles.dayCardEditBtn}>
             <PillButton
               label="✎ EDIT DAY"
               size="sm"
-              onPress={() => { setEditPending(undefined); setEditVisible(true); }}
+              onPress={() => { setEditPending(undefined); setEditFilter(editDefaultFilter); setEditVisible(true); }}
             />
           </View>
         </View>
@@ -729,12 +806,7 @@ export default function WorkoutsScreen({ navigation, route }) {
               <View key={workout.id} style={[styles.workoutCard, tc && { borderLeftColor: tc, shadowColor: tc, shadowOpacity: 0.4, shadowRadius: 8 }]}>
                 <View style={styles.workoutInfo}>
                   <View style={styles.workoutTitleRow}>
-                    <Text style={[styles.workoutTitle, tc && { color: tc }]} numberOfLines={2}>{workout.title?.toUpperCase()}</Text>
-                    {tc && (
-                      <View style={[styles.typeTag, { borderColor: tc }]}>
-                        <Text style={[styles.typeTagText, { color: tc }]}>{categoryMeta(workout.category).l}</Text>
-                      </View>
-                    )}
+                    <Text style={styles.workoutTitle} numberOfLines={2}>{workout.title?.toUpperCase()}</Text>
                     {hasUnreadFeedback && <View style={styles.feedbackDot} />}
                   </View>
                   {workout.purpose ? (
@@ -811,7 +883,7 @@ export default function WorkoutsScreen({ navigation, route }) {
         </ScrollView>
       </Animated.View>
 
-      </Animated.View>
+      </View>
 
       {/* ── Per-date edit modal ── */}
       <Modal
@@ -825,14 +897,10 @@ export default function WorkoutsScreen({ navigation, route }) {
             <Text style={styles.editorTitle}>
               EDIT · {fmtDisplayDate(selectedDay?.dateStr)}
             </Text>
-            <Text style={styles.editorSub}>
-              Changes here only affect this date. Reset to fall back to your weekly plan.
-            </Text>
-
             {/* Current workouts for this date */}
             {selectedDayWorkouts.length > 0 && (
               <>
-                <Text style={styles.editorSectionLabel}>ON THIS DAY</Text>
+                <Text style={styles.editorSectionLabel}>CURRENTLY</Text>
                 <View style={styles.assignedChips}>
                   {selectedDayWorkouts.map(w => (
                     <View key={w.id} style={styles.assignedChip}>
@@ -851,24 +919,57 @@ export default function WorkoutsScreen({ navigation, route }) {
 
             {/* Workout picker — excludes already-present */}
             <Text style={styles.editorSectionLabel}>ADD WORKOUT</Text>
+
+            {/* Type filter pills — same MAIN/SIDE/ACCESSORIES split as My Workouts;
+                only shown when more than one type is on offer. */}
+            {editCats.length > 1 && (
+              <View style={styles.editFilterRow}>
+                {editCats.map(k => {
+                    const m = categoryMeta(k);
+                    return { k, l: m.l, color: m.color, n: editCounts[k] };
+                }).map(c => {
+                  const active = editActiveFilter === c.k;
+                  return (
+                    <TouchableOpacity
+                      key={c.k}
+                      style={[
+                        styles.editFilterChip,
+                        active && { borderColor: c.color, backgroundColor: c.color + '22', shadowColor: c.color },
+                      ]}
+                      onPress={() => pickEditFilter(c.k)}
+                      activeOpacity={0.8}
+                    >
+                      <View style={[styles.editFilterDot, { backgroundColor: c.color, opacity: active ? 1 : 0.45 }]} />
+                      <Text style={[styles.editFilterText, active && { color: c.color }]}>{c.l}</Text>
+                      <Text style={[styles.editFilterCount, active && { color: c.color }]}>{c.n}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+
             <ScrollView style={styles.workoutList} showsVerticalScrollIndicator={false}>
-              {allWorkouts
-                .filter(w => !selectedDayWorkouts.some(dw => dw.id === w.id))
-                .map(w => (
+              {editVisibleWorkouts.map(w => {
+                const meta = categoryMeta(editCatKey(w));
+                return (
                   <TouchableOpacity
                     key={w.id}
                     style={[styles.workoutOption, editPending?.id === w.id && styles.workoutOptionSelected]}
                     onPress={() => setEditPending(w)}
                   >
+                    <View style={[styles.workoutOptionDot, { backgroundColor: meta.color }]} />
                     <Text style={[styles.workoutOptionText, editPending?.id === w.id && { color: SL.accent }]}>
                       {w.title}
                     </Text>
                     {editPending?.id === w.id && <Text style={styles.checkMark}>✓</Text>}
                   </TouchableOpacity>
-                ))}
-              {allWorkouts.length === 0 && (
+                );
+              })}
+              {allWorkouts.length === 0 ? (
                 <Text style={styles.noWorkoutsText}>No workouts yet. Create one from Manage My Training.</Text>
-              )}
+              ) : editVisibleWorkouts.length === 0 ? (
+                <Text style={styles.noWorkoutsText}>Nothing of this type left to add.</Text>
+              ) : null}
             </ScrollView>
 
             <View style={styles.editorButtons}>
@@ -876,28 +977,25 @@ export default function WorkoutsScreen({ navigation, route }) {
                 label="CLOSE"
                 tone="muted"
                 onPress={() => setEditVisible(false)}
-                disabled={editSaving}
                 style={{ flex: 1 }}
               />
               <PillButton
                 label="ADD"
                 variant="solid"
                 onPress={() => editPending && addWorkoutToDate(selectedDay.dateStr, editPending.id)}
-                disabled={editSaving || !editPending}
-                loading={editSaving}
-                style={{ flex: 2 }}
+                disabled={!editPending}
+                style={{ flex: 1 }}
               />
+              {(isDateOverridden(selectedDay?.dateStr, overrideWorkouts) ||
+                optimisticDays[selectedDay?.dateStr]) && (
+                <PillButton
+                  label="↺ RESET"
+                  tone="muted"
+                  onPress={() => resetDayToPlan(selectedDay.dateStr)}
+                  style={{ flex: 1 }}
+                />
+              )}
             </View>
-
-            {isDateOverridden(selectedDay?.dateStr, overrideWorkouts) && (
-              <PillButton
-                label="↺ RESET TO WEEKLY PLAN"
-                tone="muted"
-                onPress={() => resetDayToPlan(selectedDay.dateStr)}
-                disabled={editSaving}
-                style={{ marginTop: 14 }}
-              />
-            )}
           </View>
         </View>
       </Modal>
@@ -993,75 +1091,49 @@ const styles = StyleSheet.create({
     marginHorizontal: 16,
     marginTop: 18,
   },
-  // ── Training "forge" upgrade console ──
-  forgeBtn: {
-    alignSelf: 'center',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 13,
-    paddingVertical: 13,
-    paddingHorizontal: 22,
-    borderRadius: 13,
-    backgroundColor: '#0a1626',
-    overflow: 'hidden',
-    shadowColor: SL.accent,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.45,
-    shadowRadius: 16,
+  // Player two-up direct actions (DAILY QUESTS / MY WORKOUTS) — same footprint as
+  // the single forge button so the calendar below never shifts.
+  actionTileRow: {
+    justifyContent: 'flex-start',
+    gap: 8,
   },
-  forgeSweep: {
-    position: 'absolute',
-    top: -4,
-    bottom: -4,
-    left: 0,
-    width: 46,
-    backgroundColor: 'rgba(180,230,255,0.85)',
-    shadowColor: '#bfe9ff',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 1,
-    shadowRadius: 10,
-  },
-  forgeChip: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
+  // Wrapper so the guided tour can measure each tile; must fill like the tile.
+  actionTileWrap: { flex: 1 },
+  actionTile: {
+    flex: 1,
+    minHeight: 62,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(74,158,191,0.12)',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderRadius: 13,
     borderWidth: 1.5,
-    borderColor: SL.accent,
-    shadowColor: SL.accent,
+    borderColor: '#5AC8FA',          // bright static ice edge
+    backgroundColor: '#0a1626',
+    shadowColor: '#5AC8FA',          // matching glow halo
     shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.7,
-    shadowRadius: 8,
+    shadowOpacity: 0.6,
+    shadowRadius: 16,
   },
-  forgeChipGlyph: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.accent,
-    textShadowColor: SL.accent,
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 8,
+  // Faint brighter hairline just inside the edge → a "polished glass" sheen.
+  actionTileInner: {
+    position: 'absolute',
+    top: 2, left: 2, right: 2, bottom: 2,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: 'rgba(159,228,255,0.25)',
   },
-  forgeTitle: {
+  actionTileText: {
     fontFamily: F.heading,
-    fontSize: 20,
-    color: SL.text,
-    letterSpacing: 2,
+    fontSize: 15,
+    lineHeight: 19,
+    color: '#FFFFFF',
+    letterSpacing: 0.5,
+    textAlign: 'center',
     textShadowColor: SL.accent,
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 10,
   },
-  forgeChevron: {
-    fontFamily: F.heading,
-    fontSize: 26,
-    color: SL.accent,
-    textShadowColor: SL.accent,
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 8,
-    marginLeft: 2,
-  },
-
   // ── Week nav ────────────────────────────────────────────────────────────────
 
   calendarNav: {
@@ -1121,25 +1193,29 @@ const styles = StyleSheet.create({
   // ── Calendar grid ────────────────────────────────────────────────────────────
 
   calendarGrid: {
-    flexDirection: 'row',
     // Align the week strip's outer edges with the session node inside dayCard
     // (dayCard margin 8 + border 1.5 + padding 20 ≈ 29), so it sits on the same
     // line as the workout card and leaves breathing room to the frame border.
     paddingHorizontal: 28,
+  },
+  // The actual SUN→SAT day-cell row (tour-highlighted). Kept separate from the
+  // padded wrapper so the highlight box hugs the cells, not the full padded width.
+  calendarRow: {
+    flexDirection: 'row',
     gap: 6,
   },
   dayNode: {
     flex: 1,
-    minHeight: 108,
+    minHeight: 92,
     backgroundColor: SL.panel,
     borderRadius: 10,
     borderWidth: 1.5,
     borderColor: SL.border,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 12,
+    paddingVertical: 10,
     paddingHorizontal: 4,
-    gap: 3,
+    gap: 2,
     overflow: 'hidden',
   },
   dayNodeToday: { borderColor: SL.accent },
@@ -1165,16 +1241,16 @@ const styles = StyleSheet.create({
     fontFamily: F.body,
     fontSize: 16,
     color: SL.muted,
-    letterSpacing: 1,
+    letterSpacing: 0.5,
     textTransform: 'uppercase',
   },
   dayLabelSel: { color: SL.accent },
   dayLabelDone: { color: SL.accent },
   dayNum: {
     fontFamily: F.heading,
-    fontSize: 34,
+    fontSize: 28,
     color: SL.text,
-    lineHeight: 38,
+    lineHeight: 32,
   },
   dayNumActive: { color: SL.accent },
   dayNumDone: {
@@ -1200,7 +1276,7 @@ const styles = StyleSheet.create({
 
   dayCard: {
     marginHorizontal: 8,
-    marginTop: 14,
+    marginTop: 20,            // clear gap so the panel never crowds the day-number row
     flex: 1,                  // fills remaining space inside the fixed-height card
     backgroundColor: SL.panel,
     borderWidth: 1.5,
@@ -1265,14 +1341,6 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     textTransform: 'uppercase',
     textAlign: 'center',
-  },
-  editorSub: {
-    fontFamily: F.bodyMed,
-    fontSize: 16,
-    color: SL.muted,
-    letterSpacing: 0.5,
-    textAlign: 'center',
-    marginTop: 6,
     marginBottom: 18,
   },
   editorSectionLabel: {
@@ -1303,6 +1371,37 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   assignedChipRemove: { fontFamily: F.body, fontSize: 16, color: SL.muted, paddingLeft: 12 },
+  // Type filter pills above the ADD WORKOUT picker (same look as My Workouts,
+  // sized down to fit the modal).
+  editFilterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 },
+  editFilterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingHorizontal: 13,
+    height: 34,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+    backgroundColor: SL.bg,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+  },
+  editFilterDot: { width: 7, height: 7, borderRadius: 999 },
+  editFilterText: {
+    fontFamily: F.bodyMed,
+    fontSize: 14,
+    color: SL.muted,
+    letterSpacing: 1.5,
+  },
+  editFilterCount: {
+    fontFamily: F.heading,
+    fontSize: 15,
+    color: SL.muted,
+    letterSpacing: 0.5,
+  },
+
   workoutList: { flex: 1, marginBottom: 20 },
   workoutOption: {
     flexDirection: 'row',
@@ -1319,6 +1418,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(74,158,191,0.12)',
     borderColor: SL.accent,
   },
+  workoutOptionDot: { width: 8, height: 8, borderRadius: 999, marginRight: 10 },
   workoutOptionText: {
     flex: 1,
     fontFamily: F.bodyMed,

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useLayoutEffect } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Platform,
 } from 'react-native';
@@ -42,6 +42,10 @@ function VideoSection({ exercise, ratio, width, height, onRatio }) {
         <video
           src={storageUrl}
           controls
+          // Buffer the clip as soon as the element mounts (both pages mount up
+          // front) so it's ready the instant the user swipes over — no 3s wait.
+          preload="auto"
+          playsInline
           onLoadedMetadata={(e) => {
             const v = e.target;
             if (v.videoWidth && v.videoHeight) onRatio(v.videoWidth / v.videoHeight);
@@ -115,17 +119,22 @@ export default function ExerciseDetailScreen({ route, navigation }) {
 
   const pagerRef = useRef(null);
   const didInit = useRef(false);
+  // The pager stays invisible until the initial jump to the video page has been
+  // applied — otherwise the info (description) page flashes for a frame first.
+  const [jumped, setJumped] = useState(false);
 
   const cues = exercise.coaching_cues
     ? exercise.coaching_cues.split('\n').filter(line => line.trim().length > 0)
     : [];
 
   // Once we know the page width, jump to the video page (rightmost) without a
-  // visible scroll animation.
-  useEffect(() => {
+  // visible scroll animation. useLayoutEffect so the jump (and the reveal below)
+  // happen BEFORE the browser paints — no one-frame flash of the info page.
+  useLayoutEffect(() => {
     if (size && pagerRef.current && !didInit.current) {
       didInit.current = true;
       pagerRef.current.scrollTo({ x: size.width, animated: false });
+      setJumped(true);
     }
   }, [size]);
 
@@ -149,45 +158,73 @@ export default function ExerciseDetailScreen({ route, navigation }) {
   };
 
   // ── The two pages ──────────────────────────────────────────────────────────
+  const hasBody = !!exercise.description || cues.length > 0;
+
   const infoPage = size && (
     <ScrollView
       style={{ width: size.width, height: size.height }}
       contentContainerStyle={styles.infoContent}
       showsVerticalScrollIndicator={false}
     >
-      <Text style={styles.title}>{exercise.name}</Text>
-
-      <View style={styles.typeBadge}>
-        <Text style={styles.typeText}>{exercise.movement_type}</Text>
+      {/* Hero — a bold accent bar anchors the movement name; the type sits as a
+          glowing eyebrow above it, and a gradient rule closes the block. */}
+      <View style={styles.hero}>
+        <View style={styles.typeBadge}>
+          <Text style={styles.typeText}>{exercise.movement_type}</Text>
+        </View>
+        <View style={styles.titleRow}>
+          <View style={styles.titleBar} />
+          <Text style={styles.title}>{exercise.name}</Text>
+        </View>
+        {!!exercise.added_by_name && (
+          <Text style={styles.addedBy}>ADDED BY {exercise.added_by_name?.toUpperCase()}</Text>
+        )}
       </View>
 
+      <View style={styles.heroRule} />
+
       {!!exercise.description && (
-        <>
-          <View style={styles.divider} />
-          <View style={styles.section}>
+        <View style={styles.sectionCard}>
+          <View style={styles.sectionHead}>
+            <View style={styles.sectionIcon}><Text style={styles.sectionIconText}>≡</Text></View>
             <SectionTitle>DESCRIPTION</SectionTitle>
-            <Text style={styles.bodyText}>{exercise.description}</Text>
           </View>
-        </>
+          <Text style={styles.bodyText}>{exercise.description}</Text>
+        </View>
       )}
 
       {cues.length > 0 && (
-        <>
-          <View style={styles.divider} />
-          <View style={styles.section}>
+        <View style={styles.sectionCard}>
+          <View style={styles.sectionHead}>
+            <View style={styles.sectionIcon}><Text style={styles.sectionIconText}>✓</Text></View>
             <SectionTitle>COACHING CUES</SectionTitle>
+          </View>
+          <View style={styles.cueList}>
             {cues.map((cue, i) => (
               <View key={i} style={styles.cueRow}>
-                <Text style={styles.cueBullet}>▸</Text>
+                <View style={styles.cueIndex}>
+                  <Text style={styles.cueIndexText}>{i + 1}</Text>
+                </View>
                 <Text style={styles.cueText}>{cue.trim()}</Text>
               </View>
             ))}
           </View>
-        </>
+        </View>
       )}
 
-      {!!exercise.added_by_name && (
-        <Text style={styles.addedBy}>Added by {exercise.added_by_name}</Text>
+      {/* Nothing written up yet — fill the space with a calm placeholder
+          instead of a big empty gap, and point to the video. */}
+      {!hasBody && (
+        <View style={styles.emptyState}>
+          <View style={styles.emptyIconRing}>
+            <Text style={styles.emptyIcon}>▶</Text>
+          </View>
+          <Text style={styles.emptyTitle}>NO NOTES YET</Text>
+          <Text style={styles.emptyText}>
+            No description or coaching cues have been added for this movement.
+            Swipe left to watch the demo.
+          </Text>
+        </View>
       )}
     </ScrollView>
   );
@@ -250,7 +287,7 @@ export default function ExerciseDetailScreen({ route, navigation }) {
               showsHorizontalScrollIndicator={false}
               onScroll={onScroll}
               scrollEventThrottle={16}
-              style={styles.pager}
+              style={[styles.pager, !jumped && { opacity: 0 }]}
             >
               {infoPage}
               {videoPage}
@@ -316,19 +353,34 @@ const styles = StyleSheet.create({
   },
 
   // ── Info page ──
-  infoContent: { paddingHorizontal: 26, paddingVertical: 30, gap: 20 },
-
-  title: {
-    fontFamily: F.heading, fontSize: 30, color: C.iceGlow,
-    letterSpacing: 3, textTransform: 'uppercase',
-    textShadowColor: 'rgba(74,158,191,0.5)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 18,
+  // flexGrow lets short content spread down the page instead of clumping at the top.
+  infoContent: {
+    flexGrow: 1,
+    paddingHorizontal: 24, paddingTop: 36, paddingBottom: 48,
+    gap: 24,
   },
 
+  // Hero header — left-aligned, editorial. Accent bar + glowing title.
+  hero: { gap: 18 },
+  titleRow: { flexDirection: 'row', alignItems: 'stretch', gap: 16 },
+  // Tall glowing bar beside the title, like a chapter marker.
+  titleBar: {
+    width: 5, borderRadius: 3, backgroundColor: C.iceGlow,
+    shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.9, shadowRadius: 12,
+  },
+  title: {
+    flex: 1,
+    fontFamily: F.heading, fontSize: 34, color: C.text,
+    letterSpacing: 2.5, textTransform: 'uppercase', lineHeight: 42,
+    textShadowColor: 'rgba(74,158,191,0.45)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 18,
+  },
+
+  // Movement-type "eyebrow" above the title.
   typeBadge: {
     alignSelf: 'flex-start',
     backgroundColor: 'rgba(74,158,191,0.14)',
     borderWidth: 1.5, borderColor: C.iceGlow, borderRadius: 999,
-    paddingHorizontal: 16, paddingVertical: 7,
+    paddingHorizontal: 18, paddingVertical: 7,
     shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.4, shadowRadius: 8,
   },
   typeText: {
@@ -336,26 +388,74 @@ const styles = StyleSheet.create({
     letterSpacing: 3, textTransform: 'uppercase',
   },
 
-  divider: { height: 1, backgroundColor: C.cardBorder, marginHorizontal: -26 },
+  addedBy: {
+    fontFamily: F.bodyMed, fontSize: 11, color: C.textMuted,
+    letterSpacing: 2, marginLeft: 21,
+  },
 
-  section: { gap: 12 },
+  // Glowing rule that closes the hero and separates it from the content.
+  heroRule: {
+    height: 2, borderRadius: 2, backgroundColor: C.iceGlow, opacity: 0.35,
+    shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.7, shadowRadius: 8,
+  },
+
+  // Content cards — a distinctly lighter navy panel with a glowing left accent
+  // rail, so each section reads as its own raised block instead of flat text.
+  sectionCard: {
+    backgroundColor: C.lockedBg,
+    borderWidth: 1, borderColor: C.lockedBorder, borderRadius: 18,
+    borderLeftWidth: 4, borderLeftColor: C.iceGlow,
+    paddingHorizontal: 22, paddingVertical: 22, gap: 18,
+    shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.14, shadowRadius: 16,
+  },
+  sectionHead: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  sectionIcon: {
+    width: 30, height: 30, borderRadius: 8,
+    borderWidth: 1.5, borderColor: C.iceGlow, backgroundColor: 'rgba(74,158,191,0.12)',
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.4, shadowRadius: 6,
+  },
+  sectionIconText: { fontFamily: F.heading, fontSize: 16, color: C.iceGlow, marginTop: -1 },
   sectionTitle: {
     fontFamily: F.heading, fontSize: 15, color: C.iceGlow,
     letterSpacing: 3, textTransform: 'uppercase',
   },
   bodyText: {
-    fontFamily: F.body, fontSize: 16, color: C.text, lineHeight: 25, letterSpacing: 0.5,
+    fontFamily: F.body, fontSize: 18, color: C.text, lineHeight: 30, letterSpacing: 0.4,
   },
 
-  cueRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
-  cueBullet: { fontFamily: F.body, fontSize: 16, color: C.iceGlow, lineHeight: 25 },
+  cueList: { gap: 16 },
+  cueRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 14 },
+  // Glowing numbered chip per cue.
+  cueIndex: {
+    width: 26, height: 26, borderRadius: 999,
+    borderWidth: 1.5, borderColor: C.iceGlow, backgroundColor: 'rgba(74,158,191,0.14)',
+    justifyContent: 'center', alignItems: 'center', marginTop: 2,
+    shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.5, shadowRadius: 6,
+  },
+  cueIndexText: { fontFamily: F.heading, fontSize: 13, color: C.iceGlow },
   cueText: {
-    fontFamily: F.body, fontSize: 16, color: C.text,
-    lineHeight: 25, flex: 1, letterSpacing: 0.5,
+    fontFamily: F.body, fontSize: 18, color: C.text,
+    lineHeight: 28, flex: 1, letterSpacing: 0.4,
   },
 
-  addedBy: {
-    fontFamily: F.bodyMed, fontSize: 12, color: C.textMuted,
-    letterSpacing: 1.5, marginTop: 8,
+  // Empty state — centered in the leftover space so the page never looks broken.
+  emptyState: {
+    flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16,
+    paddingHorizontal: 20, paddingVertical: 40,
+  },
+  emptyIconRing: {
+    width: 76, height: 76, borderRadius: 999,
+    borderWidth: 2, borderColor: C.lockedBorder, backgroundColor: C.lockedBg,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  emptyIcon: { fontSize: 30, color: C.textMuted, marginLeft: 4 },
+  emptyTitle: {
+    fontFamily: F.heading, fontSize: 15, color: C.textMuted,
+    letterSpacing: 3, textTransform: 'uppercase',
+  },
+  emptyText: {
+    fontFamily: F.bodyMed, fontSize: 14, color: C.textMuted,
+    lineHeight: 22, letterSpacing: 0.5, textAlign: 'center', maxWidth: 320,
   },
 });

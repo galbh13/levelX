@@ -7,6 +7,7 @@ import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
 import { DAY_LABELS } from '../lib/schedule';
+import { WORKOUT_CATEGORIES, UNTYPED_CATEGORY } from '../lib/workouts';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
@@ -31,14 +32,11 @@ const SL = {
 // Each category gets its own signature glow so the warehouse reads at a glance —
 // the rail, type chip, filter pill, section header and week-dots all inherit it.
 // `__none` is the catch-all bucket for legacy/untyped workouts.
-const CAT_ORDER = ['main', 'side', 'accessory', 'legs', '__none'];
-const CAT_META = {
-  main:      { label: 'MAIN QUEST',  color: '#4A9EBF' }, // ice
-  side:      { label: 'SIDE QUEST',  color: '#A98BE0' }, // violet
-  accessory: { label: 'ACCESSORIES', color: '#D9B65A' }, // gold
-  legs:      { label: 'LEGS',        color: '#5FC79A' }, // green
-  __none:    { label: 'UNTYPED',     color: '#5a7794' }, // muted steel
-};
+// Derived from the shared list so a new type shows up here automatically.
+const CAT_ORDER = [...WORKOUT_CATEGORIES.map(c => c.k), UNTYPED_CATEGORY.k];
+const CAT_META = Object.fromEntries(
+  [...WORKOUT_CATEGORIES, UNTYPED_CATEGORY].map(c => [c.k, { label: c.l, color: c.color }])
+);
 const catKey = (w) => (w?.category && CAT_META[w.category] ? w.category : '__none');
 // Translucent fill from a hex accent (6-digit hex + alpha byte).
 const tint = (hex, a = '22') => hex + a;
@@ -76,6 +74,16 @@ function formatDate(dateStr) {
 
 export default function AllWorkoutsScreen({ navigation }) {
   const { selectedStudent: student } = useCoach();
+
+  // Deleting a workout is COACH-ONLY. A player's own `selectedStudent` is always
+  // themselves (seeded by SelfStudentSync), whereas an admin-as-coach has a
+  // DIFFERENT player selected — so `student.id !== meId` uniquely identifies the
+  // admin view. Fail-closed: while `meId` is still loading, DELETE stays hidden.
+  const [meId, setMeId] = useState(null);
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setMeId(data?.user?.id ?? null));
+  }, []);
+  const isCoach = !!(student && meId && student.id !== meId);
 
   const [workouts,     setWorkouts]     = useState([]);
   const [templateRows, setTemplateRows] = useState([]);  // weekly_workout_template rows
@@ -219,7 +227,6 @@ export default function AllWorkoutsScreen({ navigation }) {
     const meta = CAT_META[catKey(item)];
     const assignedDays = (daysByWorkout[item.id] ?? []).slice().sort((a, b) => a - b);
     const inPlan = assignedDays.length > 0;
-    const exCount = item.exercises?.[0]?.count ?? 0;
 
     return (
       <TouchableOpacity
@@ -245,28 +252,18 @@ export default function AllWorkoutsScreen({ navigation }) {
         />
 
         <View style={styles.cardBody}>
-          {/* Top row: title + type chip on the left, delete on the right */}
+          {/* Top row: title on the left (type read from the rail color); DELETE on
+              the right is COACH-ONLY — players can't delete their own workouts. */}
           <View style={styles.cardTop}>
             <View style={styles.titleCol}>
               <Text style={styles.cardTitle} numberOfLines={1}>{item.title?.toUpperCase()}</Text>
-              <View style={[styles.typeChip, { borderColor: meta.color, backgroundColor: tint(meta.color, '1c') }]}>
-                <View style={[styles.typeDot, { backgroundColor: meta.color }]} />
-                <Text style={[styles.typeChipText, { color: meta.color }]}>{meta.label}</Text>
-              </View>
-            </View>
-            <PillButton label="DELETE" tone="danger" size="md" onPress={() => handleDelete(item.id)} />
-          </View>
-
-          {/* Stat line: exercise count + (optional) scheduled date */}
-          <View style={styles.statRow}>
-            <Text style={[styles.statNum, { color: meta.color }]}>{exCount}</Text>
-            <Text style={styles.statLabel}>{exCount === 1 ? 'EXERCISE' : 'EXERCISES'}</Text>
-            {item.scheduled_date ? (
-              <>
-                <View style={styles.statDivider} />
+              {item.scheduled_date ? (
                 <Text style={styles.statDate}>{formatDate(item.scheduled_date)}</Text>
-              </>
-            ) : null}
+              ) : null}
+            </View>
+            {isCoach && (
+              <PillButton label="DELETE" tone="danger" size="sm" onPress={() => handleDelete(item.id)} />
+            )}
           </View>
 
           {/* Purpose */}
@@ -285,7 +282,7 @@ export default function AllWorkoutsScreen({ navigation }) {
             <PillButton
               label={inPlan ? 'EDIT DAYS' : 'ASSIGN'}
               variant={inPlan ? 'outline' : 'solid'}
-              size="md"
+              size="sm"
               onPress={() => openAssign(item)}
             />
           </View>
@@ -310,6 +307,7 @@ export default function AllWorkoutsScreen({ navigation }) {
       <View style={styles.cardFrame}>
       <ScreenHeader
         title="MY WORKOUTS"
+        titleStyle={{ fontSize: 22, letterSpacing: 2 }}
         subtitle={student.full_name}
         onBack={() => navigation.goBack()}
         right={!loading && workouts.length > 0 ? (
@@ -577,7 +575,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     overflow: 'hidden',
     position: 'relative',
-    marginBottom: 14,
+    marginBottom: 10,
     // Soft ice-glow frame, matching the Home / Skills cards.
     shadowColor: SL.accent,
     shadowOffset: { width: 0, height: 0 },
@@ -598,96 +596,60 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 0 },
   },
   cardBody: {
-    paddingVertical: 18,
-    paddingLeft: 22,
-    paddingRight: 18,
-    gap: 10,
+    paddingVertical: 13,
+    paddingLeft: 18,
+    paddingRight: 14,
+    gap: 8,
   },
   cardTop: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     justifyContent: 'space-between',
     gap: 12,
   },
-  titleCol: { flex: 1, gap: 8 },
+  titleCol: { flex: 1, gap: 3 },
   cardTitle: {
     fontFamily: F.heading,
-    fontSize: 28,
+    fontSize: 21,
     color: SL.text,
-    letterSpacing: 2,
-  },
-  // ── Type chip (under the title) ───────────────────────────────────────────
-  typeChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    alignSelf: 'flex-start',
-    paddingHorizontal: 11,
-    paddingVertical: 4,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  typeDot: { width: 6, height: 6, borderRadius: 999 },
-  typeChipText: {
-    fontFamily: F.bodyMed,
-    fontSize: 12.5,
-    letterSpacing: 2,
-  },
-  // ── Stat line (exercise count + scheduled date) ───────────────────────────
-  statRow: { flexDirection: 'row', alignItems: 'center' },
-  statNum: {
-    fontFamily: F.heading,
-    fontSize: 18,
-    color: SL.accent,
-    letterSpacing: 1,
-  },
-  statLabel: {
-    fontFamily: F.bodyMed,
-    fontSize: 15,
-    color: SL.muted,
     letterSpacing: 1.5,
-    marginLeft: 6,
   },
-  statDivider: {
-    width: 4, height: 4, borderRadius: 2,
-    backgroundColor: SL.muted,
-    marginHorizontal: 12,
-  },
+  // ── Scheduled date (under the title) ──────────────────────────────────────
   statDate: {
     fontFamily: F.bodyMed,
-    fontSize: 15,
+    fontSize: 12,
     color: SL.accent,
     letterSpacing: 1.5,
   },
   cardPurpose: {
     fontFamily: F.bodyMed,
-    fontSize: 18,
+    fontSize: 14,
     color: SL.muted,
     letterSpacing: 0.5,
-    lineHeight: 24,
+    lineHeight: 19,
   },
   // ── Weekly-plan assignment (card) ─────────────────────────────────────────
   assignRow: {
     flexDirection: 'row',
-    alignItems: 'flex-end',
+    alignItems: 'center',
     justifyContent: 'space-between',
     gap: 12,
-    marginTop: 4,
-    paddingTop: 14,
+    marginTop: 2,
+    paddingTop: 10,
     borderTopWidth: 1,
     borderTopColor: SL.border,
   },
-  planBlock: { gap: 8, flex: 1 },
+  planBlock: { gap: 5, flex: 1 },
   planLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 13,
+    fontSize: 11,
     color: SL.muted,
-    letterSpacing: 2.5,
+    letterSpacing: 2,
   },
   // Compact Sun→Sat week strip dots.
-  weekStrip: { flexDirection: 'row', gap: 6 },
+  weekStrip: { flexDirection: 'row', gap: 5 },
   weekDot: {
-    width: 28, height: 28, borderRadius: 999,
+    width: 21, height: 21, borderRadius: 999,
     borderWidth: 1,
     borderColor: SL.border,
     justifyContent: 'center',
@@ -701,7 +663,7 @@ const styles = StyleSheet.create({
   },
   weekDotText: {
     fontFamily: F.body,
-    fontSize: 13,
+    fontSize: 11,
     color: SL.muted,
     letterSpacing: 0.5,
   },

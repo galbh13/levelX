@@ -39,3 +39,12 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Local credentials — NEVER commit (see CREDENTIALS.local.md)
+CREDENTIALS.local.md
+
+# Supabase CLI scratch state
+supabase/.temp/
+
+# local scratch
+scratch_icon_b64.txt

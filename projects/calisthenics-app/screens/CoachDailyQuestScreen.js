@@ -122,22 +122,34 @@ export default function CoachDailyQuestScreen({ route, navigation }) {
   async function saveEdit() {
     const title = editingTitle.trim();
     if (!title || !editingId) { setEditingId(null); return; }
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from('daily_quests')
       .update({ title })
-      .eq('id', editingId);
+      .eq('id', editingId)
+      .select('id');
     if (error) { alert('Edit failed: ' + error.message); return; }
+    if (!data || data.length === 0) {
+      alert("Couldn't edit this quest — it isn't owned by your account. Apply the daily_quests owner-RLS migration.");
+      return;
+    }
     setEditingId(null);
     setEditingTitle('');
     await fetchData();
   }
 
   async function removeQuest(quest) {
-    const { error } = await supabase
+    // .select() so we can tell a real update from an RLS-blocked 0-row no-op
+    // (Supabase returns success + [] when a row is visible but not writable).
+    const { data, error } = await supabase
       .from('daily_quests')
       .update({ active: false })
-      .eq('id', quest.id);
+      .eq('id', quest.id)
+      .select('id');
     if (error) { alert('Remove failed: ' + error.message); return; }
+    if (!data || data.length === 0) {
+      alert("Couldn't remove this quest — it isn't owned by your account. Apply the daily_quests owner-RLS migration.");
+      return;
+    }
     await fetchData();
   }
 

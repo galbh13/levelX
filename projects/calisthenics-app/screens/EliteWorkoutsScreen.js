@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
-import { importGalleryWorkout } from '../lib/workouts';
+import { importGalleryWorkout, WORKOUT_CATEGORIES } from '../lib/workouts';
 import { F } from '../constants/fonts';
 import { CARD_H, CARD_W } from '../constants/layout';
 import ScreenFrame from '../components/ScreenFrame';
@@ -42,7 +42,7 @@ export default function EliteWorkoutsScreen({ navigation }) {
   const load = useCallback(async () => {
     try {
       const [clsRes, wRes] = await Promise.all([
-        supabase.from('classes').select('id, name, order_index').order('order_index'),
+        supabase.from('classes').select('id, name, order_index').eq('job', 'static').order('order_index'),
         supabase
           .from('gallery_example_workouts')
           .select('id, title, description, class_order, class_orders, exercises, branches, category')
@@ -108,7 +108,7 @@ export default function EliteWorkoutsScreen({ navigation }) {
         />
 
         {/* Filters — same shape as the admin gallery Example Workouts tab:
-            CLASS → GOAL (main/side/accessories) → title search. Chips wrap so
+            CLASS → GOAL (the shared WORKOUT_CATEGORIES) → title search. Chips wrap so
             none get clipped off the right edge on a phone. */}
         <Text style={styles.sectionLabel}>CLASS</Text>
         <View style={styles.chipWrap}>
@@ -127,12 +127,7 @@ export default function EliteWorkoutsScreen({ navigation }) {
 
         <Text style={styles.sectionLabel}>GOAL</Text>
         <View style={styles.chipWrap}>
-          {[
-            { k: 'main',      l: 'MAIN QUEST' },
-            { k: 'side',      l: 'SIDE QUEST' },
-            { k: 'accessory', l: 'ACCESSORIES' },
-            { k: 'legs',      l: 'LEGS' },
-          ].map(c => (
+          {WORKOUT_CATEGORIES.map(c => (
             <TouchableOpacity
               key={c.k}
               style={[styles.chip, category === c.k && styles.chipActive]}

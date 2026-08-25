@@ -12,14 +12,24 @@
 //                        "Tier 2" is detected structurally (a side chain whose
 //                        first node is gated by a prereq in a DIFFERENT chain),
 //                        the same rule SkillsScreen uses to group side quests.
+//   4. requireAnySide   — at least ONE side-quest chain of ANY tier fully
+//                        completed. For a class whose side quests carry no
+//                        cross-chain gate, so there is no Tier 2 to ask for.
+//                        Upgrade chains never count (see lib/questUpgrades.js).
 //
-// Config is keyed by class `order_index` (0 = Class I, 1 = Class II, …). Classes
-// with no entry fall back to "level only", so the dynamic class count is never
-// hardcoded — adding a class without a config entry just gates on its level.
+// Config is keyed FIRST by `job` (a job is a self-contained class ladder — see
+// migration 20260714_jobs.sql), THEN by class `order_index` (0 = Class I, …).
+// Each job's `order_index` restarts at 0, so the requirements never leak across
+// jobs. A job with no block (e.g. 'handstand' below) — or a class with no entry
+// inside its job — falls back to "level only", so the dynamic class count is
+// never hardcoded and an empty job's classes just gate on their level.
 //
 // IMPORTANT: requirements reference quests by (chain, name), NEVER by id or by
 // `lvl_reward`. The live DB's rewards drift from the migration files, but names
-// are stable, so this module stays correct regardless of that drift.
+// are stable, so this module stays correct regardless of that drift. Names and
+// chains are matched LOOSELY (case / punctuation / whitespace-insensitive, see
+// `norm()`) because the live rows mix casing and hyphenation ("3 Pike Push-ups"
+// vs "10 pike push ups").
 
 // ─── Declarative requirements ───────────────────────────────────────────────
 //
@@ -28,40 +38,142 @@
 //   • { chains: ['handstand'],           — every main quest in each listed chain
 //       nodes:  [{ chain, name }, …] }     PLUS each specific named node
 // Either `chains` or `nodes` may be omitted.
+//
+// A node may carry `secret: true` when it points at a HIDDEN challenge
+// (`class_quests.is_hidden`, see lib/hiddenQuests.js). The requirement still
+// gates prestige, but its label stays masked in the checklist until the player
+// has revealed the node — otherwise the prestige panel spoils the surprise.
+
+import { isUpgradeChain } from './questUpgrades';
 
 export const PRESTIGE_REQUIREMENTS = {
-  // Class I → Class II
-  0: {
-    mainQuests: 'all',
-    requireTier2Side: true,
+  // ── 'static' job — the original all-skills ladder (Class I / II / III) ──────
+  static: {
+    // Class I → Class II
+    0: {
+      mainQuests: 'all',
+      requireTier2Side: true,
+    },
+
+    // Class II → Class III
+    1: {
+      mainQuests: {
+        nodes: [
+          { chain: 'handstand', name: 'Freestanding 30 sec' },
+          { chain: 'hspu', name: '2 HSPU' },
+          { chain: 'oapu', name: '2 OAPU' },
+        ],
+      },
+      requireTier2Side: true,
+    },
+
+    // Class III → Class IV
+    2: {
+      mainQuests: {
+        nodes: [
+          { chain: 'front_lever', name: '1 Negative 5 sec' },
+          { chain: 'front_lever', name: 'Front Lever 3 sec' },
+          { chain: 'front_lever', name: '7 Front Raises' },
+          { chain: 'planche',     name: '1 Negative 5 sec' },
+          { chain: 'planche',     name: '5 sec Full Planche' },
+        ],
+      },
+      requireTier2Side: true,
+    },
   },
 
-  // Class II → Class III
-  1: {
-    mainQuests: {
-      nodes: [
-        { chain: 'handstand', name: 'Freestanding 30 sec' },
-        { chain: 'hspu', name: '2 HSPU' },
-        { chain: 'oapu', name: '2 OAPU' },
-      ],
+  // ── 'handstand' job ────────────────────────────────────────────────────────
+  handstand: {
+    // Class I → Class II: LVL 90 (classes.prestige_at) + the FOUNDATION hidden
+    // challenge + both PUSH branch tips maxed. No Tier-2 side requirement — the
+    // handstand ladder gates on its own main quests only.
+    0: {
+      mainQuests: {
+        nodes: [
+          { chain: 'foundation', name: 'Wall Walk 5 reps', secret: true },
+          { chain: 'push',       name: '16 dips' },
+          { chain: 'push',       name: '10 pike push-ups' },
+        ],
+      },
     },
-    requireTier2Side: true,
-  },
 
-  // Class III → Class IV
-  2: {
-    mainQuests: {
-      nodes: [
-        { chain: 'front_lever', name: '1 Negative 5 sec' },
-        { chain: 'front_lever', name: 'Front Lever 3 sec' },
-        { chain: 'front_lever', name: '7 Front Raises' },
-        { chain: 'planche',     name: '1 Negative 5 sec' },
-        { chain: 'planche',     name: '5 sec Full Planche' },
-      ],
+    // Class II → Class III: LVL 90 (classes.prestige_at, set by
+    // migrations/20260825_handstand_class2_prestige_at_90.sql) + the BALANCE
+    // hidden challenge ("HS Scale") + HSPU up to "2 HSPU" (the chain runs past
+    // it to 3 — only 2 gates prestige) + any ONE Tier-2 side chain.
+    1: {
+      mainQuests: {
+        nodes: [
+          { chain: 'balance', name: 'HS Scale', secret: true },
+          { chain: 'hspu',    name: '2 HSPU' },
+        ],
+      },
+      requireTier2Side: true,
     },
-    requireTier2Side: true,
+
+    // Class III (the handstand job's final class): LVL 90 (classes.prestige_at, set by
+    // migrations/20260825_handstand_class3_prestige_at_90.sql) + three main-quest
+    // nodes + any ONE side quest fully cleared.
+    //
+    // Two of the three nodes live on UPGRADE chains (lib/questUpgrades.js):
+    // 'pike_press' is the upgraded face of STRAIGHT ARM PRESSES and
+    // 'extreme_combo' the upgraded face of COMBOES. Their rows are seeded with
+    // `quest_type = 'side'` but the app shows them as main quests, so they are
+    // referenced here like any other main node — findNode() treats an upgrade
+    // chain as main-facing.
+    //
+    // SHAPES is gated by its LAST node only ('6 Tuck + 6 Straddle'): the mixed
+    // branch converges on it, so clearing it means the whole quest is cleared —
+    // one line in the checklist instead of eight.
+    //
+    // The side rule here is ANY side quest, not a Tier-2 one: Class III's side
+    // quests (SEVEN / MEXICAN HANDSTAND / TIGERBAND) sit side by side with no
+    // cross-chain gate between them, so there is no Tier 2 to ask for.
+    2: {
+      mainQuests: {
+        nodes: [
+          { chain: 'pike_press',    name: 'One Pike Press' },
+          { chain: 'extreme_combo', name: 'Press to straight for 5 sec to 1 HSPU and finish with negative press (2 rounds in a row)' },
+          { chain: 'shapes',        name: '6 Tuck + 6 Straddle' },
+        ],
+      },
+      requireAnySide: true,
+    },
   },
 };
+
+// Resolve the requirements block for a (job, orderIndex). Unknown jobs and
+// classes with no entry fall back to {} (level-only). `job` defaults to 'static'
+// so legacy callers that don't pass it keep the original behaviour.
+function requirementsFor(job, orderIndex) {
+  return PRESTIGE_REQUIREMENTS[job ?? 'static']?.[orderIndex] ?? {};
+}
+
+// ─── Loose name matching ────────────────────────────────────────────────────
+// Live quest names drift in casing and punctuation ("3 Pike Push-ups" vs
+// "10 pike push ups"), so every (chain, name) lookup compares normalized forms:
+// lowercased, punctuation → space, whitespace collapsed.
+
+function norm(s) {
+  return String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// A quest reads as a MAIN quest when its row says so, OR when it lives on an
+// upgrade chain: those rows are seeded `quest_type = 'side'` but the app only
+// ever shows them as the upgraded face of a main quest (lib/questUpgrades.js).
+// Requirements may therefore name their nodes like any other main node.
+function isMainFacing(q) {
+  return q.quest_type === 'main' || isUpgradeChain(q.chain);
+}
+
+/** The main quest matching a { chain, name } requirement, or undefined. */
+function findNode(quests, chain, name) {
+  const c = norm(chain);
+  const n = norm(name);
+  return quests.find(
+    q => isMainFacing(q) && norm(q.chain) === c && norm(q.name) === n,
+  );
+}
 
 // ─── Tier-2 side chains (structural) ────────────────────────────────────────
 // A side chain is Tier 2 when any of its quests is gated by a prerequisite that
@@ -69,7 +181,7 @@ export const PRESTIGE_REQUIREMENTS = {
 // grouping logic in SkillsScreen so both stay in agreement.
 
 export function tier2SideChains(quests) {
-  const sideQuests   = quests.filter(q => q.quest_type === 'side');
+  const sideQuests   = quests.filter(q => q.quest_type === 'side' && !isUpgradeChain(q.chain));
   const chainOfQuest = new Map(quests.map(q => [q.id, q.chain]));
   const sideChains   = [...new Set(sideQuests.map(q => q.chain).filter(Boolean))];
 
@@ -103,8 +215,8 @@ export function prestigeStars({ orderIndex = 0, classCount = null, finalClassMet
 // nodes inside a tree. Side-quest requirements are structural ("any 1 Tier-2
 // chain") and intentionally not surfaced here.
 
-export function requiredMainQuestIds(orderIndex, quests) {
-  const spec = PRESTIGE_REQUIREMENTS[orderIndex]?.mainQuests;
+export function requiredMainQuestIds(orderIndex, quests, job = 'static') {
+  const spec = requirementsFor(job, orderIndex).mainQuests;
   if (!spec) return new Set();
 
   const ids = new Set();
@@ -114,13 +226,16 @@ export function requiredMainQuestIds(orderIndex, quests) {
   }
   (spec.chains ?? []).forEach(chain => {
     quests.forEach(q => {
-      if (q.quest_type === 'main' && q.chain === chain) ids.add(q.id);
+      if (isMainFacing(q) && norm(q.chain) === norm(chain)) ids.add(q.id);
     });
   });
-  (spec.nodes ?? []).forEach(({ chain, name }) => {
-    const match = quests.find(
-      q => q.quest_type === 'main' && q.chain === chain && q.name === name,
-    );
+  (spec.nodes ?? []).forEach(({ chain, name, secret }) => {
+    // A `secret` node keeps the look it earned: a revealed hidden challenge
+    // wears the gold HIDDEN CHALLENGE plaque, and repainting it as a CLASS GATE
+    // would take that away. It still gates prestige — it just isn't flagged in
+    // the tree.
+    if (secret) return;
+    const match = findNode(quests, chain, name);
     if (match) ids.add(match.id);
   });
   return ids;
@@ -129,7 +244,7 @@ export function requiredMainQuestIds(orderIndex, quests) {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function mainQuestsInChain(quests, chain) {
-  return quests.filter(q => q.quest_type === 'main' && q.chain === chain);
+  return quests.filter(q => isMainFacing(q) && norm(q.chain) === norm(chain));
 }
 
 function prettyChain(chain) {
@@ -163,13 +278,20 @@ function checkMainQuests(spec, quests, completedIds) {
       required.push(...group);
       items.push(groupItem(`All ${prettyChain(chain)} quests`, group, completedIds));
     });
-    (spec.nodes ?? []).forEach(({ chain, name }) => {
-      const match = quests.find(
-        q => q.quest_type === 'main' && q.chain === chain && q.name === name,
-      );
+    (spec.nodes ?? []).forEach(({ chain, name, secret }) => {
+      const match = findNode(quests, chain, name);
       if (match) required.push(match);
       // A named node is its own exact requirement — no `remaining` sub-list.
-      items.push({ label: name, ok: !!match && completedIds.has(match.id), detail: '', remaining: [] });
+      // A `secret` node is NEVER named here — not before the reveal (the panel
+      // would spoil the discovery) and not after (the challenge is known by its
+      // plaque, not by the movement). Only the label changes: it is listed like
+      // every other requirement, no special treatment.
+      items.push({
+        label:     secret ? 'Hidden Quest' : name,
+        ok:        !!match && completedIds.has(match.id),
+        detail:    '',
+        remaining: [],
+      });
     });
   }
 
@@ -196,13 +318,30 @@ function checkTier2Side(quests, completedIds) {
   return { ok: completedChains > 0, completedChains, totalChains: chains.length };
 }
 
+// Returns { ok, completedChains, totalChains } for the "any ONE side quest"
+// rule. Upgrade chains are excluded — they are main quests wearing a side row
+// (lib/questUpgrades.js), so clearing one must never satisfy a side requirement.
+function checkAnySide(quests, completedIds) {
+  const sideQuests = quests.filter(q => q.quest_type === 'side' && !isUpgradeChain(q.chain));
+  const chains     = [...new Set(sideQuests.map(q => q.chain).filter(Boolean))];
+  let completedChains = 0;
+
+  chains.forEach(chain => {
+    const nodes = sideQuests.filter(q => q.chain === chain);
+    if (nodes.length > 0 && nodes.every(q => completedIds.has(q.id))) completedChains++;
+  });
+
+  return { ok: completedChains > 0, completedChains, totalChains: chains.length };
+}
+
 // ─── Evaluator ──────────────────────────────────────────────────────────────
 //
 // Pure: takes everything it needs, returns { ok, checks }. `checks` is an
 // ordered list the UI renders as a checklist; `ok` is true only when every
 // check passes.
 //
-//   orderIndex   — current class order_index
+//   job          — the player's job (class ladder). Defaults to 'static'.
+//   orderIndex   — current class order_index (restarts per job)
 //   quests       — ALL class_quests rows for the class (main + side)
 //   completedIds — Set of completed quest ids for the player
 //   lvl          — player's computed LVL for the class
@@ -210,8 +349,8 @@ function checkTier2Side(quests, completedIds) {
 //
 // Each check: { key, label, ok, detail }.
 
-export function evaluatePrestige({ orderIndex, quests, completedIds, lvl, prestigeAt }) {
-  const req    = PRESTIGE_REQUIREMENTS[orderIndex] ?? {};
+export function evaluatePrestige({ job = 'static', orderIndex, quests, completedIds, lvl, prestigeAt }) {
+  const req    = requirementsFor(job, orderIndex);
   const checks = [];
 
   // 1. Level — always required.
@@ -243,6 +382,17 @@ export function evaluatePrestige({ orderIndex, quests, completedIds, lvl, presti
     checks.push({
       key:    'tier2',
       label:  'Complete 1 Tier II skill',
+      ok,
+      detail: totalChains > 0 ? `${completedChains} / 1` : '—',
+    });
+  }
+
+  // 4. Any ONE side quest — for a class whose side quests carry no Tier-2 gate.
+  if (req.requireAnySide) {
+    const { ok, completedChains, totalChains } = checkAnySide(quests, completedIds);
+    checks.push({
+      key:    'anySide',
+      label:  'Complete 1 side quest',
       ok,
       detail: totalChains > 0 ? `${completedChains} / 1` : '—',
     });

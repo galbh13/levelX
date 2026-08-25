@@ -185,6 +185,8 @@ export default function AddExampleWorkoutScreen({ route, navigation }) {
     supabase
       .from('classes')
       .select('id, name, order_index')
+      // Example-workout targets follow the 'static' class ladder only.
+      .eq('job', 'static')
       .order('order_index')
       .then(({ data }) => setClasses(data ?? []));
 
@@ -422,6 +424,7 @@ export default function AddExampleWorkoutScreen({ route, navigation }) {
           {[
             { k: 'main',      l: 'MAIN QUEST' },
             { k: 'side',      l: 'SIDE QUEST' },
+            { k: 'handstand', l: 'HANDSTAND' },
             { k: 'accessory', l: 'ACCESSORIES' },
             { k: 'legs',      l: 'LEGS' },
           ].map(c => {

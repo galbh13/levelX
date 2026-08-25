@@ -10,7 +10,18 @@ import { F } from '../constants/fonts';
 import { ShimmerFrame, ShimmerText, ShimmerFill, GOLD, BLUE } from '../components/Shimmer';
 import PillButton from '../components/PillButton';
 import { requiredMainQuestIds } from '../lib/prestige';
+import { DEFAULT_JOB } from '../lib/jobs';
+import { isRevealed, visibleQuests } from '../lib/hiddenQuests';
+import { isMirrorQuest, withMirrorCompletions } from '../lib/mirrorQuests';
+import {
+  isCoachQuest, canToggleCoachQuest, questNodeLabel, questLayoutLabel,
+} from '../lib/coachQuests';
+import { useCoach } from '../context/CoachContext';
+import {
+  upgradeFor, baseOf, chainCleared, fetchUpgrades, saveUpgrade, removeUpgrade,
+} from '../lib/questUpgrades';
 import { hapticSuccess, hapticTap } from '../lib/haptics';
+import { noteQuestCompleted, noteQuestUncompleted, reconcileQuestProgress } from '../lib/questProgress';
 
 // An SVG path whose props (here strokeDashoffset) can be driven by an Animated
 // value — lets completed connectors carry a travelling "energy" dash.
@@ -27,6 +38,9 @@ const SL = {
   muted:  '#4a6a8a',
   danger: '#FF4444',
   green:  '#4CAF50',
+  // Coach approval — the brighter "approved" green the coach-owned nodes wear
+  // (SL.green is the muted UI green and reads grey beside a lit node).
+  approve: '#3BE87A',
   gold:   '#FFD700',
   wine:   '#E11D48',
 };
@@ -34,15 +48,30 @@ const SL = {
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
 const NODE_W       = 380;
+// Wide node for single-column, info-dense quests (long names wrap to fewer lines).
+const WIDE_NODE_W  = 680;
 const NODE_H       = 76;
 const COL_GAP      = 60;
 const RANK_GAP     = 76;
-const TIER_GAP     = 96;      // extra vertical room reserved around a TIER divider
+const TIER_GAP     = 120;     // extra vertical room reserved around a TIER divider
 const TREE_PAD_H   = 16;
 const TREE_PAD_T   = 28;
 const LABEL_H      = 48;
 const LABEL_OFFSET = 58;
+const TIER_RULE_H     = 40;   // divider row height — must clear the 30px TIER label
+const TIER_LABEL_GAP  = 18;   // clear air between the TIER rule and a branch heading below it
+// The reveal beat: how long the discovery of a hidden challenge waits after the
+// tap that earned it, so the gold completion burst on the node the player DID
+// tap gets its moment first, and the reveal reads as a consequence of it.
+const REVEAL_DELAY    = 620;
+const HIDDEN_GAP      = 196;  // extra air above a revealed HIDDEN CHALLENGE (2-line plaque)
+// The plaque rides well clear of the node so the gold connector elbow bending in
+// from the branch tips passes BELOW it, never alongside the type.
+const CHALLENGE_LABEL_OFFSET = 148;
 const BEND_NEAR_CHILD = 12;   // horizontal jog sits this many px above child top
+// Shared height for the three header pills (BACK / version switch / DOWNGRADE)
+// so they sit exactly level regardless of what's inside them.
+const HEADER_PILL_H   = 58;
 
 // ─── Per-node height — long names grow taller instead of clipping ─────────────
 // Width is fixed by column geometry, so we can't widen a node without colliding
@@ -54,15 +83,79 @@ const NODE_V_PAD     = 12;   // must match styles.questCard paddingVertical
 // cover the badge's real rendered height (text lineHeight 22 + 4 padding = 26)
 // plus styles.questCard gap (6) plus slack so the title is never clipped.
 const NODE_BADGE_H   = 38;
-const NODE_MAX_LINES = 3;
+// Cap on wrapped title lines. 4 (was 3) so long combo names like
+// "…negative press (2 rounds in a row)" show in full instead of truncating with
+// an ellipsis. Rows are height-aware, so taller nodes just reserve more room;
+// short names still compute 1–2 lines and are unchanged.
+const NODE_MAX_LINES = 4;
 
-function nodeLineCount(name, nodeW) {
-  const usable  = nodeW - 32;                       // minus horizontal padding
-  const perLine = Math.max(8, Math.floor(usable / 14)); // ~14px per bold char @24
-  const len     = (name?.length ?? 0) + 3;          // +3 buffer for the 🔒 prefix
-  return Math.min(NODE_MAX_LINES, Math.max(1, Math.ceil(len / perLine)));
+// How many lines a title really takes. The old estimate was a flat character
+// count at ~14px/char, which is far wider than Exo2 Bold actually sets: it read
+// "Weighted Superman 5 sec" (one line on screen) as TWO, so that card reserved a
+// whole extra line of height and stood visibly taller than its one-line
+// neighbours. Now each glyph gets an approximate advance and words wrap whole,
+// like the real text layout — so the reserved height matches what renders.
+// Advance widths for the node title face (Exo2 Bold) at fontSize 24, read
+// straight out of the shipped TTF (hmtx/cmap) — not guessed. Anything not listed
+// (emoji, rare punctuation) falls back to GLYPH_FALLBACK.
+const GLYPH_W = {
+  ' ': 5.18, '-': 9.94, '/': 13.27, '(': 8.78, ')': 8.78, "'": 5.09, '"': 8.95, '.': 5.86, ',': 5.81,
+  '0': 15.14, '1': 10.37, '2': 13.94, '3': 13.61, '4': 15.29,
+  '5': 13.25, '6': 14.16, '7': 12.67, '8': 14.95, '9': 14.16,
+  A: 15.67, B: 15.36, C: 14.11, D: 16.39, E: 13.87, F: 13.37, G: 15.55,
+  H: 16.58, I: 7.01,  J: 8.93,  K: 15.22, L: 12.86, M: 21.96, N: 17.33,
+  O: 16.51, P: 14.83, Q: 16.51, R: 15.53, S: 14.06, T: 14.45, U: 16.46,
+  V: 15.36, W: 23.42, X: 15.46, Y: 14.69, Z: 14.06,
+  a: 13.68, b: 14.26, c: 12.22, d: 14.33, e: 13.54, f: 9.7,  g: 13.94,
+  h: 14.42, i: 6.62,  j: 6.65,  k: 13.42, l: 7.87,  m: 21.14, n: 14.42,
+  o: 14.16, p: 14.4,  q: 14.26, r: 10.25, s: 12.74, t: 9.84,  u: 14.23,
+  v: 13.58, w: 20.4,  x: 13.61, y: 13.58, z: 12.62,
+};
+const GLYPH_FALLBACK = 24;      // emoji (🔒) render about one em wide
+
+const LETTER_SPACING = 0.6;                         // must match styles.questName
+
+function textWidth(str) {
+  let w = 0;
+  for (const ch of String(str ?? '')) w += (GLYPH_W[ch] ?? GLYPH_FALLBACK) + LETTER_SPACING;
+  return w;
 }
 
+// Usable text width inside a node: minus the card's paddingHorizontal (16×2) and
+// the title's own paddingHorizontal (8×2), then 2px of slack so a title landing
+// exactly on the boundary counts as wrapping rather than being ellipsised.
+function usableTextWidth(nodeW) {
+  return Math.max(60, nodeW - 32 - 16 - 2);
+}
+
+function nodeLineCount(name, nodeW) {
+  const usable = usableTextWidth(nodeW);
+  const words  = String(name ?? '').split(/\s+/).filter(Boolean);
+  if (words.length === 0) return 1;
+
+  let lines = 1;
+  let cur   = 0;
+  for (const word of words) {
+    const wWidth = textWidth(word);
+    const withSp = cur === 0 ? wWidth : cur + textWidth(' ') + wWidth;
+    if (withSp <= usable) {
+      cur = withSp;
+    } else {
+      lines += 1;
+      // A single word too long for the line breaks by character (native does the
+      // same); count how many lines it eats.
+      cur = wWidth;
+      while (cur > usable && lines < NODE_MAX_LINES) { cur -= usable; lines += 1; }
+    }
+    if (lines >= NODE_MAX_LINES) return NODE_MAX_LINES;
+  }
+  return Math.min(NODE_MAX_LINES, lines);
+}
+
+// Height reserved for a node — the same in every state. Locked or not the title
+// is identical (the padlock sits in the badge row below it); a coach node, whose
+// label DOES change on approval, is measured at its longest via
+// questLayoutLabel() so approving it can't reshuffle the tree.
 function nodeHeightFor(name, nodeW) {
   const lines = nodeLineCount(name, nodeW);
   return Math.max(NODE_H, NODE_V_PAD * 2 + lines * NODE_LINE_H + NODE_BADGE_H);
@@ -125,10 +218,19 @@ const BRANCH_LAYOUT = {
 const DEFAULT_BRANCH_LAYOUT = { startFrac: 0, endFrac: 1 };
 
 // Class III (order_index 2) is the first class to use a TIER concept. Tiers are
-// detected structurally within a tier-enabled class — but the class gate below
+// detected structurally within a tier-enabled class — but the threshold below
 // prevents Class I/II (whose multi-branch convergences look identical) from
 // rendering a divider. Future tiered classes (IV+) clear this threshold too.
 const TIER_MIN_CLASS_ORDER = 2;
+
+// The handstand JOB doesn't gate tiers on class order (its classes are 0/1/2 but
+// most are faithful single-tier copies of static quests). Tiers there are an
+// explicit per-quest choice: ONLY these chains render a TIER divider. Everything
+// else (push / foundation / balance / shapes …) reads like its un-tiered source.
+// (PUSH used to carry the power/mobility TIER II, but that was moved into its own
+// flat FOUNDATION main quest — 20260716_handstand_push_tier2_to_foundation.)
+// HSPU is tiered: its MAIN convergence + the HSPU branch below it are TIER II.
+const HANDSTAND_TIERED_CHAINS = ['hspu'];
 
 // Tier 2 = every tier-crossing convergence node (is_convergence with prereqs
 // spanning 2+ branches) plus all of its descendants. Returns a Set of quest ids.
@@ -163,6 +265,9 @@ function computeTier2Set(quests) {
 
 // Handstand-specific layout constants — narrower columns, fixed split offset
 const HS_NODE_W       = 360;
+// A single-column linear quest (one branch, no splits) owns the whole frame, so
+// its nodes widen to this — long info-dense names then wrap to far fewer lines.
+const HS_NODE_W_WIDE  = 680;
 const HS_COL_GAP      = 50;
 const HS_SPLIT_OFFSET = 205;
 
@@ -217,12 +322,28 @@ function computeHandstandLayout(quests, { applyTiers = false } = {}) {
 
   const colIndex = {};
   branches.forEach((b, i) => { colIndex[b] = i; });
-  const colCenterX = (b) =>
-    (colIndex[b] ?? 0) * (HS_NODE_W + HS_COL_GAP) + HS_NODE_W / 2;
 
   const numBranches = branches.length;
+
+  // Single linear column (one branch, no node with 2+ children) has no neighbour
+  // to collide with, so its nodes widen to HS_NODE_W_WIDE. Multi-column / split
+  // trees keep HS_NODE_W (widening them would overlap adjacent columns/siblings).
+  const childCount = {};
+  quests.forEach(q => (q.prerequisites ?? []).forEach(p => {
+    if (idMap.has(p)) childCount[p] = (childCount[p] ?? 0) + 1;
+  }));
+  const isSingleColumn =
+    numBranches === 1 && Object.values(childCount).every(c => c <= 1);
+  // Only widen when at least one name is genuinely long — short-name quests
+  // (e.g. "One Straddle Press") would just look empty at the wider size.
+  const hasLongNames = quests.some(q => (q.name?.length ?? 0) > 44);
+  const NW = isSingleColumn && hasLongNames ? HS_NODE_W_WIDE : HS_NODE_W;
+
+  const colCenterX = (b) =>
+    (colIndex[b] ?? 0) * (NW + HS_COL_GAP) + NW / 2;
+
   const treeWidth   =
-    numBranches * HS_NODE_W + Math.max(0, numBranches - 1) * HS_COL_GAP;
+    numBranches * NW + Math.max(0, numBranches - 1) * HS_COL_GAP;
 
   // Step 3 — detect intra-branch single-parent split children:
   //   2+ nodes in the same branch sharing the exact same single prereq
@@ -331,18 +452,36 @@ function computeHandstandLayout(quests, { applyTiers = false } = {}) {
   quests.forEach(q => {
     if (tier2Set.has(q.id)) firstTier2Rank = Math.min(firstTier2Rank, rankOf[q.id] ?? 0);
   });
-  const rankY = (r) =>
-    TREE_PAD_T + LABEL_H + r * (NODE_H + RANK_GAP) +
-    (r >= firstTier2Rank ? TIER_GAP : 0);
+  // Row spacing is HEIGHT-AWARE: each rank reserves the tallest node it holds,
+  // so multi-line names (e.g. long combo descriptions) no longer crowd the row
+  // below. Ranks are plain integers in this path (no fractional effRank), so a
+  // cumulative top table is exact. When every node is a single line this reduces
+  // to the old uniform NODE_H + RANK_GAP step, leaving short chains unchanged.
+  const rankHeight = {};
+  quests.forEach(q => {
+    const r = rankOf[q.id] ?? 0;
+    rankHeight[r] = Math.max(rankHeight[r] ?? NODE_H, nodeHeightFor(questLayoutLabel(q), NW));
+  });
+  const rankTop = {};
+  let acc = TREE_PAD_T + LABEL_H;
+  for (let r = 0; r <= maxRank; r++) {
+    if (r === firstTier2Rank) acc += TIER_GAP;   // breathing room around the divider
+    rankTop[r] = acc;
+    acc += (rankHeight[r] ?? NODE_H) + RANK_GAP;
+  }
+  const rankY = (r) => rankTop[r] ?? (TREE_PAD_T + LABEL_H + r * (NODE_H + RANK_GAP));
   const positions = {};
   quests.forEach(q => {
     const r  = rankOf[q.id] ?? 0;
     const cx = colCenterX(q.branch ?? branches[0]) + (offsetOf[q.id] ?? 0);
     positions[q.id] = {
-      x: cx - HS_NODE_W / 2,
+      x: cx - NW / 2,
       y: rankY(r),
-      w: HS_NODE_W,
-      h: nodeHeightFor(q.name, HS_NODE_W),
+      w: NW,
+      // The whole ROW's height, not this node's own — side-by-side siblings must
+      // read as one row of equal cards. (A row is only taller than NODE_H when
+      // some node in it genuinely needs a second line.)
+      h: rankHeight[r] ?? NODE_H,
       rank: r,
     };
   });
@@ -360,7 +499,7 @@ function computeHandstandLayout(quests, { applyTiers = false } = {}) {
   // node's possibly-offset x), since labels describe the column itself.
   const labelXOf = {};
   Object.keys(firstNodeOfBranch).forEach(b => {
-    labelXOf[b] = colCenterX(b) - HS_NODE_W / 2;
+    labelXOf[b] = colCenterX(b) - NW / 2;
   });
 
   // Normalize horizontal extent — split children sit ±HS_SPLIT_OFFSET from their
@@ -388,8 +527,32 @@ function computeHandstandLayout(quests, { applyTiers = false } = {}) {
   return {
     positions, firstNodeOfBranch, labelXOf,
     width, height,
-    nodeWidth: HS_NODE_W,
+    nodeWidth: NW,
   };
+}
+
+// A revealed HIDDEN CHALLENGE hangs off the BOTTOM of the tree (its prerequisites
+// are the branch tips), so it can simply be pushed further down than its
+// topological rank would place it. That gap is what makes it read as a separate,
+// earned thing instead of "one more row" crowding the branch tips — and it gives
+// its banner room to breathe. Applied AFTER either layout engine, so both get it.
+function spaceOutHiddenNodes(layout, quests) {
+  const hidden = (quests ?? []).filter(q => q.is_hidden);
+  if (hidden.length === 0) return layout;
+
+  const positions = { ...layout.positions };
+  let moved = false;
+  hidden.forEach(q => {
+    const p = positions[q.id];
+    if (!p) return;
+    positions[q.id] = { ...p, y: p.y + HIDDEN_GAP };
+    moved = true;
+  });
+  if (!moved) return layout;
+
+  let maxBottom = 0;
+  Object.values(positions).forEach(p => { maxBottom = Math.max(maxBottom, p.y + p.h); });
+  return { ...layout, positions, height: Math.max(layout.height, maxBottom + TREE_PAD_T) };
 }
 
 // ─── Layout engine — column-anchored, convergence-only centering ──────────────
@@ -535,10 +698,24 @@ function computeLayout(quests, { applyTiers = false, chain = null } = {}) {
 
   const colIndex = {};
   branches.forEach((b, i) => { colIndex[b] = i; });
-  const colCenterX = (b) => (colIndex[b] ?? 0) * (NODE_W + COL_GAP) + NODE_W / 2;
 
   const numBranches  = branches.length;
-  const treeWidth    = numBranches * NODE_W + Math.max(0, numBranches - 1) * COL_GAP;
+
+  // Single linear column (one branch, no node with 2+ children) owns the whole
+  // frame → widen its nodes so info-dense names wrap to far fewer lines. Any
+  // multi-column / split / convergence tree keeps NODE_W (identical behavior),
+  // and short-name quests stay narrow so they don't look empty.
+  const childCount = {};
+  quests.forEach(q => (q.prerequisites ?? []).forEach(p => {
+    if (idMap.has(p)) childCount[p] = (childCount[p] ?? 0) + 1;
+  }));
+  const isSingleColumn =
+    numBranches === 1 && Object.values(childCount).every(c => c <= 1);
+  const hasLongNames = quests.some(q => (q.name?.length ?? 0) > 44);
+  const NW = isSingleColumn && hasLongNames ? WIDE_NODE_W : NODE_W;
+
+  const colCenterX = (b) => (colIndex[b] ?? 0) * (NW + COL_GAP) + NW / 2;
+  const treeWidth    = numBranches * NW + Math.max(0, numBranches - 1) * COL_GAP;
   // Convergence sub-tracks center on the MAIN spine when one exists (so merges
   // sit directly beneath it); otherwise on the whole tree.
   const hasMainCol   = branches.includes('main');
@@ -688,9 +865,38 @@ function computeLayout(quests, { applyTiers = false, chain = null } = {}) {
   });
 
   // Tier 2 nodes drop by an extra TIER_GAP to give the divider breathing room.
-  const rankY = (r) =>
-    TREE_PAD_T + LABEL_H + r * (NODE_H + RANK_GAP) +
-    (r >= firstTier2Rank ? TIER_GAP : 0);
+  //
+  // For a simple single-column quest (integer ranks, no fractional effRank),
+  // row spacing is HEIGHT-AWARE: each rank reserves the tallest node it holds, so
+  // multi-line combo descriptions no longer overlap the row below. Complex trees
+  // (fractional effRank from spread/floating shifts) keep the original uniform
+  // step, so their tuned layouts are untouched.
+  // Row height = the tallest node the rank holds. Used for BOTH the vertical
+  // step (single-column path) and every node's rendered height, so no card in a
+  // row is shorter than its neighbour.
+  const rankHeight = {};
+  quests.forEach(q => {
+    const r = rankOf[q.id] ?? 0;
+    rankHeight[r] = Math.max(rankHeight[r] ?? NODE_H, nodeHeightFor(questLayoutLabel(q), NW));
+  });
+  const rowH = (r) => rankHeight[Math.round(r)] ?? NODE_H;
+
+  let rankY;
+  if (isSingleColumn) {
+    const rankTop = {};
+    let acc = TREE_PAD_T + LABEL_H;
+    for (let r = 0; r <= maxRank; r++) {
+      if (r === firstTier2Rank) acc += TIER_GAP;
+      rankTop[r] = acc;
+      acc += (rankHeight[r] ?? NODE_H) + RANK_GAP;
+    }
+    rankY = (r) => rankTop[Math.round(r)]
+      ?? (TREE_PAD_T + LABEL_H + r * (NODE_H + RANK_GAP));
+  } else {
+    rankY = (r) =>
+      TREE_PAD_T + LABEL_H + r * (NODE_H + RANK_GAP) +
+      (r >= firstTier2Rank ? TIER_GAP : 0);
+  }
   const positions = {};
 
   for (let r = 0; r <= maxRank; r++) {
@@ -718,7 +924,7 @@ function computeLayout(quests, { applyTiers = false, chain = null } = {}) {
     // Pre-conv non-split → branch column slot (main is now a column too)
     colNodes.forEach(q => {
       const cx = colCenterX(q.branch ?? branches[0]);
-      positions[q.id] = { x: cx - NODE_W / 2, y: rankY(effRank[q.id]), w: NODE_W, h: nodeHeightFor(q.name, NODE_W), rank: r };
+      positions[q.id] = { x: cx - NW / 2, y: rankY(effRank[q.id]), w: NW, h: rowH(r), rank: r };
     });
 
     // Group conv / post-conv / split-child nodes by their (sorted) prereq UUID set
@@ -745,7 +951,7 @@ function computeLayout(quests, { applyTiers = false, chain = null } = {}) {
         } else {
           cx = colCenterX(q.branch ?? branches[0]);
         }
-        positions[q.id] = { x: cx - NODE_W / 2, y: rankY(effRank[q.id]), w: NODE_W, h: nodeHeightFor(q.name, NODE_W), rank: r };
+        positions[q.id] = { x: cx - NODE_W / 2, y: rankY(effRank[q.id]), w: NODE_W, h: rowH(r), rank: r };
       } else {
         // Multiple nodes sharing the same prereq set:
         //   • 1 shared prereq → single-parent split → center on that parent's X
@@ -765,7 +971,7 @@ function computeLayout(quests, { applyTiers = false, chain = null } = {}) {
         const leftX  = anchorX - totalW / 2;
         sorted.forEach((q, i) => {
           const cx = leftX + i * (NODE_W + COL_GAP) + NODE_W / 2;
-          positions[q.id] = { x: cx - NODE_W / 2, y: rankY(effRank[q.id]), w: NODE_W, h: nodeHeightFor(q.name, NODE_W), rank: r };
+          positions[q.id] = { x: cx - NODE_W / 2, y: rankY(effRank[q.id]), w: NODE_W, h: rowH(r), rank: r };
         });
       }
     }
@@ -803,7 +1009,7 @@ function computeLayout(quests, { applyTiers = false, chain = null } = {}) {
   Object.values(positions).forEach(p => { maxBottom = Math.max(maxBottom, p.y + p.h); });
   const height = maxBottom + TREE_PAD_T;
 
-  return { positions, firstNodeOfBranch, rankY, width, height };
+  return { positions, firstNodeOfBranch, rankY, width, height, nodeWidth: NW };
 }
 
 // A number that RUSHES up from 0 to `value` on mount — the count-up flourish the
@@ -848,27 +1054,18 @@ function HeroTitle({ text }) {
 }
 
 // Quest-type emblem — a sleek capsule with a faint inner frame line (the "tech"
-// double-border) and a glowing gem flanking each side (hollow diamond + lit core,
-// the same gem language as the class crest / prestige seals). Ice for main quests,
-// gold for side quests.
+// double-border) around the label alone — no flanking ornament. Ice for BOTH
+// quest types — the label alone says which (the old ember side-quest tone read
+// as a warning next to the ice UI).
 function QuestTypeBadge({ questType }) {
   const isMain = questType === 'main';
-  const tone   = isMain ? SL.accent : SL.gold;
-
-  const Gem = () => (
-    <View style={[styles.typeGem, { borderColor: tone }]}>
-      <View style={[styles.typeGemCore, { backgroundColor: tone, shadowColor: tone }]} />
-    </View>
-  );
 
   return (
-    <View style={[styles.typeBadge, !isMain && styles.typeBadgeSide]}>
-      <View style={[styles.typeBadgeInner, !isMain && { borderColor: 'rgba(255,215,0,0.3)' }]} pointerEvents="none" />
-      <Gem />
-      <Text style={[styles.typeBadgeText, { color: tone }]}>
+    <View style={styles.typeBadge}>
+      <View style={styles.typeBadgeInner} pointerEvents="none" />
+      <Text style={[styles.typeBadgeText, { color: SL.accent }]}>
         {isMain ? 'MAIN QUEST' : 'SIDE QUEST'}
       </Text>
-      <Gem />
     </View>
   );
 }
@@ -939,20 +1136,94 @@ function QuestHUD({ done, total, earnedLvl }) {
   );
 }
 
+// The gold banner over a revealed HIDDEN CHALLENGE — the branch label's
+// replacement. On the reveal tap it holds back until the node has punched in
+// (same beat as the shockwave), then fades down into place; on every later visit
+// it's just there, like any other branch heading.
+function ChallengeBanner({ reveal }) {
+  const enter = useRef(new Animated.Value(reveal ? 0 : 1)).current;
+
+  useEffect(() => {
+    if (!reveal) return;
+    enter.setValue(0);
+    const anim = Animated.timing(enter, {
+      toValue: 1, duration: 520, delay: REVEAL_DELAY + 260,
+      easing: Easing.out(Easing.cubic), useNativeDriver: true,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [reveal, enter]);
+
+  // A gold PLAQUE, not loose text. The connector line runs up through this spot,
+  // so the banner needs an opaque back — text sitting on a wire looked like a
+  // mistake. Two stacked lines (small tracked-out "HIDDEN" kicker over a heavy
+  // "CHALLENGE"), boxed in gold with a glow, so it reads as a prize plate.
+  return (
+    <Animated.View style={[styles.challengeBanner, {
+      opacity: enter,
+      transform: [{ translateY: enter.interpolate({ inputRange: [0, 1], outputRange: [-10, 0] }) }],
+    }]}>
+      <ShimmerText
+        text="HIDDEN"
+        numberOfLines={1}
+        style={styles.challengeKicker}
+        colors={GOLD}
+        direction="ltr"
+        active
+      />
+      <ShimmerText
+        text="CHALLENGE"
+        numberOfLines={1}
+        style={styles.challengeLabel}
+        colors={GOLD}
+        direction="ltr"
+        active
+      />
+    </Animated.View>
+  );
+}
+
 // One quest node, brought to life. On mount it RISES + fades + scales in, delayed
 // by its `delay` (derived from tree rank) so the whole tree cascades into place
 // from roots to leaves. On press it DIPS to 0.95 under the finger — the tactile
 // "tap me" cue locked nodes deliberately don't get. All the visual states (done /
 // locked / required frame) are unchanged; only motion is added on top.
-function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, celebrate = false, onPress }) {
+function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, celebrate = false, reveal = false, mirrorSource = null, coachLocked = false, pickIndex = null, pickMode = null, pickable = false, onPress }) {
   const isDone   = state === 'done';
-  const isLocked = state === 'locked';
+  // A mirror node is a requirement earned in ANOTHER quest. It's never locked in
+  // the "can't get there yet" sense — it's just not yours to tap here — so it
+  // stays pressable (the tap explains where to earn it) and wears a link glyph
+  // instead of a padlock.
+  const isMirror = isMirrorQuest(quest);
+  // A coach-approved node is the coach's to check, not the player's. Same
+  // pressable-but-not-yours treatment as a mirror node — the tap explains who
+  // owns it — and it wears GREEN in every state (see lib/coachQuests.js).
+  const isCoach  = isCoachQuest(quest);
+  // In MULTI-SIGN mode a locked node is still tappable when the picks already
+  // queued ahead of it would unlock it — that is the whole point of picking a
+  // run of nodes in order. `pickable` is decided by the screen, which owns the queue.
+  const isLocked = state === 'locked' && !isMirror && !pickable;
+  const isPicked = pickIndex != null;
+  // A revealed HIDDEN CHALLENGE — it only ever renders once earned, so it wears
+  // the GOLD treasure palette (never the blue of a normal node) so it reads as a
+  // prize. A prestige requirement still wins the frame — same palette, and it
+  // is the more important of the two.
+  const isChallenge = !!quest.is_hidden && !isRequired;
+  // DONE is the DEFAULT palette (ice blue) — it must never repaint a node that
+  // owns a palette of its own. A hidden challenge stays GOLD and a mirrored
+  // requirement stays VIOLET once complete; they get their own "earned" variant
+  // (brighter tint + glow, same hue) instead of the blue one.
+  const isDonePlain = isDone && !isChallenge && !isMirror && !isCoach;
+  // A coach node says one sentence and nothing else: what it still needs, or —
+  // once the coach has signed it off — that it's approved. No chips below it.
+  const label = questNodeLabel(quest, isDone);
 
   const enter = useRef(new Animated.Value(0)).current;
   const press = useRef(new Animated.Value(0)).current;
   const pulse = useRef(new Animated.Value(0)).current;
   const gate  = useRef(new Animated.Value(0)).current;
   const burst = useRef(new Animated.Value(0)).current;
+  const wave  = useRef(new Animated.Value(0)).current;
 
   // Completion burst — the moment THIS node is confirmed done, a gold halo
   // flashes and the card gives a little punch, then both decay away. One-shot.
@@ -967,26 +1238,49 @@ function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, celeb
   }, [celebrate, burst]);
 
   useEffect(() => {
-    const anim = Animated.timing(enter, {
-      toValue: 1, duration: 440, delay,
-      easing: Easing.out(Easing.cubic), useNativeDriver: true,
+    // A REVEALED hidden challenge doesn't rise into place like the rest of the
+    // tree — it punches out of nothing: a beat of silence after the tap that
+    // earned it, then a back-eased pop from far too small, with the shockwave
+    // below riding the same clock.
+    const anim = reveal
+      ? Animated.timing(enter, {
+          toValue: 1, duration: 760, delay: REVEAL_DELAY,
+          easing: Easing.out(Easing.back(2.2)), useNativeDriver: true,
+        })
+      : Animated.timing(enter, {
+          toValue: 1, duration: 440, delay,
+          easing: Easing.out(Easing.cubic), useNativeDriver: true,
+        });
+    anim.start();
+    return () => anim.stop();
+  }, [enter, delay, reveal]);
+
+  // Shockwave — two gold rings blown outward from the new node, staggered, once.
+  useEffect(() => {
+    if (!reveal) return;
+    wave.setValue(0);
+    const anim = Animated.timing(wave, {
+      toValue: 1, duration: 1400, delay: REVEAL_DELAY,
+      easing: Easing.out(Easing.quad), useNativeDriver: true,
     });
     anim.start();
     return () => anim.stop();
-  }, [enter, delay]);
+  }, [reveal, wave]);
 
   // Available-but-not-done nodes BREATHE — a soft ice halo that draws the eye to
   // the player's next possible move. Only the actionable nodes pulse; done and
   // locked nodes stay calm.
+  // (A coach-gated node never breathes for the player — it isn't their next
+  // move, however available it looks.)
   useEffect(() => {
-    if (state !== 'unlocked') return;
+    if (state !== 'unlocked' || coachLocked) return;
     const loop = Animated.loop(Animated.sequence([
       Animated.timing(pulse, { toValue: 1, duration: 1150, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
       Animated.timing(pulse, { toValue: 0, duration: 1150, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
     ]));
     loop.start();
     return () => loop.stop();
-  }, [state, pulse]);
+  }, [state, coachLocked, pulse]);
 
   // CLASS-GATE nodes (prestige requirements for the next class) get their OWN
   // life: the gold crown ribbon bobs and its halo breathes, in every state, so a
@@ -1001,8 +1295,12 @@ function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, celeb
     return () => loop.stop();
   }, [isRequired, gate]);
 
-  const translateY = enter.interpolate({ inputRange: [0, 1], outputRange: [16, 0] });
-  const enterScale = enter.interpolate({ inputRange: [0, 1], outputRange: [0.9, 1] });
+  const translateY = reveal
+    ? 0
+    : enter.interpolate({ inputRange: [0, 1], outputRange: [16, 0] });
+  const enterScale = enter.interpolate({
+    inputRange: [0, 1], outputRange: [reveal ? 0.3 : 0.9, 1],
+  });
   const pressScale = press.interpolate({ inputRange: [0, 1], outputRange: [1, 0.95] });
   const burstScale = burst.interpolate({ inputRange: [0, 1], outputRange: [1, 1.07] });
   const scale = Animated.multiply(Animated.multiply(enterScale, pressScale), burstScale);
@@ -1014,7 +1312,33 @@ function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, celeb
     <Animated.View
       style={{ width: '100%', height: '100%', opacity: enter, transform: [{ translateY }, { scale }] }}
     >
-      {state === 'unlocked' && !isRequired && (
+      {/* Discovery shockwave — only ever on screen for the one tap that
+          unearthed this challenge. */}
+      {reveal && [0, 0.18].map((stagger, i) => (
+        <Animated.View
+          key={`wave-${i}`}
+          pointerEvents="none"
+          style={[
+            styles.revealRing,
+            {
+              opacity: wave.interpolate({
+                inputRange: [stagger, stagger + 0.05, stagger + 0.55],
+                outputRange: [0, 0.85, 0],
+                extrapolate: 'clamp',
+              }),
+              transform: [{
+                scale: wave.interpolate({
+                  inputRange: [stagger, stagger + 0.55],
+                  outputRange: [0.85, 2.1],
+                  extrapolate: 'clamp',
+                }),
+              }],
+            },
+          ]}
+        />
+      ))}
+
+      {state === 'unlocked' && !isRequired && !coachLocked && (
         <Animated.View
           pointerEvents="none"
           style={[
@@ -1041,9 +1365,18 @@ function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, celeb
       <TouchableOpacity
         style={[
           styles.questCard,
-          isDone     && styles.questCardDone,
+          isDonePlain && styles.questCardDone,
           isLocked   && styles.questCardLocked,
           isRequired && styles.questCardRequired,
+          isChallenge && styles.questCardChallenge,
+          isChallenge && isDone && styles.questCardChallengeDone,
+          isMirror   && styles.questCardMirror,
+          isMirror && isDone && styles.questCardMirrorDone,
+          isCoach    && styles.questCardCoach,
+          isCoach && isDone && styles.questCardCoachDone,
+          // Queued in MULTI-SIGN — wins over every palette above, because while
+          // the queue is open the only thing that matters is what is in it.
+          isPicked && (pickMode === 'remove' ? styles.questCardPickRemove : styles.questCardPickAdd),
         ]}
         disabled={isLocked || disabled}
         activeOpacity={isLocked ? 1 : 0.85}
@@ -1051,7 +1384,31 @@ function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, celeb
         onPressIn={() => { if (!isLocked) dip(1); }}
         onPressOut={() => { if (!isLocked) dip(0); }}
       >
+        {/* MULTI-SIGN order chip — the position this node holds in the queue, so
+            the run reads back as 1 -> 2 -> 3 before anything is committed. */}
+        {isPicked && (
+          <View style={[
+            styles.pickChip,
+            pickMode === 'remove' ? styles.pickChipRemove : styles.pickChipAdd,
+          ]}>
+            <Text style={[
+              styles.pickChipText,
+              pickMode === 'remove' ? styles.pickChipTextRemove : styles.pickChipTextAdd,
+            ]}>{pickIndex + 1}</Text>
+          </View>
+        )}
+
         {isRequired && (
+          <ShimmerFrame
+            style={[styles.questFrame, { shadowColor: SL.gold }]}
+            colors={GOLD}
+            thickness={4}
+            active
+          />
+        )}
+
+        {/* HIDDEN CHALLENGE — the same live gold frame a prestige requirement wears. */}
+        {isChallenge && (
           <ShimmerFrame
             style={[styles.questFrame, { shadowColor: SL.gold }]}
             colors={GOLD}
@@ -1071,31 +1428,69 @@ function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, celeb
             ]}
           >
             <View style={styles.gateRibbon}>
-              <Text style={styles.gateRibbonText}>✦ CLASS GATE ✦</Text>
+              <Text style={styles.gateRibbonText} numberOfLines={1}>✦ PRESTIGE REQUIRED ✦</Text>
             </View>
           </Animated.View>
         )}
         <Text
           style={[
             styles.questName,
-            isDone   && styles.questNameDone,
+            isDonePlain && styles.questNameDone,
             isLocked && styles.questNameLocked,
+            isChallenge && styles.questNameChallenge,
+            isMirror && styles.questNameMirror,
+            isCoach && styles.questNameCoach,
           ]}
-          numberOfLines={nodeLineCount(quest.name, nodeWidth)}
+          // Mirror titles render a size up, so wrap them against a proportionally
+          // narrower width or a title that just fits would get ellipsised.
+          numberOfLines={nodeLineCount(label, isMirror ? nodeWidth * (24 / 29) : nodeWidth)}
         >
-          {isLocked ? '🔒 ' : ''}{quest.name}
+          {label}
         </Text>
 
         <View style={styles.nodeBottom}>
-          {isDone ? (
-            <View style={styles.doneBadge}>
-              <Text style={styles.doneBadgeText}>
+          {/* The padlock lives in the badge row, NOT prefixed to the title: as a
+              prefix it stole ~30px of the first line, so a locked node could wrap
+              one line further than the same node unlocked — and every card had to
+              reserve that extra line whether it used it or not. */}
+          {isLocked && <Text style={styles.lockGlyph}>🔒</Text>}
+          {/* Where this requirement actually lives. Shown in BOTH states — the
+              point of the node is that another quest owns it. */}
+          {isMirror && (
+            <View style={[styles.mirrorTag, isDone && styles.mirrorTagDone]}>
+              <Text style={[styles.mirrorTagText, isDone && styles.mirrorTagTextDone]}>
+                {(mirrorSource?.chain ?? 'another quest').replace(/_/g, ' ').toUpperCase()}
+              </Text>
+            </View>
+          )}
+          {/* A coach node wears no chip — not ✓ DONE, not +LVL. Its sentence
+              already says exactly where it stands. */}
+          {isCoach ? null : isDone ? (
+            <View style={[
+              styles.doneBadge,
+              isChallenge && styles.doneBadgeChallenge,
+              isMirror && styles.doneBadgeMirror,
+            ]}>
+              <Text style={[
+                styles.doneBadgeText,
+                isChallenge && styles.doneBadgeTextChallenge,
+                isMirror && styles.doneBadgeTextMirror,
+              ]}>
                 ✓ DONE{quest.lvl_reward > 0 ? ` · +${quest.lvl_reward}` : ''}
               </Text>
             </View>
           ) : quest.lvl_reward > 0 ? (
-            <View style={[styles.rewardBadge, isLocked && { opacity: 0.4 }]}>
-              <Text style={styles.rewardText}>+{quest.lvl_reward} LVL</Text>
+            <View style={[
+              styles.rewardBadge,
+              isChallenge && styles.rewardBadgeChallenge,
+              isLocked && { opacity: 0.4 },
+            ]}>
+              <Text style={[
+                styles.rewardText,
+                isChallenge && styles.rewardTextChallenge,
+              ]}>
+                +{quest.lvl_reward} LVL
+              </Text>
             </View>
           ) : null}
         </View>
@@ -1104,25 +1499,256 @@ function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, celeb
   );
 }
 
+// ─── Upgrade gate ─────────────────────────────────────────────────────────────
+// The payoff for clearing every node of an upgradable quest: after the last
+// node's gold burst has had its moment, a gold plinth rises from the foot of the
+// tree carrying the UPGRADE button. It doesn't fade in — it ARRIVES: a beam of
+// light climbs out of the tree, the plinth lifts and settles, the frame catches
+// fire, and the button breathes until it's taken.
+
+const GATE_BEAT = 520;   // held back this long so the node burst lands first
+
+function UpgradeGate({ onPress, busy }) {
+  const rise  = useRef(new Animated.Value(0)).current;   // 0 → 1: the arrival
+  const beam  = useRef(new Animated.Value(0)).current;   // the light that climbs
+  const pulse = useRef(new Animated.Value(0)).current;   // the idle breath
+  const [lit, setLit] = useState(false);                 // frame shimmer armed
+
+  useEffect(() => {
+    const seq = Animated.sequence([
+      Animated.delay(GATE_BEAT),
+      // The beam shoots up out of the last node…
+      Animated.timing(beam, {
+        toValue: 1, duration: 340, easing: Easing.out(Easing.cubic), useNativeDriver: true,
+      }),
+      // …and the plinth rides up on it, overshooting slightly as it lands.
+      Animated.spring(rise, {
+        toValue: 1, friction: 6, tension: 70, useNativeDriver: true,
+      }),
+    ]);
+    seq.start(() => setLit(true));
+    return () => seq.stop();
+  }, [beam, rise]);
+
+  // Idle breath — starts only once the gate has landed, so nothing competes
+  // with the arrival.
+  useEffect(() => {
+    if (!lit) return;
+    const loop = Animated.loop(Animated.sequence([
+      Animated.timing(pulse, { toValue: 1, duration: 1200, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.timing(pulse, { toValue: 0, duration: 1200, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+    ]));
+    loop.start();
+    return () => loop.stop();
+  }, [lit, pulse]);
+
+  const beamScaleY = beam.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
+  const beamFade   = beam.interpolate({ inputRange: [0, 0.6, 1], outputRange: [0, 1, 0.35] });
+  const lift       = rise.interpolate({ inputRange: [0, 1], outputRange: [34, 0] });
+  const grow       = rise.interpolate({ inputRange: [0, 1], outputRange: [0.86, 1] });
+  const breathe    = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.035] });
+  const halo       = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.28, 0.6] });
+
+  return (
+    <View style={styles.gateWrap} pointerEvents="box-none">
+      {/* The beam of light the plinth rides up on. */}
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.gateBeam, { opacity: beamFade, transform: [{ scaleY: beamScaleY }] }]}
+      />
+
+      <Animated.View style={[
+        styles.gatePlinth,
+        { opacity: rise, transform: [{ translateY: lift }, { scale: grow }] },
+      ]}>
+        <Animated.View style={{ transform: [{ scale: breathe }] }}>
+          {/* Gold bloom behind the button, breathing with it. */}
+          <Animated.View pointerEvents="none" style={[styles.gateHalo, { opacity: halo }]} />
+
+          <TouchableOpacity
+            style={styles.gateBtn}
+            onPress={onPress}
+            disabled={busy}
+            activeOpacity={0.85}
+          >
+            {busy ? (
+              <ActivityIndicator color={SL.gold} size="small" />
+            ) : (
+              <>
+                <Text style={styles.gateBtnChevron}>▲</Text>
+                <ShimmerText
+                  text="UPGRADE"
+                  style={styles.gateBtnText}
+                  colors={GOLD}
+                  direction="ltr"
+                  active
+                />
+              </>
+            )}
+            {lit && (
+              <ShimmerFrame style={styles.gateBtnFrame} colors={GOLD} active radius={14} thickness={2.5} />
+            )}
+          </TouchableOpacity>
+        </Animated.View>
+      </Animated.View>
+    </View>
+  );
+}
+
+// ─── Downgrade ────────────────────────────────────────────────────────────────
+// UPGRADE's opposite: the way OUT of an upgrade taken by accident. Not the
+// version switch beside it — that only changes which half you're looking at.
+// This one gives the upgrade back AND resets the upgraded quest, so it asks
+// before it does anything.
+//
+// Muted, outline-only. It sits in the header next to the switch because they're
+// the same kind of control (what happens to this pair), but it must never read
+// as the primary action of the screen.
+
+function DowngradeButton({ onPress, busy }) {
+  const fade = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const anim = Animated.timing(fade, {
+      toValue: 1, duration: 420, delay: 200,
+      easing: Easing.out(Easing.quad), useNativeDriver: true,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [fade]);
+
+  return (
+    <Animated.View style={{ opacity: fade }}>
+      <TouchableOpacity
+        style={styles.downBtn}
+        onPress={onPress}
+        disabled={busy}
+        activeOpacity={0.85}
+      >
+        {busy ? (
+          <ActivityIndicator color={SL.muted} size="small" />
+        ) : (
+          <>
+            <Text style={styles.downBtnChevron}>▼</Text>
+            <Text style={styles.downBtnText}>DOWNGRADE</Text>
+          </>
+        )}
+      </TouchableOpacity>
+    </Animated.View>
+  );
+}
+
+// ─── Version switch ───────────────────────────────────────────────────────────
+// Once a pair is upgraded the two versions are both permanently the player's —
+// this moves between them. Lives in the header next to BACK, because that is
+// exactly what it is: the way back to the quest below (or forward again).
+
+function VersionSwitch({ toUpgrade, label, onPress }) {
+  return (
+    <TouchableOpacity style={styles.verSwitch} onPress={onPress} activeOpacity={0.85}>
+      <Text style={styles.verSwitchArrow}>{toUpgrade ? '▲' : '▼'}</Text>
+      <Text style={styles.verSwitchText}>{label.replace(/_/g, ' ').toUpperCase()}</Text>
+    </TouchableOpacity>
+  );
+}
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function QuestTreeScreen({ route, navigation }) {
   // `studentId` is set by admin-as-coach (managing another player's tree). Absent
   // in the player's own flow, where the toggle targets the signed-in user.
-  const { classId, chain, questType, studentId: overrideStudentId } = route.params;
+  const {
+    classId, chain: paramChain, questType: paramType,
+    job = DEFAULT_JOB, studentId: overrideStudentId,
+  } = route.params;
 
-  const [quests,      setQuests]      = useState([]);
-  const [completions, setCompletions] = useState(new Set());
+  // Is the COACH looking at this tree? Coach-approved nodes are only togglable
+  // from the admin flow — the player sees them, but can never check them off.
+  const { isAdmin: isCoachViewer = false } = useCoach() ?? {};
+
+  // ── Which VERSION of this quest is on screen ───────────────────────────────
+  // A quest with an upgrade is really two trees behind one card (see
+  // lib/questUpgrades.js), and the player moves between them WITHOUT leaving the
+  // screen — so the chain being rendered is state, not a route param. It starts
+  // at whatever the Skills card opened and is re-pointed by the UPGRADE button
+  // and the version switch.
+  const [view, setView] = useState({ chain: paramChain, questType: paramType });
+  const { chain, questType } = view;
+  // Re-sync if the same screen is re-opened at a different chain (nav reuse).
+  useEffect(() => {
+    setView({ chain: paramChain, questType: paramType });
+  }, [paramChain, paramType]);
+
+  // The pairing this tree sits in: what it upgrades INTO, and what it upgraded
+  // FROM. At most one of the two is set for any chain.
+  const upgrade  = upgradeFor(chain);
+  const base     = baseOf(chain);
+  // The pair's BASE chain — the key the upgrade state is stored under, whichever
+  // half is currently on screen.
+  const pairBase = base?.chain ?? chain;
+
+  // ALL quest rows for this chain — including hidden challenges the player has
+  // not unlocked yet. Everything below renders `quests`, the revealed subset.
+  const [allQuests,   setAllQuests]   = useState([]);
+  // Completions AS STORED — only real, self-owned nodes are ever in here. The
+  // set the tree renders from is `completions` below, which adds the mirrored
+  // nodes (see lib/mirrorQuests.js).
+  const [rawCompletions, setRawCompletions] = useState(new Set());
+  // id → { name, chain } of every quest a mirror node on this tree points at,
+  // so the node can say WHERE its requirement is actually earned.
+  const [mirrorSources, setMirrorSources] = useState({});
   const [loading,     setLoading]     = useState(true);
   const [hasTiers,    setHasTiers]    = useState(false);
   const [classOrder,  setClassOrder]  = useState(0);
   const [studentId,   setStudentId]   = useState(null);
   const [pendingQuest, setPendingQuest] = useState(null);
   const [toggling,     setToggling]     = useState(false);
+  // ── MULTI-SIGN ──
+  // Signing off a whole run of nodes one confirm-card at a time is a chore, so
+  // the tree has a second mode: open a queue, tap the nodes in order, commit the
+  // lot in one go. There is no direction switch — the FIRST node tapped decides
+  // it: start on an unsigned node and the run signs off; start on a signed one
+  // and the run takes back.
+  const [picking,  setPicking]  = useState(false);  // is the queue open?
+  const [picks,    setPicks]    = useState([]);     // quest ids, IN TAP ORDER
+  const [applying, setApplying] = useState(false);
+  // Which way the open run goes, read off its first pick. Empty queue = no
+  // direction committed yet, so BOTH kinds of node are live to start from.
+  const pickMode = picks.length === 0
+    ? null
+    : (rawCompletions.has(picks[0]) ? 'remove' : 'add');
+  // Moving between the two halves of an upgrade pair (or any refetch driven by
+  // it) lands on a different set of nodes — an open queue from the old one would
+  // be meaningless there, so it closes with the view.
+  useEffect(() => { setPicking(false); setPicks([]); }, [view]);
   // The node that JUST got confirmed done — fires its gold completion burst.
   const [celebrateId,  setCelebrateId]  = useState(null);
+  // The hidden challenge that JUST revealed itself — the node the player didn't
+  // know existed until this tap. Drives its own dramatic entrance (see the
+  // `reveal` prop on QuestNode); cleared on every refetch so it fires ONCE, at
+  // the moment of discovery, and never again on a later visit.
+  const [revealId,     setRevealId]     = useState(null);
+  // The connectors feeding a challenge would otherwise be drawn the instant the
+  // node joins the tree — two gold-lit lines pointing at empty space, spoiling
+  // the beat. Held back until the node itself lands.
+  const [linksArmed,   setLinksArmed]   = useState(true);
   // Available width inside the frame → used to fit the whole tree to the phone.
   const [availW,       setAvailW]       = useState(0);
+  // COMBOES-only "SHAPES" glossary popup — explains the shapes sequence the combo
+  // nodes reference. Gated to this one chain so no other tree grows the button.
+  const [showShapesInfo, setShowShapesInfo] = useState(false);
+  // Keyed on the PAIR, not the chain — EXTREME COMBO's nodes lean on the shapes
+  // sequence just as hard as the basic combos do, so the glossary follows the
+  // quest through its upgrade.
+  const hasShapesGloss = pairBase === 'comboes';
+  // Has this player taken the upgrade on this pair? Drives BOTH the reveal (an
+  // un-taken upgrade behind a cleared tree) and the version switch (a taken one
+  // means the two halves are freely interchangeable from here on).
+  const [pairUpgraded, setPairUpgraded] = useState(false);
+  // The upgrade is being written / the swap is animating.
+  const [upgrading,    setUpgrading]    = useState(false);
+  // Downgrading WIPES this quest's completions, so it asks first.
+  const [confirmDowngrade, setConfirmDowngrade] = useState(false);
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
 
@@ -1153,21 +1779,77 @@ export default function QuestTreeScreen({ route, navigation }) {
           .single(),
       ]);
 
-      setQuests(qRes.data ?? []);
-      setCompletions(new Set((cRes.data ?? []).map(c => c.quest_id)));
+      const rows = qRes.data ?? [];
+      setAllQuests(rows);
+      // Same overlay the list screens use — a refetch that races the player's
+      // own just-committed toggle must not un-light the node they just cleared.
+      setRawCompletions(reconcileQuestProgress(
+        targetId, new Set((cRes.data ?? []).map(c => c.quest_id))));
+
+      // A mirror node points at a quest in ANOTHER chain, so its source row is
+      // not in the fetch above — pull just those, to label the node with the
+      // quest that actually owns it.
+      const mirrorIds = [...new Set(rows.map(q => q.mirror_quest_id).filter(Boolean))];
+      if (mirrorIds.length) {
+        const { data: srcRows } = await supabase
+          .from('class_quests')
+          .select('id, name, chain')
+          .in('id', mirrorIds);
+        setMirrorSources(Object.fromEntries((srcRows ?? []).map(r => [r.id, r])));
+      } else {
+        setMirrorSources({});
+      }
+      // Only pairs need the lookup — every other quest is definitionally not
+      // upgraded and shouldn't pay for a round-trip.
+      setPairUpgraded(
+        upgradeFor(pairBase)
+          ? (await fetchUpgrades(supabase, targetId, classId)).has(pairBase)
+          : false,
+      );
+
       const order = clsRes.data?.order_index ?? 0;
       setClassOrder(order);
-      setHasTiers(order >= TIER_MIN_CLASS_ORDER);
+      // Tier gating:
+      //  • static ladder — Class III+ (the order gate), as before.
+      //  • handstand job — NOT by class order; tiers are opt-in per quest, so only
+      //    the chains in HANDSTAND_TIERED_CHAINS draw a divider (currently NONE —
+      //    push's old power/mobility TIER II now lives in its own flat FOUNDATION
+      //    quest). The rest are faithful single-tier copies of static quests, so
+      //    they stay un-tiered even at order >= 2 (e.g. shapes/hspu).
+      setHasTiers(
+        job === 'handstand'
+          ? HANDSTAND_TIERED_CHAINS.includes(chain)
+          : order >= TIER_MIN_CLASS_ORDER,
+      );
     } catch (e) {
       console.error('[QuestTreeScreen]', e);
     }
     setLoading(false);
-  }, [classId, chain, questType, overrideStudentId]);
+  }, [classId, chain, questType, job, pairBase, overrideStudentId]);
 
   useFocusEffect(useCallback(() => {
     setLoading(true);
+    setRevealId(null);
+    setLinksArmed(true);
     fetchData();
   }, [fetchData]));
+
+  // What the tree renders from: stored completions PLUS every mirror node whose
+  // source quest is done. A mirror node never has a row of its own, so without
+  // this it would read locked forever and would gate its children.
+  const completions = useMemo(
+    () => withMirrorCompletions(allQuests, rawCompletions),
+    [allQuests, rawCompletions],
+  );
+
+  // A hidden challenge doesn't exist for the player until every prerequisite is
+  // done — it's filtered out of the tree, the node count and the LVL readout, so
+  // nothing hints at it. The moment the last prerequisite lands it drops in
+  // (mounting fresh, so its normal entrance animation plays as the reveal).
+  const quests = useMemo(
+    () => visibleQuests(allQuests, completions),
+    [allQuests, completions],
+  );
 
   // ── Layout ────────────────────────────────────────────────────────────────
 
@@ -1179,15 +1861,18 @@ export default function QuestTreeScreen({ route, navigation }) {
   // Nodes that are MAIN-quest prestige requirements for this class — highlighted
   // with a live animated frame (blue while unmet, gold once completed).
   const requiredIds = useMemo(
-    () => requiredMainQuestIds(classOrder, quests),
-    [classOrder, quests],
+    () => requiredMainQuestIds(classOrder, quests, job),
+    [classOrder, quests, job],
   );
 
   const { positions, firstNodeOfBranch, labelXOf, width, height, nodeWidth } =
     useMemo(
-      () => chain === 'handstand'
-        ? computeHandstandLayout(quests, { applyTiers })
-        : computeLayout(quests, { applyTiers, chain }),
+      () => spaceOutHiddenNodes(
+        chain === 'handstand'
+          ? computeHandstandLayout(quests, { applyTiers })
+          : computeLayout(quests, { applyTiers, chain }),
+        quests,
+      ),
       [quests, chain, applyTiers],
     );
 
@@ -1210,9 +1895,16 @@ export default function QuestTreeScreen({ route, navigation }) {
     });
     if (lastT1Bottom === -Infinity || firstT2Top === Infinity) return null;
 
-    // Centered in the (TIER_GAP-enlarged) gap → even breathing room above & below.
-    return (lastT1Bottom + firstT2Top) / 2;
-  }, [applyTiers, quests, positions]);
+    // A branch label sits LABEL_OFFSET above the first node of its branch, so when
+    // the first Tier-2 row starts a branch (e.g. HSPU) that label lives inside this
+    // same gap. Reserve its band at the BOTTOM and centre the rule in what's left,
+    // so the rule and the branch heading never collide.
+    const labelBelow = Object.values(firstNodeOfBranch ?? {})
+      .some(q => tier2.has(q.id));
+    const bottom = firstT2Top - (labelBelow ? LABEL_OFFSET + TIER_LABEL_GAP : 0);
+
+    return (lastT1Bottom + Math.max(lastT1Bottom, bottom)) / 2;
+  }, [applyTiers, quests, positions, firstNodeOfBranch]);
 
   // Fit-to-width: scale the whole tree down so its full width fits the phone.
   // (≤1 only — never blow a small tree up past its natural size.)
@@ -1237,16 +1929,43 @@ export default function QuestTreeScreen({ route, navigation }) {
 
   function nodeState(quest) {
     if (completions.has(quest.id)) return 'done';
+    // A mirror node is never "unlocked" — there is nothing to tap here. Until
+    // its source quest is done it stays dim, so it never breathes at the player
+    // like a next move they could make on this tree.
+    if (isMirrorQuest(quest)) return 'locked';
     const pre = quest.prerequisites ?? [];
     return pre.every(id => completions.has(id)) ? 'unlocked' : 'locked';
+  }
+
+  // ── Un-complete gate ───────────────────────────────────────────────────────
+  // A node can only be un-done from the BOTTOM of the tree. If something
+  // downstream of it is already done, undoing it would leave the tree in a state
+  // that can't exist — a cleared node hanging off an un-cleared prerequisite. So
+  // the removal is refused and the card names what has to come off first.
+  // (Mirror children are excluded: they own no row here, their state is decided
+  // in the quest that owns them.)
+  function removalBlockers(quest) {
+    return allQuests.filter(q =>
+      !isMirrorQuest(q) &&
+      completions.has(q.id) &&
+      (q.prerequisites ?? []).includes(quest.id));
   }
 
   // ── Toggle (self-coach: the player controls their own level) ────────────────
 
   async function toggleQuest(quest) {
     if (!studentId) return;
+    // Same rule the card enforces — kept here too so no path can slip a
+    // dependent-orphaning delete past it.
+    if (rawCompletions.has(quest.id) && removalBlockers(quest).length > 0) return;
+    // Mirrored requirement — owned by another quest, so it can only be earned
+    // there. The tap already opened the "where to earn it" card instead.
+    if (isMirrorQuest(quest)) return;
+    // Coach-approved node — owned by the COACH. Same block, other reason: the
+    // player's tap opened the "your coach checks this one" card.
+    if (!canToggleCoachQuest(quest, isCoachViewer)) return;
     setToggling(true);
-    const done = completions.has(quest.id);
+    const done = rawCompletions.has(quest.id);
     try {
       if (done) {
         const { error: delErr } = await supabase
@@ -1255,23 +1974,215 @@ export default function QuestTreeScreen({ route, navigation }) {
           .eq('student_id', studentId)
           .eq('quest_id', quest.id);
         if (delErr) throw delErr;
-        setCompletions(prev => { const s = new Set(prev); s.delete(quest.id); return s; });
+        setRawCompletions(prev => { const s = new Set(prev); s.delete(quest.id); return s; });
+        // Hand the change to the list screens as well, so a card that stops being
+        // maxed drops its gold on the way back instead of a refetch later.
+        noteQuestUncompleted(studentId, quest.id);
         hapticTap();
       } else {
         const { error: insErr } = await supabase
           .from('student_quest_completions')
           .insert({ student_id: studentId, quest_id: quest.id });
         if (insErr) throw insErr;
-        setCompletions(prev => new Set([...prev, quest.id]));
+        const next = withMirrorCompletions(allQuests, new Set([...rawCompletions, quest.id]));
+        setRawCompletions(prev => new Set([...prev, quest.id]));
+        // The list screens get it NOW, not on their next refetch — so a chain this
+        // tap just cleared is already MAXED OUT the moment the player swipes back.
+        noteQuestCompleted(studentId, quest.id);
         // The payoff: gold burst on the node + a success thump in the hand.
         setCelebrateId(quest.id);
         hapticSuccess();
+
+        // Did THIS tap complete the last prerequisite of a hidden challenge?
+        // If so the node is about to mount for the very first time — flag it so
+        // it enters with the discovery sequence instead of a plain fade-in, and
+        // land a second thump under the shockwave.
+        const unveiled = allQuests.find(q =>
+          q.is_hidden && !isRevealed(q, completions) && isRevealed(q, next));
+        if (unveiled) {
+          setRevealId(unveiled.id);
+          setLinksArmed(false);
+          setTimeout(hapticSuccess, REVEAL_DELAY);
+          setTimeout(() => setLinksArmed(true), REVEAL_DELAY + 260);
+        }
       }
     } catch (e) {
       console.error('[QuestTreeScreen] toggleQuest:', e);
     }
     setToggling(false);
   }
+
+  // ── MULTI-SIGN queue ───────────────────────────────────────────────────────
+  // The queue is only ever allowed to hold a run that is legal *in order*:
+  //   add    → a node can join once its prerequisites are done OR already queued
+  //            ahead of it, so the run climbs the tree (easiest → hardest).
+  //   remove → a node can join once everything completed that depends on it is
+  //            already queued ahead of it, so the run comes DOWN the tree
+  //            (hardest → easiest) and never orphans a cleared node.
+  // That means whatever order the picks are tapped in is a valid order to apply
+  // them in, and the chips on the nodes read back as 1, 2, 3...
+
+  function pickEligible(quest, selected, mode = pickMode) {
+    if (isMirrorQuest(quest)) return false;
+    if (!canToggleCoachQuest(quest, isCoachViewer)) return false;
+    // No direction committed yet: this tap is the one that decides it, so the
+    // node only has to be a legal FIRST pick of whichever run it would start.
+    if (!mode) {
+      return pickEligible(quest, selected,
+        rawCompletions.has(quest.id) ? 'remove' : 'add');
+    }
+    if (mode === 'add') {
+      if (completions.has(quest.id)) return false;
+      return (quest.prerequisites ?? [])
+        .every(id => completions.has(id) || selected.has(id));
+    }
+    if (mode === 'remove') {
+      if (!rawCompletions.has(quest.id)) return false;
+      return removalBlockers(quest).every(b => selected.has(b.id));
+    }
+    return false;
+  }
+
+  const pickSet = useMemo(() => new Set(picks), [picks]);
+
+  // Re-walk a queue in order and drop anything that is no longer legal — used
+  // after a pick is pulled out of the middle of the run, which can strand every
+  // pick that was leaning on it.
+  function prunePicks(list) {
+    const kept = [];
+    const sel  = new Set();
+    // Pulling the first pick out of the run hands the direction to whatever
+    // survives as the new first pick, so the mode is re-read as we walk.
+    let mode = null;
+    list.forEach(id => {
+      const q = allQuests.find(x => x.id === id);
+      const m = mode ?? (rawCompletions.has(id) ? 'remove' : 'add');
+      if (!q || !pickEligible(q, sel, m)) return;
+      kept.push(id);
+      sel.add(id);
+      mode = m;
+    });
+    return kept;
+  }
+
+  function togglePick(quest) {
+    if (picks.includes(quest.id)) {
+      setPicks(prev => prunePicks(prev.filter(id => id !== quest.id)));
+      hapticTap();
+      return;
+    }
+    if (!pickEligible(quest, pickSet)) return;
+    setPicks(prev => [...prev, quest.id]);
+    hapticTap();
+  }
+
+  function closePicker() {
+    setPicking(false);
+    setPicks([]);
+  }
+
+  // Commit the whole run at once. The queue is already a legal order, so the
+  // rows go in (or come out) in a single round-trip instead of one per node.
+  async function applyPicks() {
+    if (!studentId || applying || picks.length === 0) return;
+    setApplying(true);
+    const ids = [...picks];
+    try {
+      if (pickMode === 'add') {
+        const { error } = await supabase
+          .from('student_quest_completions')
+          .insert(ids.map(id => ({ student_id: studentId, quest_id: id })));
+        if (error) throw error;
+        setRawCompletions(prev => new Set([...prev, ...ids]));
+        ids.forEach(id => noteQuestCompleted(studentId, id));
+        // One burst, on the last node of the run — the top of what was climbed.
+        setCelebrateId(ids[ids.length - 1]);
+        hapticSuccess();
+      } else {
+        const { error } = await supabase
+          .from('student_quest_completions')
+          .delete()
+          .eq('student_id', studentId)
+          .in('quest_id', ids);
+        if (error) throw error;
+        setRawCompletions(prev => {
+          const next = new Set(prev);
+          ids.forEach(id => next.delete(id));
+          return next;
+        });
+        ids.forEach(id => noteQuestUncompleted(studentId, id));
+        hapticTap();
+      }
+      closePicker();
+    } catch (e) {
+      console.error('[QuestTreeScreen] applyPicks:', e);
+    }
+    setApplying(false);
+  }
+
+  // What the run is worth, shown on the bar before it is committed.
+  const pickLvl = picks.reduce((sum, id) => {
+    const q = allQuests.find(x => x.id === id);
+    return sum + (q?.lvl_reward ?? 0);
+  }, 0);
+
+  // ── Upgrade ───────────────────────────────────────────────────────────────
+  // The gate opens only on the BASE half of a pair, only once every visible node
+  // is done, and only while the upgrade hasn't been taken yet. (Hidden challenges
+  // are already excluded from `quests` until revealed, so an unrevealed one can't
+  // hold the gate shut — but a revealed one has to be cleared like any node.)
+  const upgradeReady = !!upgrade && !pairUpgraded && chainCleared(quests, completions);
+
+  async function takeUpgrade() {
+    if (!studentId || !upgrade || upgrading) return;
+    setUpgrading(true);
+    try {
+      await saveUpgrade(supabase, studentId, classId, chain);
+      hapticSuccess();
+      setPairUpgraded(true);
+      // Become the harder quest. The refetch is driven by the chain change (the
+      // focus effect re-runs when fetchData's identity moves with it).
+      setLoading(true);
+      setView({ chain: upgrade.chain, questType: upgrade.questType });
+    } catch (e) {
+      console.error('[QuestTreeScreen] takeUpgrade:', e);
+    }
+    setUpgrading(false);
+  }
+
+  // The undo, offered on the UPGRADED half only: hand the upgrade back and land
+  // on the base quest, where the gate is waiting again. Shown whatever the
+  // progress is — an upgrade taken by accident gets fixed the moment it's
+  // noticed, which is usually before a single node of it is done.
+  const canDowngrade = !!base && pairUpgraded;
+
+  async function undoUpgrade() {
+    if (!studentId || !base || upgrading) return;
+    setUpgrading(true);
+    try {
+      // `allQuests` (not `quests`) — an unrevealed hidden challenge can't be
+      // completed, but a REVEALED one can, and it has to be wiped with the rest.
+      // Mirror nodes have no rows of their own, so listing them is a harmless
+      // no-op.
+      await removeUpgrade(supabase, studentId, base.chain, allQuests.map(q => q.id));
+      hapticTap();
+      setConfirmDowngrade(false);
+      setPairUpgraded(false);
+      setLoading(true);
+      setView({ chain: base.chain, questType: base.questType });
+    } catch (e) {
+      console.error('[QuestTreeScreen] undoUpgrade:', e);
+    }
+    setUpgrading(false);
+  }
+
+  // Where the header switch goes: down to the base quest from the upgrade, or
+  // back up to the upgrade from the base. Null when this quest has no pair, or
+  // has one the player hasn't unlocked yet.
+  const switchTarget = !pairUpgraded ? null
+    : base    ? { ...base, toUpgrade: false }
+    : upgrade ? { ...upgrade, toUpgrade: true }
+    : null;
 
   // ── Stats ─────────────────────────────────────────────────────────────────
 
@@ -1284,6 +2195,7 @@ export default function QuestTreeScreen({ route, navigation }) {
 
   function buildLines() {
     return quests.flatMap(q => {
+      if (!linksArmed && q.id === revealId) return [];
       const prereqs = q.prerequisites ?? [];
       return prereqs.map(pid => {
         const child  = positions[q.id];
@@ -1292,7 +2204,10 @@ export default function QuestTreeScreen({ route, navigation }) {
 
         const done  = completions.has(q.id) && completions.has(pid);
         const state = nodeState(q);
-        const color = (done || state === 'unlocked') ? SL.accent : SL.muted;
+        // Links INTO a hidden challenge run gold, not ice — the two branch tips
+        // visibly feed the treasure they just unearthed.
+        const lit   = q.is_hidden ? SL.gold : SL.accent;
+        const color = (done || state === 'unlocked') ? lit : SL.muted;
 
         const px = parent.x + parent.w / 2;
         const py = parent.y + parent.h;
@@ -1318,11 +2233,11 @@ export default function QuestTreeScreen({ route, navigation }) {
         // handling on every platform.
         if (done) {
           return [
-            <Path key={`${key}-wire`} d={d} stroke={SL.accent} strokeWidth={2} fill="none" opacity={0.4} />,
+            <Path key={`${key}-wire`} d={d} stroke={lit} strokeWidth={2} fill="none" opacity={0.4} />,
             <AnimatedPath
               key={`${key}-flow`}
               d={d}
-              stroke="#9FE4FF"
+              stroke={q.is_hidden ? '#FFE9A3' : '#9FE4FF'}
               strokeWidth={2.5}
               strokeLinecap="round"
               fill="none"
@@ -1366,6 +2281,8 @@ export default function QuestTreeScreen({ route, navigation }) {
       {/* One page-sized ice-glow frame (matches SkillsScreen's body width) wraps
           EVERYTHING — header + the tree. The tree scrolls horizontally INSIDE
           the frame instead of stretching it. */}
+      {/* While the MULTI-SIGN bar is docked it covers the foot of the tree, so
+          the scroll grows by its height and the last nodes stay reachable. */}
       <ScrollView contentContainerStyle={styles.scrollBody}>
         <View style={styles.treeFrame}>
 
@@ -1373,17 +2290,123 @@ export default function QuestTreeScreen({ route, navigation }) {
         <View style={styles.header}>
           {/* Standard glowing BACK pill, left-aligned */}
           <View style={styles.headerTopRow}>
-            <PillButton label="← BACK" size="sm" onPress={() => navigation.goBack()} />
+            {/* Sized to match the pair controls on the right, so the header
+                reads as one row of equals rather than a big pair beside a
+                leftover small button. */}
+            <PillButton
+              label="← BACK"
+              size="lg"
+              onPress={() => navigation.goBack()}
+              style={styles.headerBackPill}
+              textStyle={styles.headerBackText}
+            />
+            <View style={{ flex: 1 }} />
+
+            {/* The pair's two controls, together on the right: move BETWEEN the
+                versions, or give the upgrade back entirely. */}
+            <View style={styles.headerActions}>
+              {switchTarget && (
+                <VersionSwitch
+                  toUpgrade={switchTarget.toUpgrade}
+                  label={switchTarget.chain}
+                  onPress={() => {
+                    hapticTap();
+                    setLoading(true);
+                    setView({ chain: switchTarget.chain, questType: switchTarget.questType });
+                  }}
+                />
+              )}
+              {canDowngrade && (
+                <DowngradeButton
+                  onPress={() => setConfirmDowngrade(true)}
+                  busy={upgrading}
+                />
+              )}
+            </View>
           </View>
 
           {/* Quest name — the hero title (color + shining kept; entrance added) */}
           <HeroTitle text={chain.replace(/_/g, ' ').toUpperCase()} />
 
-          {/* Quest-type badge — gem emblem */}
-          <QuestTypeBadge questType={questType} />
+          {/* Quest-type badge — gem emblem. An upgrade's rows are SEEDED as
+              'side' but it is shown as the main quest it replaced, so the badge
+              follows the pair, not the raw column. */}
+          <QuestTypeBadge questType={base?.questType ?? questType} />
+
+          {/* COMBOES only — "SHAPES ?" glossary button. Explains the shapes
+              sequence the combo nodes build on. */}
+          {hasShapesGloss && (
+            <TouchableOpacity
+              style={styles.shapesGlossBtn}
+              onPress={() => setShowShapesInfo(true)}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.shapesGlossBtnText}>SHAPES</Text>
+              <View style={styles.shapesGlossQ}>
+                <Text style={styles.shapesGlossQText}>?</Text>
+              </View>
+            </TouchableOpacity>
+          )}
 
           {/* Status HUD — completion meter + ticking readouts (gold at 100%) */}
           <QuestHUD done={doneCount} total={quests.length} earnedLvl={earnedLvl} />
+
+          {/* MULTI-SIGN — sign off (or take back) a whole run of nodes in one
+              go instead of one confirm card per node. Closed, it is a single
+              pill; open, it stays the same small slot and just becomes the two
+              buttons the run needs: CLEAR and the action. Which action it is
+              follows the first node tapped — start on an unsigned node and the
+              run signs off, start on a signed one and it takes back. */}
+          {!picking ? (
+            <TouchableOpacity
+              style={styles.multiOpen}
+              activeOpacity={0.85}
+              onPress={() => { hapticTap(); setPicking(true); setPicks([]); }}
+            >
+              <Text style={styles.multiOpenText}>MULTI-SIGN</Text>
+            </TouchableOpacity>
+          ) : (
+            <View style={[
+              styles.pickBarTop,
+              pickMode === 'remove' && styles.pickBarTopRemove,
+            ]}>
+              <TouchableOpacity
+                style={styles.pickClear}
+                activeOpacity={0.85}
+                disabled={applying}
+                onPress={() => {
+                  hapticTap();
+                  if (picks.length > 0) setPicks([]);
+                  else closePicker();
+                }}
+              >
+                <Text style={styles.pickClearText}>
+                  {picks.length > 0 ? 'CLEAR' : 'CLOSE'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.pickGo,
+                  pickMode === 'remove' && styles.pickGoRemove,
+                  picks.length === 0 && styles.pickApplyOff,
+                ]}
+                activeOpacity={0.85}
+                disabled={applying || picks.length === 0}
+                onPress={applyPicks}
+              >
+                {applying
+                  ? <ActivityIndicator color={SL.bg} size="small" />
+                  : (
+                    <Text style={styles.pickGoText}>
+                      {pickMode === 'remove' ? 'REMOVE' : 'CONFIRM'}
+                      {picks.length > 0
+                        ? ` ${picks.length} · ${pickMode === 'remove' ? '−' : '+'}${pickLvl}`
+                        : ''}
+                    </Text>
+                  )}
+              </TouchableOpacity>
+            </View>
+          )}
 
           <View style={styles.headerDivider} />
         </View>
@@ -1420,6 +2443,30 @@ export default function QuestTreeScreen({ route, navigation }) {
               if (!p) return null;
               const w   = nodeWidth ?? NODE_W;
               const lx  = labelXOf?.[branch] ?? p.x;
+              // A branch made of hidden challenges gets the gold "HIDDEN
+              // CHALLENGE" banner instead of its raw branch name — it can only
+              // be on screen at all once the challenge has been unlocked.
+              const challengeBranch = q.is_hidden;
+              if (challengeBranch) {
+                return (
+                  <View
+                    key={`label-${branch}`}
+                    // The banner is far bigger than a branch label, so it gets a
+                    // container wider than the node (centred on it) — the space
+                    // either side is empty anyway, and it must never wrap.
+                    style={{
+                      position: 'absolute',
+                      left:  lx - w / 2,
+                      top:   p.y - CHALLENGE_LABEL_OFFSET,
+                      width: w * 2,
+                      alignItems: 'center',
+                    }}
+                    pointerEvents="none"
+                  >
+                    <ChallengeBanner reveal={revealId === q.id} />
+                  </View>
+                );
+              }
               return (
                 <View
                   key={`label-${branch}`}
@@ -1442,7 +2489,7 @@ export default function QuestTreeScreen({ route, navigation }) {
             {/* Tier divider — between Tier 1 and Tier 2 (tiered classes only) */}
             {tierDividerY != null && (
               <View
-                style={[styles.tierDivider, { top: tierDividerY - 14, width }]}
+                style={[styles.tierDivider, { top: tierDividerY - TIER_RULE_H / 2, width }]}
                 pointerEvents="none"
               >
                 <View style={[styles.tierLine, styles.tierLineGold]} />
@@ -1473,9 +2520,15 @@ export default function QuestTreeScreen({ route, navigation }) {
                     isRequired={requiredIds.has(q.id)}
                     nodeWidth={nodeWidth ?? NODE_W}
                     delay={Math.min((p.rank ?? 0) * 80, 720)}
-                    disabled={toggling}
+                    disabled={toggling || applying}
                     celebrate={celebrateId === q.id}
-                    onPress={() => setPendingQuest(q)}
+                    reveal={revealId === q.id}
+                    mirrorSource={mirrorSources[q.mirror_quest_id] ?? null}
+                    coachLocked={!canToggleCoachQuest(q, isCoachViewer)}
+                    pickMode={pickMode}
+                    pickIndex={picks.indexOf(q.id) >= 0 ? picks.indexOf(q.id) : null}
+                    pickable={picking && pickEligible(q, pickSet)}
+                    onPress={() => (picking ? togglePick(q) : setPendingQuest(q))}
                   />
                 </View>
               );
@@ -1485,6 +2538,11 @@ export default function QuestTreeScreen({ route, navigation }) {
           </View>
           ) : null}
         </View>
+
+        {/* Every node cleared and an upgrade waiting → the gold gate rises. */}
+        {upgradeReady && (
+          <UpgradeGate onPress={takeUpgrade} busy={upgrading} />
+        )}
         </View>
       </ScrollView>
 
@@ -1496,13 +2554,102 @@ export default function QuestTreeScreen({ route, navigation }) {
         onRequestClose={() => { if (!toggling) setPendingQuest(null); }}
       >
         <View style={styles.confirmOverlay}>
-          {pendingQuest && (() => {
-            const removing = completions.has(pendingQuest.id);
-            const reward   = pendingQuest.lvl_reward ?? 0;
+          {pendingQuest && isMirrorQuest(pendingQuest) && (() => {
+            // Mirrored requirement: not a confirm dialog at all. It exists to
+            // say WHERE this node is earned — the player has to go and do it in
+            // the quest that owns it.
+            const src   = mirrorSources[pendingQuest.mirror_quest_id] ?? null;
+            const where = (src?.chain ?? '').replace(/_/g, ' ').toUpperCase();
+            const met   = completions.has(pendingQuest.id);
             return (
               <View style={styles.confirmCard}>
-                <Text style={styles.confirmCardTitle}>
-                  {removing ? 'REMOVE QUEST' : 'COMPLETE QUEST'}
+                <Text style={styles.confirmCardTitle}>OUTSIDE REQUIREMENT</Text>
+                <Text style={styles.confirmCardName}>{pendingQuest.name}</Text>
+                <Text style={styles.mirrorNote}>
+                  {met
+                    ? `Earned in the ${where || 'other'} main quest — it counts here automatically.`
+                    : `This one belongs to the ${where || 'other'} main quest. Confirm it there and it unlocks here on its own.`}
+                </Text>
+                <View style={styles.confirmButtons}>
+                  <TouchableOpacity
+                    style={styles.confirmOk}
+                    activeOpacity={0.85}
+                    onPress={() => setPendingQuest(null)}
+                  >
+                    <Text style={styles.confirmOkText}>GOT IT</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            );
+          })()}
+
+          {pendingQuest && !isMirrorQuest(pendingQuest)
+            && !canToggleCoachQuest(pendingQuest, isCoachViewer) && (() => {
+            // Coach-approved node, seen by the PLAYER: not a confirm dialog —
+            // there is nothing here they can press. It says who signs it off.
+            const met = completions.has(pendingQuest.id);
+            return (
+              <View style={styles.confirmCard}>
+                <Text style={[styles.confirmCardTitle, styles.confirmCardTitleCoach]}>
+                  COACH APPROVAL
+                </Text>
+                <Text style={styles.confirmCardName}>{pendingQuest.name}</Text>
+                <Text style={styles.mirrorNote}>
+                  {met
+                    ? 'Your coach signed this one off — it counts.'
+                    : 'Only your coach can check this one. Show them the skill and they will approve it from their side.'}
+                </Text>
+                <View style={styles.confirmButtons}>
+                  <TouchableOpacity
+                    style={styles.confirmOk}
+                    activeOpacity={0.85}
+                    onPress={() => setPendingQuest(null)}
+                  >
+                    <Text style={styles.confirmOkText}>GOT IT</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            );
+          })()}
+
+          {pendingQuest && !isMirrorQuest(pendingQuest)
+            && canToggleCoachQuest(pendingQuest, isCoachViewer) && (() => {
+            const removing = completions.has(pendingQuest.id);
+            const reward   = pendingQuest.lvl_reward ?? 0;
+            const blockers = removing ? removalBlockers(pendingQuest) : [];
+
+            // Blocked removal — everything downstream has to come off first, so
+            // this isn't a confirm dialog either. It just names the way back.
+            if (blockers.length > 0) {
+              return (
+                <View style={styles.confirmCard}>
+                  <Text style={styles.confirmCardTitle}>LOCKED IN</Text>
+                  <Text style={styles.confirmCardName}>{pendingQuest.name}</Text>
+                  <Text style={styles.mirrorNote}>
+                    {`Cancel: ${blockers.map(b => b.name).join(', ')}`}
+                  </Text>
+                  <View style={styles.confirmButtons}>
+                    <TouchableOpacity
+                      style={styles.confirmOk}
+                      activeOpacity={0.85}
+                      onPress={() => setPendingQuest(null)}
+                    >
+                      <Text style={styles.confirmOkText}>GOT IT</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              );
+            }
+
+            return (
+              <View style={styles.confirmCard}>
+                <Text style={[
+                  styles.confirmCardTitle,
+                  isCoachQuest(pendingQuest) && styles.confirmCardTitleCoach,
+                ]}>
+                  {isCoachQuest(pendingQuest)
+                    ? (removing ? 'WITHDRAW APPROVAL' : 'APPROVE QUEST')
+                    : (removing ? 'REMOVE QUEST' : 'COMPLETE QUEST')}
                 </Text>
                 <Text style={styles.confirmCardName}>{pendingQuest.name}</Text>
                 <Text style={[
@@ -1541,6 +2688,91 @@ export default function QuestTreeScreen({ route, navigation }) {
           })()}
         </View>
       </Modal>
+
+      {/* ── Downgrade confirmation ── */}
+      {/* The one place in the app where progress is destroyed in bulk, so it
+          says exactly what goes and exactly what survives before it happens. */}
+      <Modal
+        visible={confirmDowngrade}
+        transparent
+        animationType="fade"
+        onRequestClose={() => { if (!upgrading) setConfirmDowngrade(false); }}
+      >
+        <View style={styles.confirmOverlay}>
+          {/* `base` is guaranteed by canDowngrade, but Modal renders its children
+              even while hidden — so never reach into it unguarded. */}
+          {confirmDowngrade && base && (
+          <View style={styles.confirmCard}>
+            <Text style={styles.confirmCardTitle}>GIVE BACK UPGRADE</Text>
+            <Text style={styles.confirmCardName}>
+              {chain.replace(/_/g, ' ').toUpperCase()}
+            </Text>
+            {doneCount > 0 && (
+              <Text style={[styles.confirmCardDelta, styles.confirmCardDeltaDown]}>
+                −{earnedLvl} LVL
+              </Text>
+            )}
+            <Text style={styles.mirrorNote}>
+              {doneCount > 0
+                ? `This quest resets to nothing — all ${doneCount} completed ${doneCount === 1 ? 'node' : 'nodes'} are cleared. `
+                : ''}
+              {base.chain.replace(/_/g, ' ').toUpperCase()} keeps everything it has earned,
+              and the UPGRADE will be waiting at the bottom of it again.
+            </Text>
+
+            <View style={styles.confirmButtons}>
+              <TouchableOpacity
+                style={styles.confirmCancel}
+                onPress={() => setConfirmDowngrade(false)}
+                disabled={upgrading}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.confirmCancelText}>CANCEL</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.confirmOk}
+                onPress={undoUpgrade}
+                disabled={upgrading}
+                activeOpacity={0.85}
+              >
+                {upgrading
+                  ? <ActivityIndicator color={SL.bg} size="small" />
+                  : <Text style={styles.confirmOkText}>DOWNGRADE</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+          )}
+        </View>
+      </Modal>
+
+      {/* ── SHAPES glossary popup (COMBOES only) ── */}
+      <Modal
+        visible={showShapesInfo}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowShapesInfo(false)}
+      >
+        <TouchableOpacity
+          style={styles.confirmOverlay}
+          activeOpacity={1}
+          onPress={() => setShowShapesInfo(false)}
+        >
+          <View style={styles.shapesInfoCard}>
+            <Text style={styles.shapesInfoTitle}>SHAPES</Text>
+            <Text style={styles.shapesInfoBody}>
+              Start with STRAIGHT for 5 sec → STRADDLE → DIAMOND → TUCK, then
+              reverse back: TUCK → DIAMOND → STRADDLE → STRAIGHT.
+            </Text>
+            <TouchableOpacity
+              style={styles.shapesInfoClose}
+              onPress={() => setShowShapesInfo(false)}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.shapesInfoCloseText}>GOT IT</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 }
@@ -1565,6 +2797,157 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 10,
   },
+  // BACK, matched to the pair controls: same height, padding, border weight and
+  // type size, so all three header pills sit on one line as equals. (Overrides
+  // PillButton's `lg` — the shared component tops out smaller than this row.)
+  headerBackPill: {
+    minHeight: HEADER_PILL_H,
+    paddingVertical: 15,
+    paddingHorizontal: 26,
+    borderWidth: 2.5,
+  },
+  headerBackText: {
+    fontSize: 24,
+    letterSpacing: 1.8,
+  },
+
+  // The pair controls, right-aligned. They're big, and one of them carries a
+  // full quest name — on a narrow phone that can't share a line with BACK, so
+  // the group wraps below instead of squashing.
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    flexWrap: 'wrap',
+    flexShrink: 1,
+    gap: 10,
+  },
+
+  // ── Version switch (header) ────────────────────────────────────────────────
+  // Gold-tinted so it reads as part of the upgrade language. Deliberately much
+  // larger than the BACK pill: on an upgraded quest, knowing which of the two
+  // versions you're on — and getting to the other — is the header's real job.
+  verSwitch: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    minHeight: HEADER_PILL_H,
+    paddingVertical: 15,
+    paddingHorizontal: 26,
+    borderRadius: 999,
+    borderWidth: 2.5,
+    borderColor: 'rgba(255,215,0,0.45)',
+    backgroundColor: 'rgba(255,215,0,0.08)',
+  },
+  verSwitchArrow: {
+    fontFamily: F.body,
+    fontSize: 18,
+    lineHeight: 24,
+    color: SL.gold,
+  },
+  verSwitchText: {
+    fontFamily: F.heading,
+    fontSize: 24,
+    letterSpacing: 1.8,
+    color: SL.gold,
+  },
+
+  // ── Upgrade gate (foot of a cleared tree) ──────────────────────────────────
+  gateWrap: {
+    alignItems: 'center',
+    paddingTop: 6,
+    paddingBottom: 34,
+  },
+  // The beam the plinth rides up on — anchored at the bottom so scaleY grows it
+  // upward, out of the tree.
+  gateBeam: {
+    position: 'absolute',
+    top: 0,
+    width: 2,
+    height: 66,
+    backgroundColor: SL.gold,
+    shadowColor: SL.gold,
+    shadowOpacity: 0.9,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 0 },
+    // Anchored at the tree end so scaleY draws the light DOWN out of the last
+    // node and into the plinth that rises to meet it.
+    transformOrigin: 'top',
+  },
+  // Clears the beam above it, so the button lands at the beam's foot rather than
+  // inside it.
+  gatePlinth: { marginTop: 70 },
+
+  // ── Downgrade (header, beside the version switch) ──────────────────────────
+  // Matched to the switch in size so the two read as one pair of controls, but
+  // muted and outline-only: an escape hatch should be findable without ever
+  // inviting the tap.
+  downBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    minHeight: HEADER_PILL_H,
+    paddingVertical: 15,
+    paddingHorizontal: 26,
+    borderRadius: 999,
+    borderWidth: 2.5,
+    borderColor: 'rgba(74,106,138,0.55)',
+    backgroundColor: 'rgba(74,106,138,0.10)',
+  },
+  downBtnChevron: {
+    fontFamily: F.body,
+    fontSize: 18,
+    lineHeight: 24,
+    color: SL.muted,
+  },
+  downBtnText: {
+    fontFamily: F.heading,
+    fontSize: 24,
+    letterSpacing: 1.8,
+    color: SL.muted,
+  },
+  gateHalo: {
+    position: 'absolute',
+    left: -18,
+    right: -18,
+    top: -14,
+    bottom: -14,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,215,0,0.16)',
+  },
+  gateBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    minWidth: 232,
+    minHeight: 56,
+    paddingVertical: 15,
+    paddingHorizontal: 30,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: 'rgba(255,215,0,0.75)',
+    backgroundColor: 'rgba(255,215,0,0.10)',
+    position: 'relative',
+  },
+  gateBtnFrame: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    borderRadius: 14,
+  },
+  gateBtnChevron: {
+    fontFamily: F.body,
+    fontSize: 14,
+    lineHeight: 18,
+    color: SL.gold,
+  },
+  gateBtnText: {
+    fontFamily: F.heading,
+    fontSize: 22,
+    letterSpacing: 3,
+    color: SL.gold,
+  },
   chainTitle: {
     fontFamily: F.heading,
     fontSize: 46,
@@ -1577,12 +2960,11 @@ const styles = StyleSheet.create({
     textShadowRadius: 20,
   },
 
-  // Quest-type emblem — a glowing capsule with a double-frame line + flanking gems.
+  // Quest-type emblem — a glowing capsule with a double-frame line.
   typeBadge: {
     marginTop: 16,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 14,
     borderWidth: 1.5,
     borderColor: SL.accent,
     borderRadius: 999,
@@ -1594,11 +2976,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.8,
     shadowRadius: 18,
     position: 'relative',
-  },
-  typeBadgeSide: {
-    borderColor: SL.gold,
-    backgroundColor: 'rgba(255,215,0,0.10)',
-    shadowColor: SL.gold,
   },
   // Faint inner hairline, inset from the border → the "tech" double-frame look.
   typeBadgeInner: {
@@ -1612,24 +2989,6 @@ const styles = StyleSheet.create({
     fontFamily: F.heading,
     fontSize: 19,
     letterSpacing: 5,
-  },
-  // Flanking gem — a hollow diamond holding a lit core.
-  typeGem: {
-    width: 13,
-    height: 13,
-    borderWidth: 1.5,
-    borderRadius: 2,
-    alignItems: 'center',
-    justifyContent: 'center',
-    transform: [{ rotate: '45deg' }],
-  },
-  typeGemCore: {
-    width: 5,
-    height: 5,
-    borderRadius: 1,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 1,
-    shadowRadius: 5,
   },
 
   // ── Status HUD — completion meter + readouts ────────────────────────────────
@@ -1719,6 +3078,125 @@ const styles = StyleSheet.create({
     opacity: 0.85,
     letterSpacing: 2,
   },
+  // ── MULTI-SIGN ─────────────────────────────────────────────────────────────
+  multiOpen: {
+    alignSelf: 'center',
+    marginTop: 12,
+    paddingHorizontal: 18,
+    paddingVertical: 9,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: 'rgba(74,158,191,0.55)',
+    backgroundColor: 'rgba(74,158,191,0.10)',
+  },
+  multiOpenText: {
+    fontFamily: F.heading,
+    fontSize: 15,
+    letterSpacing: 1.6,
+    color: SL.accent,
+  },
+  // Open queue — the same small header slot the MULTI-SIGN pill sat in, now
+  // holding just the two controls a run needs: CLEAR and the action.
+  pickBarTop: {
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 12,
+    padding: 5,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: 'rgba(74,158,191,0.55)',
+    backgroundColor: 'rgba(74,158,191,0.07)',
+  },
+  // Tints red the moment the run's first pick makes it a take-back.
+  pickBarTopRemove: {
+    borderColor: 'rgba(255,68,68,0.55)',
+    backgroundColor: 'rgba(255,68,68,0.06)',
+  },
+  pickClear: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: SL.border,
+  },
+  pickClearText: {
+    fontFamily: F.heading,
+    fontSize: 13,
+    letterSpacing: 1.2,
+    color: SL.muted,
+  },
+  pickGo: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 30,
+    minWidth: 116,
+    paddingHorizontal: 16,
+    paddingVertical: 7,
+    borderRadius: 14,
+    backgroundColor: SL.accent,
+  },
+  pickGoRemove: { backgroundColor: SL.danger },
+  pickGoText: {
+    fontFamily: F.heading,
+    fontSize: 13,
+    letterSpacing: 1.2,
+    color: SL.bg,
+  },
+  pickApplyOff:    { opacity: 0.35 },
+  pickApplyText: {
+    fontFamily: F.heading,
+    fontSize: 15,
+    letterSpacing: 1.4,
+    color: SL.bg,
+  },
+
+  // Queued node — tinted by direction, so a run reads at a glance.
+  questCardPickAdd: {
+    borderColor: SL.accent,
+    backgroundColor: 'rgba(74,158,191,0.22)',
+    shadowColor: SL.accent,
+    shadowOpacity: 0.5,
+    shadowRadius: 14,
+  },
+  questCardPickRemove: {
+    borderColor: SL.danger,
+    backgroundColor: 'rgba(255,68,68,0.18)',
+    shadowColor: SL.danger,
+    shadowOpacity: 0.5,
+    shadowRadius: 14,
+  },
+  // The order chip sitting on a queued node.
+  pickChip: {
+    position: 'absolute',
+    top: -10,
+    right: -10,
+    minWidth: 26,
+    height: 26,
+    paddingHorizontal: 6,
+    borderRadius: 13,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 5,
+  },
+  pickChipAdd: {
+    borderColor: SL.accent,
+    backgroundColor: SL.bg,
+  },
+  pickChipRemove: {
+    borderColor: SL.danger,
+    backgroundColor: SL.bg,
+  },
+  pickChipText: {
+    fontFamily: F.heading,
+    fontSize: 14,
+    lineHeight: 16,
+  },
+  pickChipTextAdd:    { color: SL.accent },
+  pickChipTextRemove: { color: SL.danger },
+
   headerDivider: {
     height: 1,
     backgroundColor: SL.border,
@@ -1777,11 +3255,61 @@ const styles = StyleSheet.create({
     textShadowRadius: 12,
   },
 
+  // Hidden-challenge banner — the gold counterpart of a branch label, shown
+  // above a challenge node the player has just unlocked.
+  challengeBanner: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    // Opaque plate — masks the gold connector line that passes behind it, so the
+    // type never sits ON a wire. Generous padding keeps the words off the border.
+    paddingHorizontal: 30,
+    paddingVertical: 12,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: SL.gold,
+    backgroundColor: SL.bg,
+    shadowColor: SL.gold,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.55,
+    shadowRadius: 22,
+    elevation: 8,
+  },
+  // Line 1 — small, wide-tracked kicker.
+  challengeKicker: {
+    fontFamily: F.heading,
+    fontSize: 18,
+    lineHeight: 22,
+    color: SL.gold,
+    letterSpacing: 10,
+    // Tracking leaves a trailing gap after the last glyph; pull the word back so
+    // it still reads optically centred over CHALLENGE.
+    marginLeft: 10,
+    textAlign: 'center',
+    opacity: 0.9,
+    textShadowColor: 'rgba(255,215,0,0.55)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 14,
+  },
+  // Line 2 — the loudest heading in the tree, in the HEAVY face, because finding
+  // this is the moment the whole quest was hiding.
+  challengeLabel: {
+    fontFamily: F.heading,
+    fontSize: 36,
+    lineHeight: 44,
+    color: SL.gold,
+    letterSpacing: 2,
+    marginLeft: 2,
+    textAlign: 'center',
+    textShadowColor: 'rgba(255,215,0,0.75)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 20,
+  },
+
   // Tier divider — full-width rule with centered label
   tierDivider: {
     position: 'absolute',
     left: 0,
-    height: 28,
+    height: TIER_RULE_H,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1880,6 +3408,35 @@ const styles = StyleSheet.create({
     shadowRadius: 16,
   },
 
+  // A revealed HIDDEN CHALLENGE hands its border to a gold ShimmerFrame, exactly
+  // the way a prestige requirement does.
+  questCardChallenge: {
+    borderColor: 'transparent',
+    backgroundColor: 'rgba(255,215,0,0.06)',
+    shadowColor: SL.gold,
+    shadowOpacity: 0.45,
+    shadowRadius: 16,
+  },
+  // Completing a challenge must NOT hand it the blue "done" card — it stays
+  // gold and simply burns brighter (the gold equivalent of questCardDone).
+  questCardChallengeDone: {
+    backgroundColor: 'rgba(255,215,0,0.12)',
+    shadowOpacity: 0.6,
+  },
+
+  // Expanding gold ring — the shockwave of a hidden challenge revealing itself.
+  revealRing: {
+    position: 'absolute',
+    top: -6, left: -6, right: -6, bottom: -6,
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: SL.gold,
+    shadowColor: SL.gold,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 18,
+  },
+
   // Breathing gold halo behind a CLASS-GATE node (opacity pulsed by `gate`).
   gateHalo: {
     position: 'absolute',
@@ -1908,7 +3465,9 @@ const styles = StyleSheet.create({
     shadowRadius: 26,
   },
 
-  // Floating "✦ CLASS GATE ✦" crown ribbon, centered above the node's top edge.
+  // Floating "✦ PRESTIGE REQUIRED ✦" crown ribbon, centered above the node's
+  // top edge. The wording names what the node actually gates — a prestige
+  // requirement — so it reads the same as the prestige checklist in Skills.
   gateRibbonWrap: {
     position: 'absolute',
     top: -15,
@@ -1931,9 +3490,12 @@ const styles = StyleSheet.create({
   },
   gateRibbonText: {
     fontFamily: F.heading,
-    fontSize: 14,
+    // Slightly smaller and tighter than the node title: the phrase is long, and
+    // the ribbon floats free of the node's width, so it has to stay compact
+    // enough not to reach the node beside it.
+    fontSize: 13,
     color: SL.gold,
-    letterSpacing: 2.5,
+    letterSpacing: 1.8,
     textShadowColor: 'rgba(255,215,0,0.8)',
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 8,
@@ -1953,9 +3515,99 @@ const styles = StyleSheet.create({
   },
   questNameDone:   { color: SL.accent },
   questNameLocked: { color: SL.muted },
+  // A hidden challenge reads GOLD in every state — done included, where the
+  // default `questNameDone` would otherwise turn the title ice blue inside a
+  // gold frame.
+  questNameChallenge: {
+    color: SL.gold,
+    textShadowColor: 'rgba(255,215,0,0.55)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
+  },
+  // A requirement node carries the whole point of the detour, so its title reads
+  // a size up and in full-strength violet instead of the locked grey.
+  questNameMirror: {
+    fontSize: 29,
+    lineHeight: 31,
+    color: '#D5CCFF',
+    textShadowColor: 'rgba(139,120,255,0.55)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
+  },
 
   // Badges
-  nodeBottom: { alignSelf: 'center' },
+  nodeBottom: { alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 6 },
+  lockGlyph: { fontSize: 15, lineHeight: 20, opacity: 0.75 },
+
+  // ── Mirrored requirement (earned in another main quest) ──────────────────
+  // Same solid frame as a normal node, just in violet, plus a "⇥ CHAIN" tag:
+  // the node reads as a pointer OUT of this tree without looking half-drawn.
+  questCardMirror: {
+    // Tighter box than a normal node: a requirement card only holds a title and
+    // one word, so the reserved height goes to type instead of padding.
+    paddingVertical: 6,
+    gap: 2,
+    borderColor: '#8B78FF',
+    backgroundColor: 'rgba(110,91,224,0.14)',
+    shadowColor: '#8B78FF',
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+  },
+  // Earned — still the requirement node's violet, just brighter. (Before this it
+  // fell through to the generic blue `questCardDone`, which erased the violet
+  // frame the moment the requirement was met in the quest that owns it.)
+  questCardMirrorDone: {
+    borderColor: '#A996FF',
+    backgroundColor: 'rgba(110,91,224,0.22)',
+    shadowOpacity: 0.55,
+  },
+  // No frame: the badge row only has ~26px of reserved height, and spending it
+  // on a border + padding is what kept the label microscopic. Bare text lets the
+  // type itself fill the row.
+  mirrorTag: {},
+  mirrorTagDone: {},
+  mirrorTagText: {
+    fontFamily: F.bodyMed,
+    fontSize: 30,
+    lineHeight: 40,
+    letterSpacing: 2,
+    color: '#C4B8FF',
+  },
+  // The chain tag stays violet when done — it names where the requirement lives,
+  // which doesn't stop being a violet cross-quest pointer once it's met.
+  mirrorTagTextDone: { color: '#D5CCFF' },
+  // ── Coach-approved node (only the coach can check it) ────────────────────
+  // Third palette in the tree: gold = challenge, violet = owned by another
+  // quest, GREEN = owned by the coach. Same solid frame as a normal node.
+  questCardCoach: {
+    borderColor: SL.approve,
+    backgroundColor: 'rgba(59,232,122,0.12)',
+    shadowColor: SL.approve,
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+  },
+  // Approved — still green, just lit. (Without this the node would fall through
+  // to the generic blue `questCardDone` and lose its palette on approval.)
+  questCardCoachDone: {
+    borderColor: '#7CFFAE',
+    backgroundColor: 'rgba(59,232,122,0.2)',
+    shadowOpacity: 0.6,
+  },
+  questNameCoach: {
+    color: '#9CFFC6',
+    textShadowColor: 'rgba(59,232,122,0.55)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
+  },
+  mirrorNote: {
+    fontFamily: F.body,
+    fontSize: 15,
+    lineHeight: 22,
+    color: SL.muted,
+    textAlign: 'center',
+    marginTop: 10,
+    paddingHorizontal: 6,
+  },
   doneBadge: {
     backgroundColor: 'rgba(74,158,191,0.15)',
     borderWidth: 1,
@@ -1971,6 +3623,11 @@ const styles = StyleSheet.create({
     color: SL.accent,
     letterSpacing: 1.5,
   },
+  // The DONE chip follows the node's palette, not the default ice blue.
+  doneBadgeChallenge:     { backgroundColor: 'rgba(255,215,0,0.15)', borderColor: SL.gold },
+  doneBadgeTextChallenge: { color: SL.gold },
+  doneBadgeMirror:        { backgroundColor: 'rgba(110,91,224,0.22)', borderColor: '#8B78FF' },
+  doneBadgeTextMirror:    { color: '#D5CCFF' },
   rewardBadge: {
     borderWidth: 1,
     borderColor: SL.accent,
@@ -1985,6 +3642,9 @@ const styles = StyleSheet.create({
     color: SL.accent,
     letterSpacing: 1.2,
   },
+  // Gold reward badge on a revealed hidden challenge (matches its frame).
+  rewardBadgeChallenge: { borderColor: SL.gold },
+  rewardTextChallenge:  { color: SL.gold },
 
   // ── Confirmation popup — system-notification style card ──────────────────────
 
@@ -2024,6 +3684,12 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 12,
   },
+  // The coach's own dialog wears the node's green, so approving reads as a
+  // different act from the player checking their own box.
+  confirmCardTitleCoach: {
+    color: '#9CFFC6',
+    textShadowColor: 'rgba(59,232,122,0.6)',
+  },
   confirmCardName: {
     fontFamily: F.heading,
     fontSize: 30,
@@ -2039,7 +3705,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 6,
   },
-  confirmCardDeltaUp:   { color: SL.green },
+  confirmCardDeltaUp:   { color: SL.gold },
   confirmCardDeltaDown: { color: SL.danger },
   confirmButtons: {
     flexDirection: 'row',
@@ -2071,6 +3737,91 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   confirmOkText: {
+    fontFamily: F.heading,
+    fontSize: 20,
+    color: SL.bg,
+    letterSpacing: 2,
+  },
+
+  // COMBOES "SHAPES ?" glossary button + its popup card.
+  shapesGlossBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'center',
+    gap: 8,
+    marginTop: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,215,0,0.5)',
+    backgroundColor: 'rgba(255,215,0,0.08)',
+  },
+  shapesGlossBtnText: {
+    fontFamily: F.heading,
+    fontSize: 16,
+    color: '#FFD700',
+    letterSpacing: 2,
+  },
+  shapesGlossQ: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,215,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  shapesGlossQText: {
+    fontFamily: F.heading,
+    fontSize: 13,
+    color: '#FFD700',
+    lineHeight: 16,
+  },
+  shapesInfoCard: {
+    width: '100%',
+    maxWidth: 460,
+    backgroundColor: SL.panel,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,215,0,0.7)',
+    borderRadius: 18,
+    paddingHorizontal: 24,
+    paddingVertical: 22,
+    alignItems: 'center',
+    gap: 14,
+    shadowColor: '#FFD700',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.4,
+    shadowRadius: 28,
+    elevation: 12,
+  },
+  shapesInfoTitle: {
+    fontFamily: F.heading,
+    fontSize: 26,
+    color: '#FFD700',
+    letterSpacing: 3,
+    textAlign: 'center',
+    textShadowColor: 'rgba(255,215,0,0.5)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 12,
+  },
+  shapesInfoBody: {
+    fontFamily: F.body,
+    fontSize: 18,
+    lineHeight: 26,
+    color: SL.text,
+    textAlign: 'center',
+  },
+  shapesInfoClose: {
+    alignSelf: 'stretch',
+    height: 48,
+    backgroundColor: '#FFD700',
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  shapesInfoCloseText: {
     fontFamily: F.heading,
     fontSize: 20,
     color: SL.bg,

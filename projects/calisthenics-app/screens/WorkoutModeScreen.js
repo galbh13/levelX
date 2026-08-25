@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, TextInput, Animated, Easing,
+  ActivityIndicator, TextInput, Animated, Easing, Modal,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { materializeDay } from '../lib/schedule';
@@ -86,17 +86,82 @@ function withOpenSegment(session) {
   return session;
 }
 
-function withClosedSegment(session) {
+function withClosedSegment(session, endISO = new Date().toISOString()) {
   const segs = session.segments ?? [];
   const last = segs[segs.length - 1];
   if (last && !last.end) {
     return {
       ...session,
       segments: segs.map((s, i) =>
-        i === segs.length - 1 ? { ...s, end: new Date().toISOString() } : s),
+        i === segs.length - 1 ? { ...s, end: endISO } : s),
     };
   }
   return session;
+}
+
+// Paused = the last segment is closed while the player is still on the screen.
+function isPaused(session) {
+  const segs = session?.segments ?? [];
+  const last = segs[segs.length - 1];
+  return !!(last && last.end);
+}
+
+// If the player hits FINISH long after their last logged set (finished training,
+// forgot the button), the open tail is dead time — trim it back to the last set.
+const IDLE_TRIM_MS = 5 * 60 * 1000;
+
+// Forgot to pause and came back hours later? A gap this long between log touches
+// can't be rest — it was a break. Longer than any real between-set rest.
+const AUTO_BREAK_MS = 10 * 60 * 1000;
+
+// No activity for this long with the clock RUNNING = the player abandoned the
+// widget (left it open and walked away). The session auto-finishes at the last
+// logged set — or is discarded entirely if nothing was ever logged. Paused /
+// exited sessions never abandon: a stopped clock is an intentional break.
+const ABANDON_MS = 20 * 60 * 1000;
+
+// Retroactively convert a long idle stretch of the OPEN segment into a break,
+// applied the moment the next activity lands: the segment is closed back at the
+// last activity and a fresh one opens now. If the segment has no activity at all
+// (opened the workout, walked away), its start just slides to now — no
+// zero-length "session" rows in the time log.
+function withIdleGapAsBreak(session, nowMs = Date.now()) {
+  const segs = session.segments ?? [];
+  const last = segs[segs.length - 1];
+  if (!last || last.end) return session;
+  const startMs  = new Date(last.start).getTime();
+  const lastAct  = session.lastActivityAt ? new Date(session.lastActivityAt).getTime() : null;
+  const ref      = Math.max(startMs, lastAct ?? 0);
+  if (nowMs - ref <= AUTO_BREAK_MS) return session;
+  const nowISO = new Date(nowMs).toISOString();
+  if (ref <= startMs) {
+    return {
+      ...session,
+      segments: segs.map((s, i) => i === segs.length - 1 ? { ...s, start: nowISO } : s),
+    };
+  }
+  return {
+    ...session,
+    segments: [
+      ...segs.slice(0, -1),
+      { ...last, end: new Date(ref).toISOString() },
+      { start: nowISO, end: null },
+    ],
+  };
+}
+
+// Close the open segment for pause/exit, trimming a long idle tail back to the
+// last activity so "walked away without pausing, then left" doesn't count.
+function closeTrimmed(session, idleMs = AUTO_BREAK_MS) {
+  const segs = session.segments ?? [];
+  const last = segs[segs.length - 1];
+  if (!last || last.end) return session;
+  const startMs = new Date(last.start).getTime();
+  const lastAct = session.lastActivityAt ? new Date(session.lastActivityAt).getTime() : null;
+  if (lastAct && lastAct > startMs && Date.now() - lastAct > idleMs) {
+    return withClosedSegment(session, new Date(lastAct).toISOString());
+  }
+  return withClosedSegment(session);
 }
 
 function activeMs(segments, now) {
@@ -114,6 +179,11 @@ function fmtDur(ms) {
   const s = total % 60;
   const pad = (n) => String(n).padStart(2, '0');
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+function fmtClock(iso) {
+  if (!iso) return '—';
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 // Index of the exercise the player is currently on = first one whose required
@@ -212,6 +282,10 @@ export default function WorkoutModeScreen({ route, navigation }) {
   // Lets the player jump to the fork early (e.g. feeling off) without finishing
   // every trunk set.
   const [forceFork, setForceFork] = useState(false);
+  // FINAL TIME CHECK — the post-FINISH editor. Non-null = open, holding
+  // { segs (all closed), trimmedIdleMs, auto } while the player fixes the clock
+  // (erase false breaks, nudge start/end). Nothing is finalized until CONFIRM.
+  const [adjust, setAdjust] = useState(null);
 
   const sessionRef  = useRef(null);
   const finishedRef = useRef(false);
@@ -287,21 +361,31 @@ export default function WorkoutModeScreen({ route, navigation }) {
   }, [workout.id, key, dateStr, title, isGallery]);
 
   // On exit (unmount) without finishing, close the open segment so the time away
-  // counts as a break and the session resumes cleanly next time.
+  // counts as a break and the session resumes cleanly next time. A long idle tail
+  // (forgot to pause, then left) is trimmed back to the last logged activity.
   useEffect(() => {
     return () => {
       if (finishedRef.current || !sessionRef.current) return;
-      saveSession(key, withClosedSegment(sessionRef.current));
+      saveSession(key, closeTrimmed(sessionRef.current));
     };
   }, [key]);
 
   // ── Set logging ────────────────────────────────────────────────────────────
 
+  // Every log touch stamps `lastActivityAt` (drives the idle-trim on finish) and
+  // reopens the clock if the player is on a break — training resumes the timer
+  // automatically, so a forgotten ▶ RESUME can never under-count the session.
+  // The idle-gap pass runs FIRST (against the previous activity stamp), so a
+  // forgotten pause is healed retroactively the moment training resumes.
   const updateSet = useCallback((exId, setIdx, patch) => {
     setSession(prev => {
       if (!prev) return prev;
       const sets = (prev.log[exId] ?? []).map((s, i) => i === setIdx ? { ...s, ...patch } : s);
-      const next = { ...prev, log: { ...prev.log, [exId]: sets } };
+      const next = withOpenSegment({
+        ...withIdleGapAsBreak(prev),
+        log: { ...prev.log, [exId]: sets },
+        lastActivityAt: new Date().toISOString(),
+      });
       saveSession(key, next);
       return next;
     });
@@ -315,11 +399,42 @@ export default function WorkoutModeScreen({ route, navigation }) {
       if (!prev) return prev;
       const skipped = { ...(prev.skipped ?? {}) };
       if (skipped[exId]) delete skipped[exId]; else skipped[exId] = true;
-      const next = { ...prev, skipped };
+      const next = withOpenSegment({
+        ...withIdleGapAsBreak(prev),
+        skipped,
+        lastActivityAt: new Date().toISOString(),
+      });
       saveSession(key, next);
       return next;
     });
   }, [key]);
+
+  // ⏸ BREAK / ▶ RESUME — stop the clock without leaving the screen. Pausing
+  // closes the open segment (the same model as exiting), so the gap shows up as
+  // a break in the summary; resuming opens a fresh segment.
+  const togglePause = useCallback(() => {
+    hapticTap();
+    setSession(prev => {
+      if (!prev) return prev;
+      // Pausing after a long idle stretch closes back at the last activity
+      // (closeTrimmed), so "walked away, came back, THEN paused" stays honest.
+      const next = isPaused(prev) ? withOpenSegment(prev) : closeTrimmed(prev);
+      saveSession(key, next);
+      return next;
+    });
+  }, [key]);
+
+  // EXIT — leave the live session back to Home (where the RED GATE portal lives).
+  // Portal entry: WorkoutMode is a root screen above the tabs, so goBack() pops it
+  // (its unmount effect closes the open segment as a break) and drops back onto the
+  // tabs, which are already on Home; getParent() is undefined there so the extra
+  // navigate is a harmless no-op. Gallery entry: WorkoutMode sits in the Workouts/
+  // Admin stack, so goBack() pops within that stack and getParent() (the tab
+  // navigator) switches to the Home tab — that path is currently unreached anyway.
+  const exitToHome = useCallback(() => {
+    navigation.goBack();
+    navigation.getParent()?.navigate('Home');
+  }, [navigation]);
 
   // Pick (or change) the fork branch for the rest of the session.
   const chooseBranch = useCallback((branchKey) => {
@@ -403,11 +518,41 @@ export default function WorkoutModeScreen({ route, navigation }) {
     };
   }
 
-  async function handleFinish() {
-    hapticSuccess();
+  // Idle-trim: finishing long after the last logged set means the player was
+  // already done and just forgot the button — end the clock at that last set
+  // instead of now. If the last activity happened inside the open segment,
+  // close it back there; if the entire open segment is idle (came back hours
+  // later and hit FINISH without logging), drop the segment altogether.
+  // A paused session has no open segment and nothing to trim.
+  function computeClosed() {
+    const cur = sessionRef.current;
+    const segs = cur.segments ?? [];
+    const lastSeg = segs[segs.length - 1];
+    const lastAct = cur.lastActivityAt ? new Date(cur.lastActivityAt).getTime() : null;
+    let trimmedIdleMs = 0;
+    let closed;
+    if (lastSeg && !lastSeg.end) {
+      const segStart = new Date(lastSeg.start).getTime();
+      const ref = Math.max(segStart, lastAct ?? 0);
+      if (Date.now() - ref > IDLE_TRIM_MS) {
+        trimmedIdleMs = Date.now() - ref;
+        closed = ref > segStart
+          ? withClosedSegment(cur, new Date(ref).toISOString())
+          : { ...cur, segments: segs.slice(0, -1) };
+      } else {
+        closed = withClosedSegment(cur);
+      }
+    } else {
+      closed = cur;
+    }
+    return { closed, trimmedIdleMs };
+  }
+
+  // The real end of a session: build the summary, clear the local state, mark
+  // the workout complete. Only reached via CONFIRM in the FINAL TIME CHECK.
+  async function finalize(closed, trimmedIdleMs) {
     finishedRef.current = true;
-    const closed = withClosedSegment(sessionRef.current);
-    const summary = buildSummary(closed);
+    const summary = { ...buildSummary(closed), trimmedIdleMs };
     await clearSession(key);
     // Gallery previews aren't scheduled, so there's nothing to mark complete.
     if (!isGallery) {
@@ -415,6 +560,99 @@ export default function WorkoutModeScreen({ route, navigation }) {
     }
     navigation.replace('WorkoutSummary', { summary });
   }
+
+  // FINISH now opens the FINAL TIME CHECK instead of jumping to the summary —
+  // one last chance to erase a false break or fix the start/end before the
+  // recap is stamped. The live session is left untouched until CONFIRM, so
+  // ↩ KEEP TRAINING simply closes the editor.
+  function handleFinish(auto = false) {
+    if (!auto) hapticSuccess();
+    const { closed, trimmedIdleMs } = computeClosed();
+    setAdjust({ segs: closed.segments ?? [], trimmedIdleMs, auto });
+  }
+
+  function confirmAdjust() {
+    hapticSuccess();
+    finalize({ ...sessionRef.current, segments: adjust.segs }, adjust.trimmedIdleMs);
+  }
+
+  // Nudge the workout's start or end by whole minutes — "I started training
+  // before pressing start" / "FINISH was late". Clamped so an edge can never
+  // cross its own segment (≥1 min left) and the end can't pass now.
+  const shiftEdge = useCallback((edge, mins) => {
+    hapticTap();
+    setAdjust(a => {
+      if (!a || !a.segs.length) return a;
+      const segs = [...a.segs];
+      const i = edge === 'start' ? 0 : segs.length - 1;
+      const seg = segs[i];
+      let t = new Date(edge === 'start' ? seg.start : seg.end).getTime() + mins * 60000;
+      if (edge === 'start') {
+        t = Math.min(t, new Date(seg.end).getTime() - 60000);
+        segs[i] = { ...seg, start: new Date(t).toISOString() };
+      } else {
+        t = Math.max(t, new Date(seg.start).getTime() + 60000);
+        t = Math.min(t, Date.now());
+        segs[i] = { ...seg, end: new Date(t).toISOString() };
+      }
+      return { ...a, segs };
+    });
+  }, []);
+
+  // ↩ KEEP TRAINING — close the editor and drop back into the live session.
+  // The press counts as widget activity (idle gap healed into a break, stamp
+  // refreshed), so an auto-abandon can't re-trigger on the very next tick.
+  // A paused session stays paused — only the stamp refreshes.
+  const keepTraining = useCallback(() => {
+    hapticTap();
+    setSession(prev => {
+      if (!prev) return prev;
+      const stamp = { lastActivityAt: new Date().toISOString() };
+      const next = isPaused(prev)
+        ? { ...prev, ...stamp }
+        : withOpenSegment({ ...withIdleGapAsBreak(prev), ...stamp });
+      saveSession(key, next);
+      return next;
+    });
+    setAdjust(null);
+  }, [key]);
+
+  // Erase the break BEFORE segment i: merge it into the previous segment so
+  // the gap counts as training time (it was stretching, not a real break).
+  const eraseBreak = useCallback((i) => {
+    hapticTap();
+    setAdjust(a => {
+      if (!a || i < 1 || i >= a.segs.length) return a;
+      const segs = [...a.segs];
+      segs[i - 1] = { ...segs[i - 1], end: segs[i].end };
+      segs.splice(i, 1);
+      return { ...a, segs };
+    });
+  }, []);
+
+  // Abandonment watch: the clock is RUNNING but nothing has been touched for
+  // ABANDON_MS — the player walked away with the widget open. If anything was
+  // ever logged, auto-finish at the last set (idle-trimmed) and leave the FINAL
+  // TIME CHECK waiting for their return; if the session is completely blank,
+  // discard it — no phantom completed workout. Paused sessions (closed last
+  // segment) never trip this: a stopped clock is an intentional break.
+  useEffect(() => {
+    if (loading || !session || adjust || finishedRef.current) return;
+    const segs = session.segments ?? [];
+    const last = segs[segs.length - 1];
+    if (!last || last.end) return;
+    const lastAct = session.lastActivityAt ? new Date(session.lastActivityAt).getTime() : null;
+    const ref = Math.max(new Date(last.start).getTime(), lastAct ?? 0);
+    if (nowTick - ref <= ABANDON_MS) return;
+    if (!lastAct) {
+      finishedRef.current = true;
+      clearSession(key);
+      exitToHome();
+      return;
+    }
+    handleFinish(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nowTick, session, adjust, loading, key]);
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -462,6 +700,7 @@ export default function WorkoutModeScreen({ route, navigation }) {
   const elapsed       = activeMs(session.segments, nowTick);
   const breakCount    = Math.max(0, (session.segments?.length ?? 1) - 1);
   const progressPct   = allSets > 0 ? Math.round((doneSets / allSets) * 100) : 0;
+  const paused        = isPaused(session);
 
   // One exercise card. `current` = it belongs to the active group; `showNow`
   // controls the NOW tag (suppressed inside a superset — the block shows it).
@@ -558,7 +797,7 @@ export default function WorkoutModeScreen({ route, navigation }) {
             Only on the live (current) card, or as an UNDO once skipped. */}
         {hot && (
           <PillButton
-            label="⏭ SKIP TODAY"
+            label="⏭ SKIP"
             tone="muted"
             size="sm"
             onPress={() => toggleSkip(ex.id)}
@@ -602,10 +841,19 @@ export default function WorkoutModeScreen({ route, navigation }) {
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerTop}>
-          <PillButton label="← EXIT" size="sm" onPress={() => navigation.goBack()} />
-          <View style={styles.timerPill}>
-            <View style={styles.liveDot} />
-            <Text style={styles.timerText}>{fmtDur(elapsed)}</Text>
+          <PillButton label="← EXIT" size="sm" onPress={exitToHome} />
+          <View style={styles.headerRight}>
+            <PillButton
+              label={paused ? '▶ RESUME' : '⏸ BREAK'}
+              size="sm"
+              variant={paused ? 'solid' : 'outline'}
+              tone={paused ? 'gold' : 'muted'}
+              onPress={togglePause}
+            />
+            <View style={[styles.timerPill, paused && styles.timerPillPaused]}>
+              <View style={[styles.liveDot, paused && styles.liveDotPaused]} />
+              <Text style={[styles.timerText, paused && styles.timerTextPaused]}>{fmtDur(elapsed)}</Text>
+            </View>
           </View>
         </View>
         <Text style={styles.title}>{title?.toUpperCase()}</Text>
@@ -616,7 +864,9 @@ export default function WorkoutModeScreen({ route, navigation }) {
             EXERCISE {activeList.length ? curIdx + 1 : 0}/{activeList.length}
           </Text>
           <Text style={styles.progressMeta}>{doneSets}/{allSets} SETS</Text>
-          {breakCount > 0 && <Text style={styles.progressMeta}>{breakCount} BREAK{breakCount > 1 ? 'S' : ''}</Text>}
+          {paused
+            ? <Text style={styles.onBreakText}>⏸ ON BREAK — CLOCK STOPPED</Text>
+            : breakCount > 0 && <Text style={styles.progressMeta}>{breakCount} BREAK{breakCount > 1 ? 'S' : ''}</Text>}
         </View>
         <View style={styles.progressTrack}>
           <ShimmerFill style={[styles.progressFill, { width: `${progressPct}%` }]} colors={BLUE} active />
@@ -696,14 +946,100 @@ export default function WorkoutModeScreen({ route, navigation }) {
             label="FINISH WORKOUT"
             variant="solid"
             size="lg"
-            onPress={handleFinish}
+            onPress={() => handleFinish()}
             style={{ marginTop: 8 }}
           />
         </Breathe>
-        <Text style={styles.finishHint}>Exit anytime — your progress is saved and you can resume.</Text>
+        <Text style={styles.finishHint}>
+          Exit anytime — your progress is saved. ⏸ stops the clock; logging a set restarts it.
+        </Text>
 
         <View style={{ height: 32 }} />
       </View>
+
+      {/* ── FINAL TIME CHECK — post-FINISH clock editor ─────────────────────
+          Erase breaks that weren't real, pull the start earlier if training
+          began before the button, trim/extend the end. CONFIRM stamps the
+          summary; ↩ KEEP TRAINING drops back into the live session. */}
+      <Modal visible={!!adjust} transparent animationType="fade" onRequestClose={keepTraining}>
+        {adjust && (
+          <View style={styles.adjustBackdrop}>
+            <ScrollView contentContainerStyle={styles.adjustScroll}>
+              <View style={styles.adjustCard}>
+                <Text style={styles.adjustTitle}>FINAL TIME CHECK</Text>
+                <Text style={styles.adjustSub}>
+                  {adjust.auto
+                    ? '⚠ No activity for 20 min — the workout was closed at your last set. Fix the clock if needed.'
+                    : 'Fix the clock before the recap — started earlier? A break that wasn’t real? Erase it.'}
+                </Text>
+
+                <View style={styles.adjustHero}>
+                  <Text style={styles.adjustHeroLabel}>TRAINING TIME</Text>
+                  <Text style={styles.adjustHeroValue}>{fmtDur(activeMs(adjust.segs, Date.now()))}</Text>
+                </View>
+
+                {adjust.segs.length > 0 && (
+                  <>
+                    <View style={styles.adjustRow}>
+                      <Text style={styles.adjustRowLabel}>STARTED</Text>
+                      <Text style={styles.adjustRowTime}>{fmtClock(adjust.segs[0].start)}</Text>
+                      <View style={styles.adjustBtns}>
+                        {[-5, -1, +1, +5].map(m => (
+                          <TouchableOpacity key={m} style={styles.nudgeBtn} onPress={() => shiftEdge('start', m)}>
+                            <Text style={styles.nudgeText}>{m > 0 ? `+${m}` : m}m</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </View>
+                    <View style={styles.adjustRow}>
+                      <Text style={styles.adjustRowLabel}>ENDED</Text>
+                      <Text style={styles.adjustRowTime}>{fmtClock(adjust.segs[adjust.segs.length - 1].end)}</Text>
+                      <View style={styles.adjustBtns}>
+                        {[-5, -1, +1, +5].map(m => (
+                          <TouchableOpacity key={m} style={styles.nudgeBtn} onPress={() => shiftEdge('end', m)}>
+                            <Text style={styles.nudgeText}>{m > 0 ? `+${m}` : m}m</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    </View>
+                  </>
+                )}
+
+                <Text style={styles.adjustSection}>BREAKS</Text>
+                {adjust.segs.length < 2 ? (
+                  <Text style={styles.adjustEmpty}>No breaks logged.</Text>
+                ) : adjust.segs.slice(1).map((seg, i) => {
+                  const prev = adjust.segs[i];
+                  const ms = Math.max(0, new Date(seg.start).getTime() - new Date(prev.end).getTime());
+                  return (
+                    <View key={`${prev.end}-${seg.start}`} style={styles.breakEditRow}>
+                      <Text style={styles.breakEditText}>
+                        ⏸ {fmtDur(ms)} · {fmtClock(prev.end)} → {fmtClock(seg.start)}
+                      </Text>
+                      <PillButton label="✕ ERASE" size="sm" tone="gold" variant="outline" onPress={() => eraseBreak(i + 1)} />
+                    </View>
+                  );
+                })}
+
+                <PillButton
+                  label="✔ CONFIRM & SEE RECAP"
+                  variant="solid"
+                  size="lg"
+                  onPress={confirmAdjust}
+                  style={{ alignSelf: 'stretch', marginTop: 8 }}
+                />
+                <PillButton
+                  label="↩ KEEP TRAINING"
+                  tone="muted"
+                  size="sm"
+                  onPress={keepTraining}
+                  style={{ alignSelf: 'center' }}
+                />
+              </View>
+            </ScrollView>
+          </View>
+        )}
+      </Modal>
     </ScreenFrame>
   );
 }
@@ -716,14 +1052,23 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1, borderBottomColor: SL.border,
   },
   headerTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   timerPill: {
     flexDirection: 'row', alignItems: 'center', gap: 8,
     paddingHorizontal: 14, paddingVertical: 6,
     borderWidth: 1.5, borderColor: SL.accent, borderRadius: 20,
     backgroundColor: 'rgba(74,158,191,0.08)',
   },
+  // Frozen clock — gold + dashed so a stopped timer can't be mistaken for live.
+  timerPillPaused: {
+    borderColor: SL.gold, borderStyle: 'dashed',
+    backgroundColor: 'rgba(255,215,0,0.06)',
+  },
   liveDot: { width: 9, height: 9, borderRadius: 5, backgroundColor: SL.green },
+  liveDotPaused: { backgroundColor: SL.gold },
   timerText: { fontFamily: F.heading, fontSize: 20, color: SL.accent, letterSpacing: 1 },
+  timerTextPaused: { color: SL.gold },
+  onBreakText: { fontFamily: F.heading, fontSize: 15, color: SL.gold, letterSpacing: 1.5 },
   title: {
     fontFamily: F.heading, fontSize: 34, color: SL.accent,
     letterSpacing: 3, textTransform: 'uppercase', marginTop: 14,
@@ -864,4 +1209,41 @@ const styles = StyleSheet.create({
   },
 
   finishHint: { fontFamily: F.bodyMed, fontSize: 14, color: SL.muted, textAlign: 'center', marginTop: 10, letterSpacing: 0.5 },
+
+  // ── Final time check (post-FINISH clock editor) ───────────────────────────
+  adjustBackdrop: { flex: 1, backgroundColor: 'rgba(2,5,10,0.9)' },
+  adjustScroll: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 16 },
+  adjustCard: {
+    width: '100%', maxWidth: 520, backgroundColor: SL.panel,
+    borderWidth: 1.5, borderColor: SL.accent, borderRadius: 16, padding: 20, gap: 10,
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.35, shadowRadius: 22,
+  },
+  adjustTitle: {
+    fontFamily: F.heading, fontSize: 24, color: SL.accent, letterSpacing: 2,
+    textAlign: 'center', textTransform: 'uppercase',
+  },
+  adjustSub: { fontFamily: F.bodyMed, fontSize: 14, color: SL.muted, letterSpacing: 0.5, textAlign: 'center' },
+  adjustHero: {
+    alignItems: 'center', paddingVertical: 8, gap: 1, borderRadius: 12,
+    borderWidth: 1.5, borderColor: SL.border, backgroundColor: SL.bg,
+  },
+  adjustHeroLabel: { fontFamily: F.body, fontSize: 12, color: SL.muted, letterSpacing: 3 },
+  adjustHeroValue: { fontFamily: F.heading, fontSize: 30, color: SL.text, letterSpacing: 2 },
+  adjustRow: { flexDirection: 'row', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
+  adjustRowLabel: { fontFamily: F.body, fontSize: 14, color: SL.muted, letterSpacing: 2, width: 74 },
+  adjustRowTime: { fontFamily: F.heading, fontSize: 20, color: SL.accent, letterSpacing: 1, flex: 1 },
+  adjustBtns: { flexDirection: 'row', gap: 6 },
+  nudgeBtn: {
+    minWidth: 42, paddingHorizontal: 8, paddingVertical: 6, borderRadius: 8,
+    borderWidth: 1.5, borderColor: SL.border, alignItems: 'center',
+    backgroundColor: 'rgba(74,158,191,0.06)',
+  },
+  nudgeText: { fontFamily: F.heading, fontSize: 15, color: SL.text, letterSpacing: 0.5 },
+  adjustSection: { fontFamily: F.body, fontSize: 13, color: SL.muted, letterSpacing: 3, marginTop: 4 },
+  adjustEmpty: { fontFamily: F.bodyMed, fontSize: 14, color: SL.muted, letterSpacing: 0.5 },
+  breakEditRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+    borderTopWidth: 1, borderTopColor: 'rgba(26,58,92,0.5)', paddingTop: 8,
+  },
+  breakEditText: { fontFamily: F.bodyMed, fontSize: 15, color: SL.gold, letterSpacing: 0.5, flex: 1 },
 });

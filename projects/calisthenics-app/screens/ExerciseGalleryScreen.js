@@ -217,6 +217,9 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
     const { data } = await supabase
       .from('classes')
       .select('id, name, order_index')
+      // Exercise-library targets follow the 'static' class ladder; other jobs
+      // (e.g. handstand) don't appear as gallery class filters.
+      .eq('job', 'static')
       .order('order_index');
     const rows = data ?? [];
     setClasses(rows);
@@ -570,6 +573,7 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
             {[
               { k: 'main',      l: 'MAIN QUEST' },
               { k: 'side',      l: 'SIDE QUEST' },
+              { k: 'handstand', l: 'HANDSTAND' },
               { k: 'accessory', l: 'ACCESSORIES' },
               { k: 'legs',      l: 'LEGS' },
             ].map(c => (

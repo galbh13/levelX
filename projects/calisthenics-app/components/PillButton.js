@@ -4,13 +4,14 @@ import { F } from '../constants/fonts';
 // Glowing "ice pill" button — the shared primary/secondary action used across the
 // player workout screens, matching the Gallery's BACK / + NEW pills.
 //   variant: 'outline' (tinted bg + colored text, default) | 'solid' (filled bg + dark text)
-//   tone:    accent | gold | green | danger | muted
+//   tone:    accent | gold | green | danger | jade | muted
 //   size:    sm | md | lg
 const TONE = {
   accent: '#4A9EBF',
   gold:   '#FFD700',
   green:  '#4CAF50',
   danger: '#FF4444',
+  jade:   '#1FD79A',
   muted:  '#4a6a8a',
 };
 const TINT = {
@@ -18,6 +19,7 @@ const TINT = {
   gold:   'rgba(255,215,0,0.10)',
   green:  'rgba(76,175,80,0.12)',
   danger: 'rgba(255,68,68,0.10)',
+  jade:   'rgba(31,215,154,0.12)',
   muted:  'rgba(74,106,138,0.10)',
 };
 const SIZE = {

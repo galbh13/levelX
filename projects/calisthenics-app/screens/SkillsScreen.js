@@ -9,11 +9,24 @@ import Svg, { Defs, LinearGradient, RadialGradient, Stop, Rect, Circle, Ellipse,
 import { supabase } from '../lib/supabase';
 import { computeLvlFromData, computeClassMaxFromData } from '../lib/computeLvl';
 import { evaluatePrestige, tier2SideChains, prestigeStars } from '../lib/prestige';
+import { DEFAULT_JOB } from '../lib/jobs';
+import { visibleQuests } from '../lib/hiddenQuests';
+import { withMirrorCompletions } from '../lib/mirrorQuests';
+import {
+  mergeQuestProgress, reconcileQuestProgress, subscribeQuestProgress, hasPendingQuestProgress,
+} from '../lib/questProgress';
+import { upgradeFor, isUpgradeChain, fetchUpgrades } from '../lib/questUpgrades';
 import { F } from '../constants/fonts';
 import { ShimmerText, ShimmerFill, ShimmerFrame, BLUE, GOLD } from '../components/Shimmer';
 import ScreenFrame from '../components/ScreenFrame';
+import { useTourTarget, useTourScroller } from '../lib/tourTargets';
 import { CARD_W } from '../constants/layout';
-import { hapticSuccess } from '../lib/haptics';
+
+// Skills runs WIDER than the shared player-card width: the quest rows are long
+// horizontal bars (title + progress + arrow) and read better with room to breathe.
+// Height is untouched - the frame still fills the screen.
+const SKILLS_CARD_W = Math.round(CARD_W * 1.5);   // 1200 -> 1800
+
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
@@ -27,6 +40,16 @@ const SL = {
   danger: '#FF4444',
   green:  '#4CAF50',
   gold:   '#FFD700',
+};
+
+// UPGRADE plating. Deliberately amber — one step warm of the ice-blue base card,
+// one step short of the pure gold reserved for MAXED OUT. An upgraded chain should
+// look promoted at a glance without pretending it's already finished.
+const UP = {
+  hot:  '#FFC46B',                 // the plating itself (rail, plate text, bevel)
+  text: '#FFE3B0',                 // title ink
+  dim:  'rgba(255,196,107,0.55)',  // frame
+  wash: 'rgba(255,196,107,0.06)',  // card fill
 };
 
 // Render the class rank as a Roman numeral (e.g. "2" → "II"). If the token is
@@ -129,7 +152,7 @@ function useInViewport() {
 // tile on any device. Trigger: if `play` is passed (or a CardVizContext is above
 // it), the gleam replays whenever that token changes; otherwise it plays once on
 // mount (legacy — the prestige checklist tiles).
-function GateGleam({ radius = 12, play }) {
+function GateGleam({ radius = 12, play, color = GOLD[3], peak = 0.5 }) {
   const ctxPlay   = useContext(CardVizContext);
   const token     = play !== undefined ? play : ctxPlay;
   const controlled = token !== undefined;
@@ -149,7 +172,7 @@ function GateGleam({ radius = 12, play }) {
 
   const GLEAM_W = 80;
   const translateX = p.interpolate({ inputRange: [0, 1], outputRange: [-GLEAM_W, (w || 320) + GLEAM_W] });
-  const opacity    = p.interpolate({ inputRange: [0, 0.12, 0.85, 1], outputRange: [0, 0.5, 0.5, 0] });
+  const opacity    = p.interpolate({ inputRange: [0, 0.12, 0.85, 1], outputRange: [0, peak, peak, 0] });
 
   return (
     <View
@@ -160,7 +183,7 @@ function GateGleam({ radius = 12, play }) {
       <Animated.View
         style={{
           position: 'absolute', top: -30, bottom: -30, width: GLEAM_W,
-          backgroundColor: GOLD[3], opacity,
+          backgroundColor: color, opacity,
           transform: [{ translateX }, { rotate: '20deg' }],
         }}
       />
@@ -272,37 +295,39 @@ function LvlNumber({ lvl, active, play = 1 }) {
   return <ShimmerText text={`LVL ${display}`} style={styles.lvlNumber} active={active} />;
 }
 
-// ─── Tier II lock (a barred GATE, chained shut) ───────────────────────────────
-// While any Tier I side-chain is still unfinished, Tier II is sealed behind an iron
-// GATE: forged vertical bars + top/bottom rails span the whole section, a steel
-// chain is wrapped around the centre bars, and a padlock locks it. Rendered in SVG
-// (react-native-svg) for crisp metallic gradients. The gate itself is rigid (it's
-// bolted shut) — only the heavy padlock hangs loose and swings with a gentle
-// spring (gust physics), and a metal glint sweeps across the bars. Pure overlay
-// (pointerEvents:none) — the cards beneath are separately dimmed + disabled.
+// ─── Tier II lock (one heavy chain, clasped by a padlock) ─────────────────────
+// While any Tier I side-chain is still unfinished, Tier II is sealed by a single
+// heavy chain: bolted to an anchor plate on each edge, it sags under its own
+// weight to a low point at the centre of the section, where a padlock clasps it
+// shut. One focal element and a lot of air. Rendered in SVG for real metallic
+// gradients. Motion stays quiet and physical: the seal fades in and the lock
+// settles from a small deflection, then keeps a faint irregular sway (gust
+// springs); an ice halo breathes behind the lock and a steel glint sweeps the
+// chain. Pure overlay (pointerEvents:none) — the cards beneath are separately
+// dimmed + disabled.
 
 const AG      = Animated.createAnimatedComponent(G);
 const ACircle = Animated.createAnimatedComponent(Circle);
 
-// Lay chain links around an ellipse (a "wrap" cinched around the gate bars). Each
-// link is tagged `back` (top arc, sits BEHIND the bars) or front (bottom arc, drawn
-// OVER the bars) so the wrap weaves through the gate instead of floating on it.
-function ellipseLinks(cx, cy, rx, ry, gap, phase = 0) {
-  const perim = Math.PI * (3 * (rx + ry) - Math.sqrt((3 * rx + ry) * (rx + 3 * ry))); // Ramanujan
-  const count = Math.max(12, Math.round(perim / gap));
-  const arr = [];
-  for (let i = 0; i < count; i++) {
-    const th = (2 * Math.PI * i) / count;
-    const y  = cy + ry * Math.sin(th);
-    arr.push({
-      x: cx + rx * Math.cos(th),
-      y,
-      angle: (Math.atan2(ry * Math.cos(th), -rx * Math.sin(th)) * 180) / Math.PI,
-      flat: (i + phase) % 2 === 0,
-      back: y < cy - 0.5,            // top half of the loop is behind the bars
-    });
+// Sample chain links along a quadratic bezier (the chain's sag curve): position +
+// tangent angle per link, alternating flat (face-on oval) / edge (foreshortened
+// interlocking link) so the run reads as a real chain.
+function bezierLinks(p0, ctrl, p2, gap, phase = 0) {
+  const at = t => ({
+    x: (1 - t) * (1 - t) * p0.x + 2 * (1 - t) * t * ctrl.x + t * t * p2.x,
+    y: (1 - t) * (1 - t) * p0.y + 2 * (1 - t) * t * ctrl.y + t * t * p2.y,
+  });
+  let len = 0, prev = at(0);
+  for (let i = 1; i <= 24; i++) { const p = at(i / 24); len += Math.hypot(p.x - prev.x, p.y - prev.y); prev = p; }
+  const count = Math.max(4, Math.round(len / gap));
+  const links = [];
+  for (let i = 0; i <= count; i++) {
+    const t = i / count, p = at(t);
+    const dx = 2 * (1 - t) * (ctrl.x - p0.x) + 2 * t * (p2.x - ctrl.x);
+    const dy = 2 * (1 - t) * (ctrl.y - p0.y) + 2 * t * (p2.y - ctrl.y);
+    links.push({ x: p.x, y: p.y, angle: (Math.atan2(dy, dx) * 180) / Math.PI, flat: (i + phase) % 2 === 0 });
   }
-  return arr;
+  return links;
 }
 
 // A single chain link as a beveled SVG ring: a dark under-stroke for depth + a
@@ -323,9 +348,10 @@ function ChainLink({ x, y, angle, flat, scale = 1 }) {
 function TierLock() {
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [reduced, setReduced] = useState(false);
-  const tilt  = useRef(new Animated.Value(0)).current;   // padlock micro-swing
-  const glow  = useRef(new Animated.Value(0)).current;   // lock halo breathe
-  const glint = useRef(new Animated.Value(0)).current;   // metal sheen sweep
+  const enter = useRef(new Animated.Value(0)).current;     // seal fade-in (every mount)
+  const tilt  = useRef(new Animated.Value(1.8)).current;   // padlock sway — starts deflected, settles
+  const glow  = useRef(new Animated.Value(0)).current;     // ice halo breathe
+  const glint = useRef(new Animated.Value(0)).current;     // steel sheen sweep
 
   // Respect reduced-motion — guarded for web where the API can be undefined.
   useEffect(() => {
@@ -338,27 +364,37 @@ function TierLock() {
     return () => { alive = false; };
   }, []);
 
+  // Entrance — plays on every mount, i.e. every time the section renders locked.
   useEffect(() => {
-    if (reduced) return;
+    const a = Animated.timing(enter, {
+      toValue: 1, duration: 450, easing: Easing.out(Easing.quad), useNativeDriver: true,
+    });
+    a.start();
+    return () => a.stop();
+  }, [enter]);
+
+  useEffect(() => {
+    if (reduced) { tilt.setValue(0); return; }
     let alive = true;
-    // The lock is cinched tight, so it only barely settles: a small spring to a fresh
-    // random target, a pause, repeat → a faint, irregular living tension on the chain.
-    const gust = () => {
+    // The lock hangs from a taut chain, so it never swings wide: it springs from
+    // its entrance deflection to rest, then to a fresh small random target, pause,
+    // repeat → a faint, irregular living tension.
+    const gust = (to) => {
       if (!alive) return;
       Animated.spring(tilt, {
-        toValue: Math.random() * 2 - 1, tension: 6, friction: 5, useNativeDriver: false,
+        toValue: to, tension: 5, friction: 4, useNativeDriver: false,
       }).start(({ finished }) => {
-        if (finished && alive) setTimeout(gust, 600 + Math.random() * 1600);
+        if (finished && alive) setTimeout(() => gust(Math.random() * 2 - 1), 900 + Math.random() * 1800);
       });
     };
-    gust();
+    gust(0);
     const g = Animated.loop(Animated.sequence([
-      Animated.timing(glow, { toValue: 1, duration: 1600, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
-      Animated.timing(glow, { toValue: 0, duration: 1600, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
+      Animated.timing(glow, { toValue: 1, duration: 1700, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
+      Animated.timing(glow, { toValue: 0, duration: 1700, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
     ]));
     const sweep = Animated.loop(Animated.sequence([
-      Animated.delay(2800),
-      Animated.timing(glint, { toValue: 1, duration: 1500, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      Animated.delay(3200),
+      Animated.timing(glint, { toValue: 1, duration: 1400, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
       Animated.timing(glint, { toValue: 0, duration: 0, useNativeDriver: true }),
     ]));
     g.start(); sweep.start();
@@ -367,37 +403,31 @@ function TierLock() {
 
   const { w, h } = size;
   const cx = w / 2;
+  const k  = h > 0 ? Math.min(1, Math.max(0.72, h / 230)) : 1;   // shrink the lock on short sections
+  const s  = 0.9 * k;                                            // chain link scale
 
-  // Gate geometry (all derived from the measured overlay box).
-  const barCount = Math.max(5, Math.round(w / 74));
-  const railT    = 12;                     // top rail y
-  const railB    = h - 26;                 // bottom rail y
+  // The chain: from a bolted plate on each edge, sagging to its low point at the
+  // centre. Two mirrored bezier runs meeting under the padlock's clasp.
+  const anchorY  = h * 0.24;
+  const dipY     = h * 0.38;
+  const linkGap  = 13 * s;
+  const leftRun  = bezierLinks({ x: 6, y: anchorY }, { x: cx * 0.52, y: dipY + 7 }, { x: cx - 3, y: dipY }, linkGap, 0);
+  const rightRun = bezierLinks({ x: cx + 3, y: dipY }, { x: w - cx * 0.52, y: dipY + 7 }, { x: w - 6, y: anchorY }, linkGap, 1);
 
-  // The two central bars the chain binds together.
-  const barXs   = Array.from({ length: barCount }, (_, i) => ((i + 0.5) * w) / barCount);
-  let   rightI  = barXs.findIndex(bx => bx > cx);
-  if (rightI < 1) rightI = Math.max(1, Math.round(barCount / 2));
-  const bR      = barXs[rightI];
-  const bL      = barXs[rightI - 1];
-  const wrapCx  = (bL + bR) / 2;
-  const wrapRx  = (bR - bL) / 2 + 17;      // encircle BOTH bars + grip
-  const wrapRy  = 9;
-
-  // Three wound turns of chain stacked into a tight coil around the two bars.
-  const coilTop = h * 0.40;
-  const turns   = [0, 13, 26].map((dy, k) => ({ cy: coilTop + dy, phase: k }));
-  const claspY  = coilTop + 26 + wrapRy;   // bottom of the coil — where the lock clasps
-
-  // Padlock, hanging from (and locking) the bottom of the coil.
-  const shackleTop = claspY + 8;
-  const bodyTop    = claspY + 26;
-  const bodyW = 56, bodyH = 50;
-  const bodyCx = wrapCx, bodyCy = bodyTop + bodyH / 2;
+  // Padlock, clasping the chain's low point.
+  const claspY     = dipY + 2;
+  const shR        = 15 * k;               // shackle radius
+  const shackleTop = claspY + 8 * k;
+  const bodyTop    = claspY + 26 * k;
+  const bodyW = 58 * k, bodyH = 52 * k;
+  const bodyCx = cx, bodyCy = bodyTop + bodyH / 2;
 
   // Animated pieces.
-  const swingDeg = tilt.interpolate({ inputRange: [-1, 1], outputRange: [-2.6, 2.6] }); // taut micro-swing
-  const haloOp   = glow.interpolate({ inputRange: [0, 1], outputRange: [0.14, 0.4] });
+  const swingDeg = tilt.interpolate({ inputRange: [-1, 1], outputRange: [-2.4, 2.4] }); // taut micro-sway
+  const haloOp   = glow.interpolate({ inputRange: [0, 1], outputRange: [0.10, 0.32] });
   const glintX   = glint.interpolate({ inputRange: [0, 1], outputRange: [-120, (w || 320) + 120] });
+
+  const plateW = 14, plateH = 26 * k;
 
   return (
     <View
@@ -408,25 +438,9 @@ function TierLock() {
       <View style={styles.lockScrim} />
 
       {w > 0 && h > 0 && (
-        <>
+        <Animated.View style={[StyleSheet.absoluteFill, { opacity: enter }]}>
           <Svg width={w} height={h} style={StyleSheet.absoluteFill}>
             <Defs>
-              {/* Cylindrical bar: tight specular over brushed steel → a round lit bar */}
-              <LinearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
-                <Stop offset="0"    stopColor="#10181f" />
-                <Stop offset="0.16" stopColor="#3a4d60" />
-                <Stop offset="0.40" stopColor="#9fb4c7" />
-                <Stop offset="0.49" stopColor="#eef6fd" />
-                <Stop offset="0.58" stopColor="#90a6ba" />
-                <Stop offset="0.84" stopColor="#2c3c4c" />
-                <Stop offset="1"    stopColor="#0c131a" />
-              </LinearGradient>
-              {/* Rail: lit from above */}
-              <LinearGradient id="rail" x1="0" y1="0" x2="0" y2="1">
-                <Stop offset="0"    stopColor="#dceaf6" />
-                <Stop offset="0.5"  stopColor="#7c91a6" />
-                <Stop offset="1"    stopColor="#19232e" />
-              </LinearGradient>
               {/* Chain + shackle metal */}
               <LinearGradient id="chainMetal" x1="0" y1="0" x2="0.3" y2="1">
                 <Stop offset="0"    stopColor="#f1f7fd" />
@@ -440,102 +454,76 @@ function TierLock() {
                 <Stop offset="0.55" stopColor="#566f86" />
                 <Stop offset="1"    stopColor="#1e2c3a" />
               </LinearGradient>
-              {/* Vignette to focus the lock */}
-              <RadialGradient id="focus" cx="50%" cy="42%" r="55%">
-                <Stop offset="0"   stopColor="#000000" stopOpacity="0" />
-                <Stop offset="1"   stopColor="#020509" stopOpacity="0.45" />
+              {/* Vignette to focus the seal */}
+              <RadialGradient id="focus" cx="50%" cy="42%" r="60%">
+                <Stop offset="0" stopColor="#000000" stopOpacity="0" />
+                <Stop offset="1" stopColor="#020509" stopOpacity="0.4" />
               </RadialGradient>
             </Defs>
 
-            {/* ── BACK of the chain coil (top arcs) — drawn first so the bars cover it,
-                   selling the over/under weave around the two centre bars. ── */}
-            {turns.map(t => (
-              <React.Fragment key={`bk${t.cy}`}>
-                {ellipseLinks(wrapCx, t.cy, wrapRx, wrapRy, 11, t.phase)
-                  .filter(l => l.back)
-                  .map((l, i) => <ChainLink key={i} {...l} />)}
-              </React.Fragment>
-            ))}
-
-            {/* ── The gate ── vertical bars + two rails + rivets */}
-            {barXs.map((bx, i) => (
-              <Rect key={`bar${i}`} x={bx - 7} y={0} width={14} height={h} rx={7} fill="url(#bar)" />
-            ))}
-            <Rect x={0} y={railT} width={w} height={15} rx={7.5} fill="url(#rail)" />
-            <Rect x={0} y={railB} width={w} height={15} rx={7.5} fill="url(#rail)" />
-            {barXs.map((bx, i) => (
-              <React.Fragment key={`riv${i}`}>
-                <Circle cx={bx} cy={railT + 7.5} r={3} fill="#0e151c" />
-                <Circle cx={bx - 0.8} cy={railT + 6.7} r={1} fill="#9fb4c7" />
-                <Circle cx={bx} cy={railB + 7.5} r={3} fill="#0e151c" />
-                <Circle cx={bx - 0.8} cy={railB + 6.7} r={1} fill="#9fb4c7" />
-              </React.Fragment>
-            ))}
-
-            {/* Vignette — darkens the gate toward the edges to focus the centre.
-                Drawn over the bars but UNDER the front chain + lock, so the tie stays crisp. */}
             <Rect x={0} y={0} width={w} height={h} fill="url(#focus)" />
 
-            {/* Soft shadow the coil casts onto the bars */}
-            <Rect
-              x={wrapCx - wrapRx - 4} y={coilTop - wrapRy - 3}
-              width={(wrapRx + 4) * 2} height={26 + wrapRy * 2 + 6} rx={14}
-              fill="#05080d" opacity={0.38}
-            />
-
-            {/* ── FRONT of the chain coil (bottom arcs) — drawn over the bars ── */}
-            {turns.map(t => (
-              <React.Fragment key={`fr${t.cy}`}>
-                {ellipseLinks(wrapCx, t.cy, wrapRx, wrapRy, 11, t.phase)
-                  .filter(l => !l.back)
-                  .map((l, i) => <ChainLink key={i} {...l} />)}
+            {/* Bolted anchor plates the chain hangs from */}
+            {[{ x: -4 }, { x: w - plateW + 4 }].map(({ x }, i) => (
+              <React.Fragment key={`pl${i}`}>
+                <Rect x={x} y={anchorY - plateH / 2} width={plateW} height={plateH} rx={4} fill="#101a24" />
+                <Rect x={x + 1.5} y={anchorY - plateH / 2 + 1.5} width={plateW - 3} height={plateH - 3} rx={3} fill="url(#lockBody)" />
+                <Circle cx={x + plateW / 2} cy={anchorY - plateH / 2 + 5.5} r={1.8} fill="#0c141d" />
+                <Circle cx={x + plateW / 2} cy={anchorY + plateH / 2 - 5.5} r={1.8} fill="#0c141d" />
               </React.Fragment>
             ))}
 
-            {/* Soft glow behind the padlock */}
-            <ACircle cx={bodyCx} cy={bodyCy} r={56} fill={SL.accent} opacity={haloOp} />
+            {/* Soft shadow the sagging chain casts on the cards below */}
+            <Ellipse cx={cx} cy={dipY + 12 * k} rx={w * 0.3} ry={5} fill="#04070b" opacity={0.22} />
 
-            {/* ── Padlock — clasps the bottom of the coil; only a taut micro-swing ── */}
-            <AG rotation={swingDeg} originX={wrapCx} originY={claspY}>
+            {/* ── The chain — two mirrored runs meeting under the clasp ── */}
+            {leftRun.map((l, i)  => <ChainLink key={`cl${i}`} {...l} scale={s} />)}
+            {rightRun.map((l, i) => <ChainLink key={`cr${i}`} {...l} scale={s} />)}
+
+            {/* Breathing ice halo behind the padlock */}
+            <ACircle cx={bodyCx} cy={bodyCy} r={56 * k} fill={SL.accent} opacity={haloOp} />
+
+            {/* ── Padlock — clasps the chain's low point; only a taut micro-sway ── */}
+            <AG rotation={swingDeg} originX={cx} originY={claspY}>
               {/* lock shadow on the cards below */}
-              <Ellipse cx={bodyCx} cy={bodyTop + bodyH + 4} rx={bodyW * 0.42} ry={5} fill="#04070b" opacity={0.45} />
-              {/* the link the shackle locks THROUGH (the actual tie) */}
-              <ChainLink x={wrapCx} y={claspY + 4} angle={90} flat />
+              <Ellipse cx={bodyCx} cy={bodyTop + bodyH + 5} rx={bodyW * 0.42} ry={4.5} fill="#04070b" opacity={0.45} />
+              {/* the link the shackle locks THROUGH (the actual clasp) */}
+              <ChainLink x={cx} y={claspY + 3} angle={90} flat scale={s} />
               {/* shackle (U) — dark under-stroke then metal */}
               <Path
-                d={`M ${wrapCx - 15} ${bodyTop + 3} L ${wrapCx - 15} ${shackleTop} A 15 15 0 0 1 ${wrapCx + 15} ${shackleTop} L ${wrapCx + 15} ${bodyTop + 3}`}
-                stroke="#15212d" strokeWidth={11} fill="none" strokeLinecap="round"
+                d={`M ${cx - shR} ${bodyTop + 3} L ${cx - shR} ${shackleTop} A ${shR} ${shR} 0 0 1 ${cx + shR} ${shackleTop} L ${cx + shR} ${bodyTop + 3}`}
+                stroke="#15212d" strokeWidth={11 * k} fill="none" strokeLinecap="round"
               />
               <Path
-                d={`M ${wrapCx - 15} ${bodyTop + 3} L ${wrapCx - 15} ${shackleTop} A 15 15 0 0 1 ${wrapCx + 15} ${shackleTop} L ${wrapCx + 15} ${bodyTop + 3}`}
-                stroke="url(#chainMetal)" strokeWidth={7.5} fill="none" strokeLinecap="round"
+                d={`M ${cx - shR} ${bodyTop + 3} L ${cx - shR} ${shackleTop} A ${shR} ${shR} 0 0 1 ${cx + shR} ${shackleTop} L ${cx + shR} ${bodyTop + 3}`}
+                stroke="url(#chainMetal)" strokeWidth={7.5 * k} fill="none" strokeLinecap="round"
               />
               {/* body */}
-              <Rect x={bodyCx - bodyW / 2} y={bodyTop} width={bodyW} height={bodyH} rx={11} fill="#101a24" />
-              <Rect x={bodyCx - bodyW / 2 + 1.5} y={bodyTop + 1.5} width={bodyW - 3} height={bodyH - 3} rx={9.5} fill="url(#lockBody)" />
+              <Rect x={bodyCx - bodyW / 2} y={bodyTop} width={bodyW} height={bodyH} rx={11 * k} fill="#101a24" />
+              <Rect x={bodyCx - bodyW / 2 + 1.5} y={bodyTop + 1.5} width={bodyW - 3} height={bodyH - 3} rx={9.5 * k} fill="url(#lockBody)" />
               {/* left catch-light + right shade rolloff */}
-              <Rect x={bodyCx - bodyW / 2 + 4} y={bodyTop + 5} width={5} height={bodyH - 10} rx={2.5} fill="rgba(238,246,253,0.30)" />
-              <Rect x={bodyCx + bodyW / 2 - 8} y={bodyTop + 5} width={4} height={bodyH - 10} rx={2} fill="rgba(6,12,20,0.30)" />
+              <Rect x={bodyCx - bodyW / 2 + 4 * k} y={bodyTop + 5 * k} width={5 * k} height={bodyH - 10 * k} rx={2.5 * k} fill="rgba(238,246,253,0.30)" />
+              <Rect x={bodyCx + bodyW / 2 - 8 * k} y={bodyTop + 5 * k} width={4 * k} height={bodyH - 10 * k} rx={2 * k} fill="rgba(6,12,20,0.30)" />
               {/* corner screws */}
               {[[-1, -1], [1, -1], [-1, 1], [1, 1]].map(([sx, sy], i) => (
-                <Circle key={`scr${i}`} cx={bodyCx + sx * (bodyW / 2 - 7)} cy={bodyCy + sy * (bodyH / 2 - 7)} r={1.7} fill="#0c141d" />
+                <Circle key={`scr${i}`} cx={bodyCx + sx * (bodyW / 2 - 7 * k)} cy={bodyCy + sy * (bodyH / 2 - 7 * k)} r={1.7} fill="#0c141d" />
               ))}
               {/* keyhole — round eye + tapered slot */}
-              <Circle cx={bodyCx} cy={bodyCy + 1} r={5} fill="#070d14" />
-              <Path d={`M ${bodyCx - 2.4} ${bodyCy + 1} L ${bodyCx + 2.4} ${bodyCy + 1} L ${bodyCx + 1.3} ${bodyCy + 13} L ${bodyCx - 1.3} ${bodyCy + 13} Z`} fill="#070d14" />
-              <Circle cx={bodyCx - 1.4} cy={bodyCy - 0.6} r={1.4} fill="rgba(150,170,190,0.5)" />
+              <Circle cx={bodyCx} cy={bodyCy + 1} r={5 * k} fill="#070d14" />
+              <Path d={`M ${bodyCx - 2.4 * k} ${bodyCy + 1} L ${bodyCx + 2.4 * k} ${bodyCy + 1} L ${bodyCx + 1.3 * k} ${bodyCy + 13 * k} L ${bodyCx - 1.3 * k} ${bodyCy + 13 * k} Z`} fill="#070d14" />
+              <Circle cx={bodyCx - 1.4 * k} cy={bodyCy - 0.6} r={1.4} fill="rgba(150,170,190,0.5)" />
             </AG>
           </Svg>
 
-          {/* A metal glint sweeping across the bars — keeps the gate feeling alive. */}
+          {/* A steel glint sweeping across the chain — keeps the seal feeling alive. */}
           <View style={styles.glintClip} pointerEvents="none">
             <Animated.View style={[styles.glint, { transform: [{ translateX: glintX }, { rotate: '18deg' }] }]} />
           </View>
 
-          <Text style={[styles.lockLabel, { top: Math.min(bodyTop + bodyH + 12, h - 26), width: w }]}>
+          <Text style={[styles.lockLabel, { top: Math.min(bodyTop + bodyH + 14, h - 26), width: w }]}>
             GATE LOCKED · CLEAR TIER I
           </Text>
-        </>
+        </Animated.View>
       )}
     </View>
   );
@@ -547,7 +535,137 @@ function TierLock() {
 // the flat TouchableOpacity lacked. Children (incl. the absolute gold frame/gleam on
 // maxed cards) ride inside untouched and get the same `shown` flag via CardVizContext
 // so their shine fires with the card, once. `disabled` (sealed Tier II) kills press.
-function QuestCard({ onPress, style, children, delay = 0, disabled = false }) {
+// `celebrate` bumps the token the card hands its children, which replays the maxed
+// gold gleam without re-running the card's own rise-in — used when the player walks
+// back in from the tree they just cleared.
+// ─── Upgraded card plating ────────────────────────────────────────────────────
+// The whole card rectangle of an UPGRADED chain, drawn as one machined plate
+// instead of a flat CSS border: a face lit from above, a frame stroke that is
+// bright along the top-left and falls off toward the bottom-right, an inner
+// bevel wall (white arc along the top edge, black arc under the bottom edge)
+// and the left accent rail rendered as a rounded metal bar with its own sheen.
+// Same light source as the ArrowKey below, so card and button read as one
+// object. It measures itself and covers the card's ENTIRE border box — rail and
+// all — so nothing is left as a flat line.
+function CardPlate({ gold = false, radius = 12, rail = 7 }) {
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  const uid = useRef(`cp${Math.random().toString(36).slice(2, 8)}`).current;
+  const ink = gold ? '#FFD700' : UP.hot;
+  const { w, h } = size;
+  const R  = radius - 0.75;
+  return (
+    <View
+      pointerEvents="none"
+      style={[styles.cardPlate, { left: -rail, top: -1.5, right: -1.5, bottom: -1.5 }]}
+      onLayout={e => {
+        const { width, height } = e.nativeEvent.layout;
+        if (Math.abs(width - size.w) > 0.5 || Math.abs(height - size.h) > 0.5) {
+          setSize({ w: width, h: height });
+        }
+      }}
+    >
+      {w > 0 && h > 0 && (
+        <Svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+          <Defs>
+            {/* Face: a wash of light off the top edge, dark at the bottom lip. */}
+            <LinearGradient id={`${uid}f`} x1="0" y1="0" x2="0.15" y2="1">
+              <Stop offset="0"    stopColor={ink}     stopOpacity={gold ? 0.14 : 0.11} />
+              <Stop offset="0.42" stopColor={ink}     stopOpacity="0.035" />
+              <Stop offset="1"    stopColor="#000000" stopOpacity="0.30" />
+            </LinearGradient>
+            {/* Frame: lit corner to shaded corner. */}
+            <LinearGradient id={`${uid}s`} x1="0" y1="0" x2="0.35" y2="1">
+              <Stop offset="0" stopColor={ink} stopOpacity={gold ? 0.95 : 0.85} />
+              <Stop offset="1" stopColor={ink} stopOpacity="0.35" />
+            </LinearGradient>
+            {/* Rail: a rounded bar — hot crest, dark underside. */}
+            <LinearGradient id={`${uid}r`} x1="0" y1="0" x2="1" y2="0.35">
+              <Stop offset="0"    stopColor="#000000" stopOpacity="0.35" />
+              <Stop offset="0.35" stopColor={ink}     stopOpacity="1" />
+              <Stop offset="0.75" stopColor={ink}     stopOpacity="0.85" />
+              <Stop offset="1"    stopColor="#000000" stopOpacity="0.30" />
+            </LinearGradient>
+          </Defs>
+
+          {/* Plate body + frame. */}
+          <Rect x="0.75" y="0.75" width={w - 1.5} height={h - 1.5} rx={radius}
+                fill={`url(#${uid}f)`} stroke={`url(#${uid}s)`} strokeWidth="1.5" />
+
+          {/* Bevel wall, 3px in: bright over the top, black under the bottom. */}
+          <Path d={`M3.5 ${radius + 3} Q3.5 3.5 ${radius + 3} 3.5 H${w - radius - 3} Q${w - 3.5} 3.5 ${w - 3.5} ${radius + 3}`}
+                fill="none" stroke="#FFFFFF" strokeOpacity="0.16" strokeWidth="1" />
+          <Path d={`M3.5 ${h - radius - 3} Q3.5 ${h - 3.5} ${radius + 3} ${h - 3.5} H${w - radius - 3} Q${w - 3.5} ${h - 3.5} ${w - 3.5} ${h - radius - 3}`}
+                fill="none" stroke="#000000" strokeOpacity="0.50" strokeWidth="1" />
+
+          {/* Left accent rail, left corners rounded to sit flush in the frame. */}
+          <Path d={`M${rail} 0.75 H${0.75 + R} A${R} ${R} 0 0 0 0.75 ${0.75 + R} V${h - 0.75 - R} A${R} ${R} 0 0 0 ${0.75 + R} ${h - 0.75} H${rail} Z`}
+                fill={`url(#${uid}r)`} />
+          {/* The rail's crest highlight — a hairline of light down its middle. */}
+          <Rect x={rail * 0.42} y={radius * 0.7} width="1" height={Math.max(h - radius * 1.4, 0)}
+                rx="0.5" fill="#FFFFFF" fillOpacity="0.30" />
+          {/* Seam between rail and face: the rail is a separate part, not paint. */}
+          <Rect x={rail} y="1.5" width="1" height={h - 3} fill="#000000" fillOpacity="0.45" />
+        </Svg>
+      )}
+    </View>
+  );
+}
+
+// ─── Upgraded enter-node: the arrow key ───────────────────────────────────────
+// The enter affordance of an UPGRADED chain. The plain chain keeps its round
+// node + bare chevron; the upgrade gets a machined key cap, drawn in SVG so it
+// can carry the things stacked <View>s can't: a lit face that falls off toward
+// the bottom, an inner bevel that is bright along the top edge and dark along
+// the bottom, and a real arrow with rounded caps. Amber normally, gold once the
+// pair is MAXED — the SHAPE is what marks it as upgraded, at every state.
+const KEY_W = 68, KEY_H = 32;
+function ArrowKey({ gold = false }) {
+  // Gradient ids must be unique per mounted key — two cards sharing an id
+  // collide on web and the second one renders with the first one's fill.
+  const uid = useRef(`ak${Math.random().toString(36).slice(2, 8)}`).current;
+  const ink = gold ? '#FFD700' : UP.hot;
+  return (
+    <View style={[styles.arrowKeyWrap, gold && styles.arrowKeyWrapGold]}>
+      <Svg width={KEY_W} height={KEY_H} viewBox={`0 0 ${KEY_W} ${KEY_H}`}>
+        <Defs>
+          {/* Face: lit from above, falling into shadow at the bottom lip. */}
+          <LinearGradient id={`${uid}f`} x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0"    stopColor={ink} stopOpacity={gold ? 0.30 : 0.26} />
+            <Stop offset="0.45" stopColor={ink} stopOpacity={0.11} />
+            <Stop offset="1"    stopColor="#000000" stopOpacity="0.34" />
+          </LinearGradient>
+          {/* Frame: brighter along the top-left, dimmer where the light leaves. */}
+          <LinearGradient id={`${uid}s`} x1="0" y1="0" x2="0.4" y2="1">
+            <Stop offset="0" stopColor={ink} stopOpacity="0.95" />
+            <Stop offset="1" stopColor={ink} stopOpacity="0.45" />
+          </LinearGradient>
+        </Defs>
+
+        {/* Cap body. */}
+        <Rect x="1" y="1" width={KEY_W - 2} height={KEY_H - 2} rx="7"
+              fill={`url(#${uid}f)`} stroke={`url(#${uid}s)`} strokeWidth="1.5" />
+        {/* Inner bevel — the wall between the frame and the face. Two arcs, not
+            one ring: bright on the top edge, dark under the bottom edge. */}
+        <Path d="M4.5 11 Q4.5 4.5 11 4.5 H57 Q63.5 4.5 63.5 11"
+              fill="none" stroke="#FFFFFF" strokeOpacity="0.22" strokeWidth="1" />
+        <Path d="M4.5 21 Q4.5 27.5 11 27.5 H57 Q63.5 27.5 63.5 21"
+              fill="none" stroke="#000000" strokeOpacity="0.55" strokeWidth="1" />
+        {/* Specular streak across the top third of the face. */}
+        <Rect x="9" y="6" width={KEY_W - 18} height="1.5" rx="0.75"
+              fill="#FFFFFF" fillOpacity="0.16" />
+
+        {/* The arrow: one shaft, one head, rounded ends. */}
+        <Path d={`M20 ${KEY_H / 2} H45`}
+              stroke={ink} strokeWidth="2.2" strokeLinecap="round" />
+        <Path d={`M39.5 ${KEY_H / 2 - 5.5} L45.5 ${KEY_H / 2} L39.5 ${KEY_H / 2 + 5.5}`}
+              fill="none" stroke={ink} strokeWidth="2.4"
+              strokeLinecap="round" strokeLinejoin="round" />
+      </Svg>
+    </View>
+  );
+}
+
+function QuestCard({ onPress, style, children, delay = 0, disabled = false, celebrate = 0 }) {
   const [vpRef, shown] = useInViewport();
   const rise  = useRef(new Animated.Value(0)).current;
   const press = useRef(new Animated.Value(0)).current;
@@ -572,7 +690,7 @@ function QuestCard({ onPress, style, children, delay = 0, disabled = false }) {
 
   return (
     <View ref={vpRef} collapsable={false}>
-      <CardVizContext.Provider value={shown}>
+      <CardVizContext.Provider value={shown > 0 ? shown + celebrate : 0}>
         <Animated.View style={{ opacity: rise, transform: [{ translateY }, { scale }] }}>
           <TouchableOpacity
             activeOpacity={0.9}
@@ -644,10 +762,26 @@ export default function SkillsScreen({ navigation, route }) {
   // THAT player (class / level / prestige / quests). With no param it falls back
   // to the signed-in user — the player's own Skills tab, unchanged.
   const overrideStudentId = route?.params?.studentId ?? null;
+  // Class movement is COACH-CONTROLLED: only the admin acting as coach (opened
+  // with a `studentId` param) may change a player's class, and that Change Class
+  // control is also how a prestige is granted — there is no separate prestige
+  // action. Everyone else's Skills tab is read-only for class: the gold
+  // "PRESTIGE AVAILABLE" banner is a status announcement, not a button.
+  const isCoachView = overrideStudentId !== null;
+  // Elements the guided tour measures + points its arrow at.
+  const tourClassRef    = useTourTarget('skills.class');
+  const tourQuestsRef   = useTourTarget('skills.quests');
+  const tourPrestigeRef = useTourTarget('skills.prestige');
+  // The tour circles just the MAIN QUESTS / side (TIER I) section LABELS.
+  const tourMainLabelRef = useTourTarget('skills.mainlabel');
+  const tourSideLabelRef = useTourTarget('skills.sidelabel');
   const [profile,     setProfile]     = useState(null);
   const [classData,   setClassData]   = useState(null);
   const [quests,      setQuests]      = useState([]);
   const [completions, setCompletions] = useState(new Set());
+  // Base chains this player has UPGRADED (lib/questUpgrades.js). An upgraded
+  // chain's card shows the upgrade's name and progress in its place.
+  const [upgrades,    setUpgrades]    = useState(new Set());
   const [loading,     setLoading]     = useState(true);
   // This tab is pre-mounted at app start (swipe pager, lazy:false) and its whole
   // body stays mounted from then on. That's DELIBERATE for swipe smoothness: the
@@ -667,12 +801,27 @@ export default function SkillsScreen({ navigation, route }) {
 
   // Self-service class management
   const [userId,      setUserId]      = useState(null);
+  // Same value as `userId`, readable from the focus effect without making it a
+  // dependency (re-running it on every id change would refetch for nothing).
+  const userIdRef = useRef(null);
   const [allClasses,  setAllClasses]  = useState([]);
   const [classListOpen, setClassListOpen] = useState(false);
   const [assigning,   setAssigning]   = useState(false);
-  const [showPrestige, setShowPrestige] = useState(false);
   // Name of the class just ascended into → shows the full-screen gold ceremony.
   const [ceremony,    setCeremony]    = useState(null);
+
+  // ── Instant progress, no round-trip ─────────────────────────────────────────
+  // The tree commits a completion and publishes it (lib/questProgress). This
+  // screen is still mounted under it, so waking on that publish means the card
+  // has ALREADY re-rendered maxed by the time the back gesture starts — the
+  // focus refetch that lands a beat later merely agrees.
+  const [, setProgressTick] = useState(0);
+  useEffect(() => subscribeQuestProgress(() => setProgressTick(t => t + 1)), []);
+  // The chain whose tree was last opened from here + a token that replays that
+  // one card's gold gleam on the way back, so the celebration is SEEN on arrival
+  // rather than fired off-screen the moment the node was tapped.
+  const openedChainRef = useRef(null);
+  const [arrivalGleam, setArrivalGleam] = useState(0);
 
   const fetchData = useCallback(async () => {
     try {
@@ -680,11 +829,12 @@ export default function SkillsScreen({ navigation, route }) {
       if (!user) return;
       const targetId = overrideStudentId ?? user.id;
       setUserId(targetId);
+      userIdRef.current = targetId;
 
       const [{ data: profileData }, { data: classesData }] = await Promise.all([
         supabase
           .from('profiles')
-          .select('full_name, class_id, prestige_count')
+          .select('full_name, class_id, prestige_count, job')
           .eq('id', targetId)
           .single(),
         supabase
@@ -695,7 +845,10 @@ export default function SkillsScreen({ navigation, route }) {
 
       if (!profileData) return;
       setProfile(profileData);
-      setAllClasses(classesData ?? []);
+      // Only the player's OWN job's classes — a job is a self-contained ladder,
+      // so the class picker and the per-job class count never mix jobs.
+      const job = profileData.job ?? DEFAULT_JOB;
+      setAllClasses((classesData ?? []).filter(c => (c.job ?? 'static') === job));
 
       if (!profileData.class_id) { setLoading(false); return; }
 
@@ -720,7 +873,12 @@ export default function SkillsScreen({ navigation, route }) {
 
       setClassData(classRes.data ?? null);
       setQuests(questsRes.data ?? []);
-      setCompletions(new Set((completionsRes.data ?? []).map(c => c.quest_id)));
+      // Lay any just-confirmed toggles from the tree over the fetched rows (and
+      // retire the ones this fetch already reflects) — a read that raced the
+      // player's own write must never walk a cleared chain back to un-maxed.
+      setCompletions(reconcileQuestProgress(
+        targetId, new Set((completionsRes.data ?? []).map(c => c.quest_id))));
+      setUpgrades(await fetchUpgrades(supabase, targetId, profileData.class_id));
     } catch (e) {
       console.error('[SkillsScreen] fetchData:', e);
     }
@@ -762,6 +920,11 @@ export default function SkillsScreen({ navigation, route }) {
   useFocusEffect(useCallback(() => {
     if (loadedRef.current) fetchData();
     startIntro();
+    // Came back carrying a change the server hasn't echoed yet → replay the shine
+    // on the card that changed, now that it's actually on screen.
+    if (openedChainRef.current && hasPendingQuestProgress(userIdRef.current)) {
+      setArrivalGleam(n => n + 1);
+    }
   }, [fetchData, startIntro]));
 
   // ── Scroll-into-view plumbing for the quest cards (see ScrollVizContext) ──────
@@ -792,6 +955,22 @@ export default function SkillsScreen({ navigation, route }) {
     notifyViz();
   }, [notifyViz]);
 
+  // ── Guided tour: let it scroll this list ────────────────────────────────────
+  // Most quest sections live BELOW the fold, so the tour has to bring a step's
+  // element into view before highlighting it — otherwise its arrow points at empty
+  // space (the SIDE QUESTS step did exactly that). We hand the tour the scroll
+  // container: a measurable box, scrollTo, and the live offset/viewport this screen
+  // already tracks for the card reveals.
+  const tourScrollRef = useRef(null);
+  const tourBoxRef    = useRef(null);
+  const tourScroller = useMemo(() => ({
+    box: tourBoxRef,
+    scrollTo: (y, animated = true) => tourScrollRef.current?.scrollTo({ y, animated }),
+    getOffset: () => viewportRef.current.scrollY,
+    getViewportH: () => viewportRef.current.viewportH,
+  }), []);
+  useTourScroller('skills', tourScroller);
+
   // ── Self-service: assign own class ──────────────────────────────────────────
 
   async function handleAssignClass(cls) {
@@ -808,48 +987,11 @@ export default function SkillsScreen({ navigation, route }) {
     fetchData();
   }
 
-  // ── Self-service: prestige (advance to next class) ──────────────────────────
-  // Quest completions are intentionally preserved across prestige so computed
-  // per-class LVL auto-restores if the player ever returns to a class.
-
-  async function handlePrestige() {
-    if (!userId) return;
-    try {
-      const currentClass = allClasses.find(c => c.id === profile?.class_id);
-      const nextClass    = allClasses.find(c => c.order_index === (currentClass?.order_index ?? 0) + 1);
-
-      // Already at the final class — there's nothing to advance into, so don't
-      // touch anything (this is what used to inflate the counter past the class count).
-      if (!nextClass) {
-        alert('You are already at the highest class.');
-        return;
-      }
-
-      const { error } = await supabase
-        .from('profiles')
-        .update({
-          prestige_count: (profile?.prestige_count ?? 0) + 1, // legacy history; stars derive from class
-          class_id:       nextClass.id,
-        })
-        .eq('id', userId);
-      if (error) throw error;
-
-      // The class-up moment: success thump + full-screen gold ceremony while the
-      // screen reloads the new class underneath.
-      hapticSuccess();
-      setCeremony(nextClass.name);
-      setLoading(true);
-      fetchData();
-    } catch (e) {
-      console.error('[SkillsScreen] prestige:', e);
-    }
-  }
-
   // Framed spinner while the preload is still in flight (first load only; later
   // focus refetches are silent so this never shows again).
   if (loading) {
     return (
-      <ScreenFrame fill holoEntry={false} maxWidth={CARD_W}>
+      <ScreenFrame fill holoEntry={false} maxWidth={SKILLS_CARD_W}>
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
           <ActivityIndicator size="large" color={SL.accent} />
         </View>
@@ -859,7 +1001,19 @@ export default function SkillsScreen({ navigation, route }) {
     );
   }
 
-  const lvl        = computeLvlFromData(quests, completions);
+  // A mirrored requirement (lib/mirrorQuests.js) has no completion row of its
+  // own — it counts as done when the quest it mirrors is done. Everything that
+  // asks "is this node complete?" uses this set, so the chain counters and the
+  // tree can't disagree. LVL is deliberately NOT computed from it: a mirror node
+  // pays no LVL (its source already did).
+  // Focus refetches are async, so on the way back from a tree the state here is
+  // still one round-trip old. The overlay (lib/questProgress) carries the toggles
+  // the tree already committed, so a chain the player just cleared renders MAXED
+  // OUT on the very first frame instead of flipping gold a beat later.
+  const rawDone    = mergeQuestProgress(userId, completions);
+  const doneIds    = withMirrorCompletions(quests, rawDone);
+
+  const lvl        = computeLvlFromData(quests, rawDone);
   // Per-class scaling: max is the sum of every quest reward; the prestige line is
   // a configurable column (falls back to 80 for classes that predate it).
   const maxLvl     = computeClassMaxFromData(quests);
@@ -871,9 +1025,10 @@ export default function SkillsScreen({ navigation, route }) {
   // 1 Tier II skill), evaluated declaratively per class. `prestigeReady.ok`
   // replaces the old `lvl >= prestigeAt` check everywhere below.
   const prestigeReady = evaluatePrestige({
+    job:          profile?.job ?? DEFAULT_JOB,
     orderIndex:   classData?.order_index ?? 0,
     quests,
-    completedIds: completions,
+    completedIds: doneIds,
     lvl,
     prestigeAt,
   });
@@ -889,9 +1044,12 @@ export default function SkillsScreen({ navigation, route }) {
   const mainChains = [...new Set(
     quests.filter(q => q.quest_type === 'main').map(q => q.chain).filter(Boolean)
   )];
+  // An UPGRADE chain is not a side quest, even though its rows are seeded as one
+  // (lib/questUpgrades.js). It only ever appears as the upgraded face of the main
+  // chain it belongs to, so it's stripped out of the side list entirely.
   const sideChains = [...new Set(
     quests.filter(q => q.quest_type === 'side').map(q => q.chain).filter(Boolean)
-  )];
+  )].filter(c => !isUpgradeChain(c));
 
   // Classify side-quest chains by tier (shared rule with lib/prestige): a chain
   // is Tier 2 when any of its quests is gated by a prerequisite in a DIFFERENT
@@ -900,9 +1058,13 @@ export default function SkillsScreen({ navigation, route }) {
   const tier1SideChains = sideChains.filter(c => !tier2Chains.has(c));
   const tier2SideCh     = sideChains.filter(c =>  tier2Chains.has(c));
 
+  // Hidden challenges are filtered out of the counter until the player unlocks
+  // them — a chain reading "8/9 unlocked" with nothing visible in the tree would
+  // give the secret away (same rule the tree uses: lib/hiddenQuests.js).
   function chainStats(chain, questType) {
-    const chainQuests = quests.filter(q => q.chain === chain && q.quest_type === questType);
-    const completed   = chainQuests.filter(q => completions.has(q.id));
+    const chainQuests = visibleQuests(quests, doneIds)
+      .filter(q => q.chain === chain && q.quest_type === questType);
+    const completed   = chainQuests.filter(q => doneIds.has(q.id));
     return {
       total:     chainQuests.length,
       completed: completed.length,
@@ -911,10 +1073,12 @@ export default function SkillsScreen({ navigation, route }) {
   }
 
   function openTree(chain, questType) {
+    openedChainRef.current = chain;
     navigation.navigate('QuestTree', {
       classId:   profile?.class_id,
       chain,
       questType,
+      job:       profile?.job ?? DEFAULT_JOB,
       studentId: overrideStudentId ?? undefined,
     });
   }
@@ -930,45 +1094,87 @@ export default function SkillsScreen({ navigation, route }) {
   });
   const tier2Locked = tier2SideCh.length > 0 && tier1SideChains.length > 0 && !tier1AllComplete;
 
-  const renderChainCard = (chain, questType, locked = false) => {
+  const renderChainCard = (baseChain, baseType, locked = false) => {
+    // An upgraded chain shows its UPGRADE in the base quest's place: the harder
+    // quest's name, its own progress, and a tap that opens its tree. The base
+    // version isn't gone — it's one switch away inside the tree.
+    let up = upgrades.has(baseChain) ? upgradeFor(baseChain) : null;
+    // If the upgrade's rows aren't in this class (a DB that predates them), show
+    // the base quest rather than an empty 0/0 card.
+    if (up && !quests.some(q => q.chain === up.chain)) up = null;
+    const chain     = up?.chain     ?? baseChain;
+    const questType = up?.questType ?? baseType;
     const { total, completed, earnedLvl } = chainStats(chain, questType);
+    // An upgrade CONTINUES the base quest, it doesn't replace it: the LVL banked
+    // clearing the base half is still the player's. The card shows the upgrade's
+    // own progress, but the reward counter is the PAIR's total — base + upgrade —
+    // so an upgraded chain reads +40 LVL, not the +20 the upgrade alone paid.
+    // (Un-upgrading wipes the upgrade half only, and this falls back to the base.)
+    const baseLvl   = up ? chainStats(baseChain, baseType).earnedLvl : 0;
+    const rewardLvl = earnedLvl + baseLvl;
     const complete = total > 0 && completed === total;
     const pct      = total > 0 ? completed / total : 0;
     const delay    = Math.min(stagger.n++ * 70, 560);
+    // An upgraded chain is PLATED: amber frame, amber rail, an UPGRADED plate on
+    // the title row. Distinct from the pure-gold MAXED language (shimmer + frame),
+    // so the two escalations never read as the same state.
+    const upg = !!up && !complete;
+    // The structural upgrade mark (the long arrow) stays on even once the pair is
+    // MAXED — it just turns gold with the rest of the card. `upg` is only the
+    // amber PLATING, which stands down for gold.
+    const isUp = !!up;
     return (
       <QuestCard
         key={chain}
-        style={[styles.chainCard, complete && styles.chainCardComplete, locked && styles.chainCardLocked]}
+        style={[styles.chainCard, upg && styles.chainCardUp, complete && styles.chainCardComplete, locked && styles.chainCardLocked]}
         onPress={locked ? undefined : () => openTree(chain, questType)}
         disabled={locked}
         delay={delay}
+        celebrate={openedChainRef.current === chain ? arrivalGleam : 0}
       >
+        {/* Upgraded chains are one machined plate — frame, bevel and rail all
+            drawn, not CSS lines. Rendered first so the card content sits on it. */}
+        {isUp && <CardPlate gold={complete} />}
+
         <View style={styles.chainCardTop}>
-          <View style={{ flex: 1 }}>
+          <View style={styles.chainCardTitleWrap}>
             {complete ? (
-              <ShimmerText text={chain.toUpperCase()} style={[styles.chainCardTitle, styles.chainCardTitleMax]} colors={GOLD} direction="ltr" active />
+              <ShimmerText text={chain.replace(/_/g, ' ').toUpperCase()} style={[styles.chainCardTitle, styles.chainCardTitleMax]} colors={GOLD} direction="ltr" active />
             ) : (
-              <Text style={styles.chainCardTitle}>{chain.toUpperCase()}</Text>
+              <Text style={[styles.chainCardTitle, upg && styles.chainCardTitleUp]}>{chain.replace(/_/g, ' ').toUpperCase()}</Text>
             )}
           </View>
-          <View style={[styles.chainArrow, complete && styles.chainArrowComplete]}>
-            <View style={[styles.chainArrowHead, complete && styles.chainArrowHeadComplete]} />
-          </View>
+          {/* The enter affordance doubles as the UPGRADE mark: a plain chain gets
+              the round node + bare chevron, an upgraded one gets the machined
+              arrow key (see ArrowKey above) — a different SHAPE, not an icon. */}
+          {isUp ? (
+            <ArrowKey gold={complete} />
+          ) : (
+            <View style={[styles.chainArrow, complete && styles.chainArrowComplete]}>
+              <View pointerEvents="none" style={[styles.chainArrowBezel, complete && styles.chainArrowBezelComplete]} />
+              <View pointerEvents="none" style={styles.chainArrowGloss} />
+              <View style={[styles.chainArrowHead, complete && styles.chainArrowHeadComplete]} />
+            </View>
+          )}
         </View>
 
-        <View style={[styles.chainProgressTrack, complete && styles.chainProgressTrackMax]}>
+        <View style={[styles.chainProgressTrack, upg && styles.chainProgressTrackUp, complete && styles.chainProgressTrackMax]}>
           {complete ? (
             <ShimmerFill style={styles.chainProgressFill} colors={GOLD} active />
           ) : (
-            <View style={[styles.chainProgressFill, { width: `${pct * 100}%` }]} />
+            <View style={[styles.chainProgressFill, upg && styles.chainProgressFillUp, { width: `${pct * 100}%` }]}>
+              {/* Bright leading edge on the amber rail — the bar looks charged
+                  rather than merely filled. */}
+              {upg && pct > 0 && <View style={styles.chainProgressCap} />}
+            </View>
           )}
         </View>
 
         <View style={styles.chainCardMetaRow}>
-          <Text style={[styles.chainCardMeta, complete && styles.chainCardMetaMax]}>
+          <Text style={[styles.chainCardMeta, upg && styles.chainCardMetaUp, complete && styles.chainCardMetaMax]}>
             {complete ? 'MAXED OUT' : `${completed}/${total} unlocked`}
           </Text>
-          <Text style={[styles.chainCardReward, complete && styles.chainCardRewardMax]}>+{earnedLvl} LVL</Text>
+          <Text style={[styles.chainCardReward, upg && styles.chainCardRewardUp, complete && styles.chainCardRewardMax]}>+{rewardLvl} LVL</Text>
         </View>
 
         {/* Cleared chains come alive in gold: a frame that sweeps clockwise plus a
@@ -979,19 +1185,31 @@ export default function SkillsScreen({ navigation, route }) {
             <GateGleam radius={12} />
           </>
         )}
+
+        {/* Upgraded cards get the same entrance streak, dialled well down and in
+            amber — a glint off the plating, not the maxed-out fanfare. */}
+        {upg && <GateGleam radius={12} color={UP.hot} peak={0.16} />}
       </QuestCard>
     );
   };
 
   // Each tier is its own stacked, full-width section (replaces the cramped
   // 3-column grid that clipped long names like "HANDSTAND"). Empty tiers hide.
-  const renderSection = (label, chains, questType, locked = false) => {
+  // `tier` renders a SUBORDINATE header (smaller/muted) — used for TIER I / TIER II
+  // nested under the top-level SIDE QUESTS label.
+  const renderSection = (label, chains, questType, locked = false, headerRef, tier = false) => {
     if (!chains.length) return null;
     return (
-      <View style={styles.questSection} key={label}>
-        <View style={styles.sectionHeaderRow}>
-          <Text style={[styles.sectionHeader, locked && styles.sectionHeaderLocked]}>{label}</Text>
-          <View style={styles.sectionHeaderLine} />
+      <View style={[styles.questSection, tier && styles.tierSection]} key={label}>
+        <View style={tier ? styles.tierHeaderRow : styles.sectionHeaderRow}>
+          {/* Wrap the label so the tour highlight hugs JUST the text (not the row). */}
+          <View ref={headerRef}>
+            <Text style={[
+              tier ? styles.tierHeader : styles.sectionHeader,
+              locked && (tier ? styles.tierHeaderLocked : styles.sectionHeaderLocked),
+            ]}>{label}</Text>
+          </View>
+          <View style={tier ? styles.tierHeaderLine : styles.sectionHeaderLine} />
         </View>
         <View style={{ position: 'relative' }}>
           {chains.map(chain => renderChainCard(chain, questType, locked))}
@@ -1003,8 +1221,10 @@ export default function SkillsScreen({ navigation, route }) {
 
   return (
     <ScrollVizContext.Provider value={scrollViz}>
-    <ScreenFrame fill holoEntry={false} maxWidth={CARD_W}>
+    <ScreenFrame fill holoEntry={false} maxWidth={SKILLS_CARD_W}>
+    <View ref={tourBoxRef} collapsable={false} style={styles.scrollBox}>
     <ScrollView
+      ref={tourScrollRef}
       style={styles.scroll}
       contentContainerStyle={styles.scrollContent}
       showsVerticalScrollIndicator={false}
@@ -1031,7 +1251,12 @@ export default function SkillsScreen({ navigation, route }) {
         <Text style={styles.playerName}>{profile?.full_name?.toUpperCase() ?? '—'}</Text>
 
         {/* Class crest — the same gold gem-medallion language as the Home hero,
-            with the prestige stars perched on top of the gem (no separate line). */}
+            with the prestige stars perched on top of the gem (no separate line).
+            The tour's "Your Class" target is a STABLE wrapper (always mounted, not
+            born inside the conditional IIFE) so measureInWindow resolves reliably —
+            when the ref lived on the IIFE-returned View it sometimes read stale and
+            the highlight fell back to a stray circle over LVL. */}
+        <View ref={tourClassRef} collapsable={false} style={styles.classCrestAnchor}>
         {classData && (() => {
           const parts  = (classData.name ?? '').trim().split(/\s+/).filter(Boolean);
           const rank   = parts.length > 1 ? parts[parts.length - 1] : (parts[0] ?? '');
@@ -1047,6 +1272,7 @@ export default function SkillsScreen({ navigation, route }) {
             </View>
           );
         })()}
+        </View>
 
         <LvlNumber lvl={lvl} active={prestigeReady.ok} play={introKey} />
 
@@ -1072,36 +1298,19 @@ export default function SkillsScreen({ navigation, route }) {
       <View style={styles.classRow}>
         {classData && (
         prestigeReady.ok ? (
-          <View style={styles.prestigeBanner}>
+          <View ref={tourPrestigeRef} style={styles.prestigeBanner}>
             <View style={styles.prestigeBannerTitleWrap}>
               <ShimmerText
-                text="⚡ PRESTIGE AVAILABLE"
+                text="PRESTIGE AVAILABLE"
                 style={styles.prestigeBannerTitle}
                 colors={GOLD}
                 direction="ltr"
                 active
               />
             </View>
-            <Text style={styles.prestigeBannerSub}>
-              All requirements met. Advance to the next class — your quest history is kept.
-            </Text>
-            <TouchableOpacity
-              style={styles.prestigeActionBtn}
-              onPress={() => setShowPrestige(true)}
-              activeOpacity={0.85}
-            >
-              <ShimmerFill style={styles.prestigeActionGlow} colors={GOLD} active />
-              <ShimmerText
-                text="⚡ PRESTIGE NOW"
-                style={styles.prestigeActionText}
-                colors={GOLD}
-                direction="ltr"
-                active
-              />
-            </TouchableOpacity>
           </View>
         ) : (
-          <View style={styles.reqCard}>
+          <View ref={tourPrestigeRef} style={styles.reqCard}>
             {/* Trial header: gold seal + cleared-count + overall track */}
             <View style={styles.reqHeader}>
               <View style={styles.reqSeal}>
@@ -1212,9 +1421,12 @@ export default function SkillsScreen({ navigation, route }) {
         )
         )}
 
-        {/* Change class — sits below the prestige status; opens the picker on tap */}
+        {/* Change class — COACH-ONLY. A player's own class is assigned/changed by
+            their coach (admin), so this control appears only in admin-as-coach view. */}
+        {isCoachView && (
         <View style={styles.classCol}>
           <TouchableOpacity
+            ref={tourClassRef}
             style={styles.manageClassBtn}
             onPress={() => setClassListOpen(o => !o)}
             activeOpacity={0.85}
@@ -1225,10 +1437,11 @@ export default function SkillsScreen({ navigation, route }) {
             <Text style={styles.manageClassChevron}>{classListOpen ? '▲' : '▼'}</Text>
           </TouchableOpacity>
         </View>
+        )}
       </View>
 
       {/* Full-width class picker — opens directly under the CHANGE CLASS button. */}
-      {classListOpen && (
+      {isCoachView && classListOpen && (
         <View style={styles.classDropdown}>
           {allClasses.map(cls => {
             const selected = cls.id === profile?.class_id;
@@ -1251,59 +1464,55 @@ export default function SkillsScreen({ navigation, route }) {
       )}
 
       {/* ── No class ── */}
-      {!classData ? (
-        <View style={styles.noClass}>
-          <Text style={styles.noClassText}>NO CLASS ASSIGNED YET</Text>
-          <Text style={styles.noClassSub}>Tap ASSIGN CLASS above to begin your journey.</Text>
-        </View>
-      ) : (
-        <View style={styles.questSections}>
-          {renderSection('MAIN QUESTS', mainChains, 'main')}
-          {renderSection('TIER I', tier1SideChains, 'side')}
-          {renderSection('TIER II', tier2SideCh, 'side', tier2Locked)}
-        </View>
-      )}
+      <View ref={tourQuestsRef}>
+        {!classData ? (
+          <View style={styles.noClass}>
+            <Text style={styles.noClassText}>NO CLASS ASSIGNED YET</Text>
+            <Text style={styles.noClassSub}>
+              {isCoachView
+                ? 'Tap ASSIGN CLASS above to begin their journey.'
+                : 'Your coach will assign your class to begin your journey.'}
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.questSections}>
+            {renderSection('MAIN QUESTS', mainChains, 'main', false, tourMainLabelRef)}
+            {(tier1SideChains.length > 0 || tier2SideCh.length > 0) && (
+              <View style={styles.questSection}>
+                {/* Top-level SIDE QUESTS label (same style as MAIN QUESTS) with the
+                    tiers nested beneath it in a subordinate style. */}
+                <View style={styles.sectionHeaderRow}>
+                  <View ref={tourSideLabelRef}>
+                    <Text style={styles.sectionHeader}>SIDE QUESTS</Text>
+                  </View>
+                  <View style={styles.sectionHeaderLine} />
+                </View>
+                {/* TIER I / TIER II sub-headers only earn their place when there
+                    IS a Tier II. With a single tier they're noise — the chains
+                    sit directly under SIDE QUESTS instead. */}
+                {tier2SideCh.length > 0 ? (
+                  <View style={styles.sideTiers}>
+                    {renderSection('TIER I', tier1SideChains, 'side', false, undefined, true)}
+                    {renderSection('TIER II', tier2SideCh, 'side', tier2Locked, undefined, true)}
+                  </View>
+                ) : (
+                  <View style={{ position: 'relative', gap: 10 }}>
+                    {tier1SideChains.map(chain => renderChainCard(chain, 'side'))}
+                  </View>
+                )}
+              </View>
+            )}
+          </View>
+        )}
+      </View>
 
       <View style={{ height: 10 }} />
       </View>
 
-      {/* ── Prestige confirm modal ── */}
-      <Modal
-        visible={showPrestige}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowPrestige(false)}
-      >
-        <View style={[styles.modalOverlay, { justifyContent: 'center', paddingHorizontal: 24 }]}>
-          <View style={styles.confirmBox}>
-            <View style={styles.prestigeBannerTitleWrap}>
-              <ShimmerText text="PRESTIGE?" style={styles.modalTitle} colors={GOLD} direction="ltr" active />
-            </View>
-            <Text style={styles.confirmText}>
-              Advance to the next class? Your quest history will be kept.
-            </Text>
-            <View style={styles.confirmButtons}>
-              <TouchableOpacity
-                style={styles.confirmCancel}
-                onPress={() => setShowPrestige(false)}
-              >
-                <Text style={styles.confirmCancelText}>CANCEL</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.confirmOk}
-                onPress={() => { setShowPrestige(false); handlePrestige(); }}
-              >
-                <ShimmerFill style={StyleSheet.absoluteFill} colors={GOLD} active />
-                <Text style={styles.confirmOkText}>PRESTIGE</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
       {/* ── Prestige ceremony — the class-up rite ── */}
       {ceremony && <PrestigeCeremony className={ceremony} onDone={() => setCeremony(null)} />}
     </ScrollView>
+    </View>
     </ScreenFrame>
     </ScrollVizContext.Provider>
   );
@@ -1315,6 +1524,7 @@ const styles = StyleSheet.create({
   // The scroll lives INSIDE the shared ScreenFrame (fill mode) now — the frame
   // supplies the animated ice-glow border + glow, matching Home/Workouts. This
   // scrolls within the fixed frame so all the quest sections stay reachable.
+  scrollBox: { flex: 1, width: '100%' },
   scroll: { flex: 1, width: '100%' },
   // Center short states (e.g. "no class") vertically; long content scrolls from
   // the top.
@@ -1373,6 +1583,12 @@ const styles = StyleSheet.create({
   },
   // Class crest — a compact echo of the Home hero's gold gem-medallion. The
   // prestige stars sit just above the gem so rank + prestige read as one emblem.
+  // Stable tour anchor around the crest — stretches full width and centers its
+  // child, so it measures the crest's real box (no layout change vs the crest alone).
+  classCrestAnchor: {
+    alignSelf: 'center',
+    alignItems: 'center',
+  },
   classCrest: {
     alignItems: 'center',
     marginTop: 6,
@@ -1652,31 +1868,8 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.18,
     shadowRadius: 16,
   },
-  prestigeActionBtn: {
-    marginTop: 12,
-    height: 46,
-    borderWidth: 1.5,
-    borderColor: SL.gold,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255,215,0,0.1)',
-    overflow: 'hidden',
-  },
-  // Moving gold glow behind the PRESTIGE NOW label — kept low-opacity so the
-  // gold text stays readable over it (same shimmer as the LVL gauge).
-  prestigeActionGlow: {
-    ...StyleSheet.absoluteFillObject,
-    opacity: 0.25,
-  },
   prestigeBannerTitleWrap: {
     alignItems: 'center',
-  },
-  prestigeActionText: {
-    fontFamily: F.heading,
-    fontSize: 32,
-    color: SL.gold,
-    letterSpacing: 3,
   },
   prestigeBannerTitle: {
     fontFamily: F.heading,
@@ -1991,6 +2184,34 @@ const styles = StyleSheet.create({
     color: '#8aa6bf',
     opacity: 0.8,
   },
+
+  // ── Nested tier sub-headers (TIER I / TIER II under SIDE QUESTS) ──────────────
+  // Subordinate to the section header: smaller, muted, slightly indented.
+  sideTiers: { gap: 16, marginTop: 6 },
+  tierSection: { gap: 10, marginLeft: 14 },
+  tierHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 2,
+  },
+  tierHeader: {
+    fontFamily: F.heading,
+    fontSize: 15,
+    color: SL.muted,
+    letterSpacing: 2.5,
+  },
+  tierHeaderLocked: {
+    color: '#8aa6bf',
+    opacity: 0.7,
+  },
+  tierHeaderLine: {
+    flex: 1,
+    height: 1,
+    borderRadius: 1,
+    backgroundColor: SL.muted,
+    opacity: 0.18,
+  },
   // Glowing ice hairline trailing each section header.
   sectionHeaderLine: {
     flex: 1,
@@ -2010,8 +2231,14 @@ const styles = StyleSheet.create({
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
+    // Left accent rail — the shared card language across the app (Workouts day
+    // cards, exercise cards). It carries the STATE colour: ice = standard quest,
+    // amber = upgraded, gold = maxed out.
+    borderLeftWidth: 7,
+    borderLeftColor: SL.accent,
     borderRadius: 12,
     paddingHorizontal: 18,
+    paddingLeft: 13,
     paddingVertical: 14,
     gap: 11,
     marginBottom: 12,
@@ -2025,6 +2252,7 @@ const styles = StyleSheet.create({
   // under the animated gold ShimmerFrame border.
   chainCardComplete: {
     borderColor: 'rgba(255,215,0,0.45)',
+    borderLeftColor: SL.gold,
     backgroundColor: 'rgba(255,215,0,0.05)',
     shadowColor: SL.gold,
     shadowOffset: { width: 0, height: 0 },
@@ -2036,8 +2264,8 @@ const styles = StyleSheet.create({
     opacity: 0.4,
   },
 
-  // ── Tier II lock overlay (barred gate + chained padlock, drawn in SVG) ─────────
-  // Dark wash over the sealed cards, so the gate reads as the foreground.
+  // ── Tier II lock overlay (sagging chain + padlock seal, drawn in SVG) ──────────
+  // Dark wash over the sealed cards, so the seal reads as the foreground.
   lockScrim: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(5,9,18,0.5)',
@@ -2087,11 +2315,36 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 12,
   },
+  chainCardTitleWrap: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  // ── UPGRADED chain plating ────────────────────────────────────────────────
+  // Amber frame + faint warm wash + a wider, warmer glow than the base card.
+  chainCardUp: {
+    borderColor: UP.dim,
+    borderLeftColor: UP.hot,
+    backgroundColor: UP.wash,
+    shadowColor: UP.hot,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+  },
   chainCardTitle: {
     fontFamily: F.heading,
     fontSize: 30,
     color: SL.text,
     letterSpacing: 2,
+  },
+  // Upgraded title: warm ink with a soft amber halo. Static — the moving shimmer
+  // stays reserved for MAXED, so the two never collide.
+  chainCardTitleUp: {
+    color: UP.text,
+    textShadowColor: 'rgba(255,196,107,0.45)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 14,
   },
   // Maxed title carries a gold glow halo behind the shimmer.
   chainCardTitleMax: {
@@ -2132,6 +2385,47 @@ const styles = StyleSheet.create({
     transform: [{ rotate: '45deg' }],
     marginLeft: -3,
   },
+  // ── Base node hardware detail ─────────────────────────────────────────────
+  // A second, tighter outline inside the frame: two concentric lines read as a
+  // machined bezel instead of a single flat stroke.
+  chainArrowBezel: {
+    position: 'absolute',
+    top: 3, left: 3, right: 3, bottom: 3,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(74,158,191,0.30)',
+  },
+  chainArrowBezelComplete: {
+    borderColor: 'rgba(255,215,0,0.35)',
+  },
+  // Light catching the top of the cap. Same trick, same offsets, on every node.
+  chainArrowGloss: {
+    position: 'absolute',
+    top: 4,
+    width: 13,
+    height: 1,
+    borderRadius: 1,
+    backgroundColor: 'rgba(255,255,255,0.28)',
+  },
+
+  // Sits over the card's whole border box (negative insets set inline from the
+  // rail width), under every child that follows it.
+  cardPlate: {
+    position: 'absolute',
+  },
+  // ── UPGRADED enter-node: the arrow key ────────────────────────────────────
+  // The SVG carries the cap itself; the wrap only supplies the glow the cards
+  // use everywhere else (SVG can't cast a React Native shadow).
+  arrowKeyWrap: {
+    borderRadius: 8,
+    shadowColor: UP.hot,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.75,
+    shadowRadius: 12,
+  },
+  arrowKeyWrapGold: {
+    shadowColor: SL.gold,
+  },
   chainArrowHeadComplete: {
     borderColor: SL.gold,
   },
@@ -2141,6 +2435,33 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: SL.border,
     overflow: 'hidden',
+  },
+  // Upgraded rail: taller, warm bed, so an empty 0/3 bar still reads as premium
+  // hardware rather than a dead grey line.
+  chainProgressTrackUp: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255,196,107,0.13)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,196,107,0.28)',
+  },
+  chainProgressFillUp: {
+    borderRadius: 4,
+    backgroundColor: UP.hot,
+  },
+  // Bright leading edge riding the end of the amber fill.
+  chainProgressCap: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: 4,
+    borderRadius: 2,
+    backgroundColor: '#FFF3D6',
+    shadowColor: UP.hot,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 1,
+    shadowRadius: 6,
   },
   // Maxed track glows gold to frame the full shimmer fill.
   chainProgressTrackMax: {
@@ -2167,6 +2488,11 @@ const styles = StyleSheet.create({
     color: SL.muted,
     letterSpacing: 1,
   },
+  // Progress text warms up a shade on plated cards so it isn't the one cold
+  // element left on an otherwise amber card.
+  chainCardMetaUp: {
+    color: '#9a7c52',
+  },
   // "MAXED OUT" reads gold with a soft glow.
   chainCardMetaMax: {
     fontFamily: F.heading,
@@ -2181,6 +2507,12 @@ const styles = StyleSheet.create({
     fontSize: 21,
     color: SL.gold,
     letterSpacing: 1,
+  },
+  chainCardRewardUp: {
+    color: UP.hot,
+    textShadowColor: 'rgba(255,196,107,0.55)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 10,
   },
   chainCardRewardMax: {
     textShadowColor: 'rgba(255,215,0,0.7)',
@@ -2293,55 +2625,4 @@ const styles = StyleSheet.create({
     marginTop: 34,
   },
 
-  // ── Prestige confirm modal ──────────────────────────────────────────────────
-
-  confirmBox: {
-    backgroundColor: SL.panel,
-    borderWidth: 1.5,
-    borderColor: SL.gold,
-    borderRadius: 8,
-    padding: 24,
-    gap: 16,
-  },
-  confirmText: {
-    fontFamily: F.bodyMed,
-    fontSize: 22,
-    color: SL.text,
-    letterSpacing: 0.5,
-    textAlign: 'center',
-  },
-  confirmButtons: {
-    flexDirection: 'row',
-    gap: 10,
-  },
-  confirmCancel: {
-    flex: 1,
-    height: 44,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  confirmCancelText: {
-    fontFamily: F.bodyMed,
-    fontSize: 24,
-    color: SL.muted,
-    letterSpacing: 2,
-  },
-  confirmOk: {
-    flex: 1,
-    height: 44,
-    backgroundColor: SL.gold,
-    borderRadius: 4,
-    justifyContent: 'center',
-    alignItems: 'center',
-    overflow: 'hidden',
-  },
-  confirmOkText: {
-    fontFamily: F.heading,
-    fontSize: 24,
-    color: SL.bg,
-    letterSpacing: 2,
-  },
 });

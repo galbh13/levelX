@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useFocusEffect } from '@react-navigation/native';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Pressable,
-  ActivityIndicator, Animated, Easing, Dimensions,
+  ActivityIndicator, Animated, Easing, useWindowDimensions,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
@@ -13,6 +13,7 @@ import { categoryMeta } from '../lib/workouts';
 import ScreenFrame from '../components/ScreenFrame';
 import PillButton from '../components/PillButton';
 import { CARD_H, CARD_W } from '../constants/layout';
+import { forgeP, SWIPE_MS } from '../lib/forgeSwipe';
 
 // Off-program ACCESSORIES / LEGS workouts glow in their type color; the dated
 // program keeps the default ice theme. Returns a color or null (= default).
@@ -52,10 +53,6 @@ const SL = {
 
 const DOW_FULL = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'];
 
-// Full window width — how far the body slides in from the right on entrance.
-const WIN_W = Dimensions.get('window').width;
-// Shared swipe duration — matches WorkoutsScreen so both directions feel identical.
-const SWIPE_MS = 300;
 
 // Current weekday (0=Sun … 6=Sat) — highlighted in the grid like Workouts' "today".
 const TODAY_DOW = new Date().getDay();
@@ -81,44 +78,56 @@ export default function StudentDetailScreen({ navigation, route }) {
   // Selected weekday (0=Sun … 6=Sat) — default today's weekday.
   const [selectedDow, setSelectedDow] = useState(() => new Date().getDay());
 
-  // ── Entrance swipe (ONLY when arriving from the Workouts → Forge press) ──
-  // The body slides in from the right while the headline stays put, continuing the
-  // Workouts swipe. Gated on the `fromForge` param and run on mount only, so
-  // returning here from a child screen (Create/Library/Quests) does NOT replay it.
-  // Captured ONCE at mount: did we arrive via the Workouts → Forge swipe? Gates
-  // both the entrance slide-in and the BACK swipe-out to that specific flow.
+  // ── Page swipe (ONLY when arriving from the Workouts → Forge press) ──
+  // We're pushed as a GHOST transparentModal over the still-visible Workouts
+  // screen: our ScreenFrame draws no bg/border and our hero text is hidden — the
+  // hero + frame you see are Workouts' own, underneath, so they literally cannot
+  // move. We OWN the shared `forgeP` value; our BODY (+ the BACK pill, which
+  // rides the motion) binds to it, and so does Workouts' body below —
+  // the two bodies cross-swipe in lockstep inside what reads as ONE card, selling
+  // the illusion that only the lower widget swaps. Captured ONCE at mount: did we
+  // arrive via the Forge swipe? Gates the slide-in and the BACK swipe-out.
   const cameFromForge = useRef(route?.params?.fromForge === true).current;
-  const enterAnim = useRef(new Animated.Value(cameFromForge ? 0 : 1)).current;
+  // Admin-as-coach entry (forwarded by WorkoutsScreen's forge when it's in admin
+  // mode). Gates the WORKOUTS LIBRARY action to admins only — players don't
+  // author/import from the library, so it stays off their hub.
+  const isAdmin = route?.params?.admin === true;
   const backingRef = useRef(false);
   useEffect(() => {
     if (!cameFromForge) return;
-    const anim = Animated.timing(enterAnim, {
-      toValue: 1, duration: SWIPE_MS, easing: Easing.out(Easing.cubic), useNativeDriver: true,
+    forgeP.setValue(1);                 // Workouts in view, our card parked off-right
+    const anim = Animated.timing(forgeP, {
+      toValue: 0, duration: SWIPE_MS, easing: Easing.out(Easing.cubic), useNativeDriver: true,
     });
     anim.start();
-    // Consume the flag so it can't replay on a later focus.
-    navigation.setParams({ fromForge: undefined });
     return () => anim.stop();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const enterBodyX = enterAnim.interpolate({ inputRange: [0, 1], outputRange: [WIN_W, 0] });
-  const enterBodyO = enterAnim.interpolate({ inputRange: [0, 0.25, 1], outputRange: [0, 1, 1] });
+  // 0 → our body centered; 1 → parked off the right edge (Workouts' body shown).
+  // LIVE window width (module-load Dimensions can be stale on mobile web) + a fade
+  // right at the parked end, so an imprecise translation can never leave our edge
+  // peeking inside the card before the swipe starts / after the back-swipe.
+  const { width: winW } = useWindowDimensions();
+  const bodyX = forgeP.interpolate({ inputRange: [0, 1], outputRange: [0, winW] });
+  const bodyO = forgeP.interpolate({ inputRange: [0, 0.94, 1], outputRange: [1, 1, 0] });
+  // The sliding transform for the body + pills — identity when not in the forge
+  // flow (admin entry) so those renders stay completely static.
+  const slide = cameFromForge ? { opacity: bodyO, transform: [{ translateX: bodyX }] } : null;
 
-  // BACK: swipe the body right (reverse of the entrance) then pop. Only for the
-  // Forge flow; other entries just go back normally. We re-arm `fromForge` so the
-  // pop's own transition is 'none' — leaving ONLY our swipe (and no hologram, since
-  // the Workouts screen underneath is already mounted, not rebuilt).
+  // BACK: reverse the swipe (our card slides right / Workouts slides back in) then
+  // pop. Only for the Forge flow; other entries just go back normally. The pop's own
+  // transition is 'none', so ONLY our lockstep swipe shows (Workouts is already
+  // mounted underneath — nothing is rebuilt).
   const onBack = useCallback(() => {
     if (!cameFromForge) { navigation.goBack(); return; }
     if (backingRef.current) return;
     backingRef.current = true;
-    navigation.setParams({ fromForge: true });
-    Animated.timing(enterAnim, {
-      toValue: 0, duration: SWIPE_MS, easing: Easing.in(Easing.cubic), useNativeDriver: true,
+    Animated.timing(forgeP, {
+      toValue: 1, duration: SWIPE_MS, easing: Easing.in(Easing.cubic), useNativeDriver: true,
     }).start(({ finished }) => {
       if (finished) navigation.goBack();
     });
-  }, [cameFromForge, enterAnim, navigation]);
+  }, [cameFromForge, navigation]);
 
   const workoutsById = useMemo(
     () => Object.fromEntries(studentWorkouts.map(w => [w.id, w])),
@@ -216,54 +225,47 @@ export default function StudentDetailScreen({ navigation, route }) {
   }
 
   return (
-    <ScreenFrame maxWidth={CARD_W} ready={!loading} holoEntry={false}>
+    <ScreenFrame maxWidth={CARD_W} ready={!loading} holoEntry={false} ghost={cameFromForge}>
       <View style={styles.card}>
-      {/* Hero header — matches the Workouts screen: white shining name + LVL · CLASS. */}
+      {/* Hero header — matches the Workouts screen: white shining name + LVL · CLASS.
+          In the forge flow the hero TEXT is hidden (opacity 0, layout preserved):
+          the identical Workouts hero underneath shows through instead, so it can
+          never appear to move. The pills stay visible and RIDE the swipe. */}
       <View style={styles.header}>
-        <View style={styles.backRow}>
+        <Animated.View style={[styles.backRow, slide]}>
           <PillButton label="← BACK" size="sm" onPress={onBack} />
+        </Animated.View>
+        <View style={[styles.heroWrap, cameFromForge && styles.heroHidden]}>
+          <Text style={styles.studentName}>
+            {student.full_name?.toUpperCase() ?? '—'}
+          </Text>
+          <View style={styles.statRow}>
+            <Text style={styles.level}>LVL {lvl ?? '—'}</Text>
+            {className && (
+              <>
+                <View style={styles.statDot} />
+                <Text style={styles.className}>{className.toUpperCase()}</Text>
+              </>
+            )}
+          </View>
+          <View style={styles.headerDivider} />
         </View>
-        <View style={styles.accessoriesRow}>
-          <PillButton
-            label="ACCESSORIES"
-            size="sm"
-            tone="gold"
-            onPress={() => navigation.navigate('WeeklyAccessories')}
-          />
-        </View>
-        <Text style={styles.studentName}>
-          {student.full_name?.toUpperCase() ?? '—'}
-        </Text>
-        <View style={styles.statRow}>
-          <Text style={styles.level}>LVL {lvl ?? '—'}</Text>
-          {className && (
-            <>
-              <View style={styles.statDot} />
-              <Text style={styles.className}>{className.toUpperCase()}</Text>
-            </>
-          )}
-        </View>
-        <View style={styles.headerDivider} />
       </View>
 
-      <Animated.View style={[styles.body, { transform: [{ translateX: enterBodyX }], opacity: enterBodyO }]}>
-        {/* All four actions in one forge-styled row. */}
+      <Animated.View style={[styles.body, slide]}>
+        {/* Forge-styled action row. CREATE WORKOUT is gone entirely; WORKOUTS
+            LIBRARY is ADMIN-only (players don't import from the library). */}
         <View style={styles.actionRow}>
           <ForgeButton
             label="DAILY QUESTS"
             onPress={() => navigation.navigate('DailyQuest', { student })}
           />
-          <ForgeButton
-            label="WORKOUTS LIBRARY"
-            onPress={() => navigation.navigate('EliteWorkouts')}
-          />
-          <ForgeButton
-            label="CREATE WORKOUT"
-            onPress={() => {
-              setContextDay({ label: DAY_LABELS[selectedDow], dayOfWeek: selectedDow });
-              navigation.navigate('CreateWorkout');
-            }}
-          />
+          {isAdmin && (
+            <ForgeButton
+              label="WORKOUTS LIBRARY"
+              onPress={() => navigation.navigate('EliteWorkouts')}
+            />
+          )}
           <ForgeButton
             label="MY WORKOUTS"
             onPress={() => navigation.navigate('AllWorkouts')}
@@ -287,7 +289,7 @@ export default function StudentDetailScreen({ navigation, route }) {
                     onPress={() => setSelectedDow(dow)}
                     activeOpacity={0.75}
                   >
-                    <Text style={[styles.dayLabel, (isSelected || isToday) && styles.dayLabelSel]}>
+                    <Text allowFontScaling={false} numberOfLines={1} adjustsFontSizeToFit style={[styles.dayLabel, (isSelected || isToday) && styles.dayLabelSel]}>
                       {label}
                     </Text>
                     {/* A rest day is simply a day with no accent dot — no label. */}
@@ -384,6 +386,11 @@ export default function StudentDetailScreen({ navigation, route }) {
 const styles = StyleSheet.create({
   // Fixed card height so the frame is the same size regardless of data/loading.
   card: { height: CARD_H },
+  // Hero text wrapper — keeps the header's centering; in the forge flow it's
+  // invisible (opacity 0, layout preserved) so the identical Workouts hero
+  // underneath shows through and reads as one unmoving element.
+  heroWrap:   { alignSelf: 'stretch', alignItems: 'center' },
+  heroHidden: { opacity: 0 },
   body: { flex: 1, width: '100%', paddingBottom: 12 },
 
   // ── Forge-style action buttons (4-up row) ──
@@ -448,13 +455,6 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 20,
     left: 16,
-    zIndex: 2,
-  },
-  // ACCESSORIES pill mirrored top-right (gold), leaving the name centered.
-  accessoriesRow: {
-    position: 'absolute',
-    top: 20,
-    right: 16,
     zIndex: 2,
   },
   studentName: {
@@ -542,7 +542,7 @@ const styles = StyleSheet.create({
     fontFamily: F.heading,
     fontSize: 18,
     color: SL.muted,
-    letterSpacing: 1,
+    letterSpacing: 0.5,
     textTransform: 'uppercase',
   },
   dayLabelSel: { color: SL.accent },

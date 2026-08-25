@@ -45,6 +45,8 @@ export default function AddExerciseScreen({ navigation, route }) {
     supabase
       .from('classes')
       .select('id, name, order_index')
+      // Exercise-library targets follow the 'static' class ladder only.
+      .eq('job', 'static')
       .order('order_index')
       .then(({ data }) => setClasses(data ?? []));
   }, []);
@@ -228,9 +230,13 @@ export default function AddExerciseScreen({ navigation, route }) {
         </Text>
         {videoUrl ? (
           <View style={styles.videoUploadedBox}>
-            <Text style={styles.videoUploadedIcon}>✓</Text>
-            <Text style={styles.videoUploadedText}>Video uploaded successfully</Text>
-            <TouchableOpacity onPress={() => setVideoUrl('')} style={styles.videoRemoveBtn}>
+            <View style={styles.videoUploadedBadge}>
+              <Text style={styles.videoUploadedIcon}>✓</Text>
+            </View>
+            <View style={styles.videoUploadedTextWrap}>
+              <Text style={styles.videoUploadedText}>VIDEO LINKED</Text>
+            </View>
+            <TouchableOpacity onPress={() => setVideoUrl('')} style={styles.videoRemoveBtn} activeOpacity={0.7}>
               <Text style={styles.videoRemoveText}>REMOVE</Text>
             </TouchableOpacity>
           </View>
@@ -379,20 +385,30 @@ const styles = StyleSheet.create({
 
   videoUploadedBox: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
-    backgroundColor: 'rgba(76,175,80,0.08)',
-    borderWidth: 1.5, borderColor: 'rgba(76,175,80,0.4)',
-    borderRadius: 6, padding: 14,
+    backgroundColor: 'rgba(74,158,191,0.08)',
+    borderWidth: 1.5, borderColor: 'rgba(74,158,191,0.45)',
+    borderRadius: 12, padding: 14,
   },
-  videoUploadedIcon: { fontSize: 18, color: SL.green },
+  videoUploadedBadge: {
+    width: 30, height: 30, borderRadius: 999,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(74,158,191,0.15)',
+    borderWidth: 1, borderColor: 'rgba(74,158,191,0.55)',
+  },
+  videoUploadedIcon: { fontSize: 15, color: SL.accent, fontFamily: F.bodyMed },
+  videoUploadedTextWrap: { flex: 1 },
   videoUploadedText: {
-    flex: 1, fontFamily: F.bodyMed, fontSize: 13, color: SL.green, letterSpacing: 0.5,
+    fontFamily: F.heading, fontSize: 16, color: SL.accent, letterSpacing: 1.5,
+  },
+  videoUploadedSub: {
+    fontFamily: F.bodyMed, fontSize: 11, color: SL.muted, letterSpacing: 0.3, marginTop: 2,
   },
   videoRemoveBtn: {
-    paddingHorizontal: 10, paddingVertical: 4,
-    borderWidth: 1, borderColor: 'rgba(255,68,68,0.4)', borderRadius: 4,
+    paddingHorizontal: 16, paddingVertical: 9,
+    borderWidth: 1, borderColor: 'rgba(138,176,204,0.35)', borderRadius: 999,
   },
   videoRemoveText: {
-    fontFamily: F.bodyMed, fontSize: 11, color: SL.danger, letterSpacing: 1,
+    fontFamily: F.bodyMed, fontSize: 13, color: SL.muted, letterSpacing: 1.5,
   },
 
   // ── Error & save ──────────────────────────────────────────────────────────────

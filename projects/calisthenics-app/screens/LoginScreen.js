@@ -17,6 +17,9 @@ const WIN_H = Dimensions.get('window').height;
 const PULSE = 2600;
 const ICE_SHEEN = ['#1E5A7A', '#2E7DA3', '#4A9EBF', '#2E7DA3', '#1E5A7A'];
 
+// The app's wordmark, matching the intro clip's title card.
+const WORDMARK = 'The System';
+
 const DEV_MS = 240;            // how long one deviation lasts (matches the TV-switch SFX)
 const MIN_GAP = 1500;          // shortest wait between deviations
 const MAX_GAP = 6000;          // longest wait between deviations
@@ -261,18 +264,18 @@ export default function LoginScreen() {
           >
             {collapsing && titleSize ? (
               <BrickShatter width={titleSize.width} height={titleSize.height} cols={12} rows={3}>
-                <Text style={[styles.logo, styles.shatterTitle]}>LevelX</Text>
+                <Text style={[styles.logo, styles.shatterTitle]}>{WORDMARK}</Text>
               </BrickShatter>
             ) : (
               <>
                 <Animated.Text style={[styles.logo, styles.logoGhostCyan, { opacity: logoGhostOp, transform: [{ translateX: logoGhost }] }]}>
-                  LevelX
+                  {WORDMARK}
                 </Animated.Text>
                 <Animated.Text style={[styles.logo, styles.logoGhostRed, { opacity: logoGhostOp, transform: [{ translateX: logoGhostNeg }] }]}>
-                  LevelX
+                  {WORDMARK}
                 </Animated.Text>
                 <Animated.View style={{ opacity: logoFlick }}>
-                  <ShimmerText text="LevelX" style={styles.logo} colors={BLUE} duration={PULSE} active />
+                  <ShimmerText text={WORDMARK} style={styles.logo} colors={BLUE} duration={PULSE} active />
                 </Animated.View>
               </>
             )}
@@ -359,7 +362,9 @@ const styles = StyleSheet.create({
   inner: { width: '100%', alignItems: 'center', paddingHorizontal: 52, paddingVertical: 74 },
   logoWrap: { marginBottom: 52 },
   logo: {
-    fontFamily: F.heading, fontSize: 84, color: C.iceGlow, letterSpacing: 9, textTransform: 'uppercase',
+    // "THE SYSTEM" is 10 glyphs against LevelX's 6, so the type comes down from
+    // 84/9 to keep the wordmark on one line inside the card's 680px frame.
+    fontFamily: F.heading, fontSize: 60, color: C.iceGlow, letterSpacing: 7, textTransform: 'uppercase',
     textShadowColor: 'rgba(74,158,191,0.55)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 30,
   },
   // RGB-split ghost copies — sit exactly over the real title, invisible until a

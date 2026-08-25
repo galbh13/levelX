@@ -28,11 +28,14 @@ const styles = StyleSheet.create({
   header: { paddingHorizontal: 22, paddingTop: 22, paddingBottom: 16 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   // Equal-flex side slots keep the title (and subtitle) dead-centered on the card
-  // regardless of how wide the BACK pill or the right action is.
-  sideLeft: { flex: 1, alignItems: 'flex-start' },
-  sideRight: { flex: 1, alignItems: 'flex-end' },
+  // regardless of how wide the BACK pill or the right action is. `minWidth` reserves
+  // room for the BACK pill so a long title can never shrink a slot to 0 and overlap
+  // it — the title truncates with an ellipsis between the slots instead.
+  sideLeft: { flex: 1, minWidth: 104, alignItems: 'flex-start' },
+  sideRight: { flex: 1, minWidth: 104, alignItems: 'flex-end' },
   title: {
     flexShrink: 1,
+    minWidth: 0,
     fontFamily: F.heading,
     fontSize: 28,
     color: ACCENT,

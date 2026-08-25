@@ -1,0 +1,9 @@
+# Supabase CLI project config. Only what the edge functions need — the database
+# itself is managed through the dashboard + the SQL in supabase/migrations.
+project_id = "wrqhlwprevvcepjrbrea"
+
+[functions.invite-player]
+# Supabase checks the caller's JWT before the function even runs. The function
+# then does its OWN check that the caller is role='admin' (a valid player token
+# is not enough to invite people).
+verify_jwt = true

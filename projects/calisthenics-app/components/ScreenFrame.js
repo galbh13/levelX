@@ -34,7 +34,12 @@ export const FRAME_PAD = 12;
 // `ready`: when the screen's own data is still loading, pass `false` so the
 // hologram-build entrance holds (the card stays covered) until the content —
 // and therefore the card's final size — is settled.
-export default function ScreenFrame({ children, overlay = null, shatter = false, ready = true, colors = BLUE, maxWidth = 1100, duration = 4200, fill = false, holoEntry = true }) {
+// `ghost`: renders the frame CHROMELESS — transparent background, no border, no
+// glow. Used when the screen is stacked as a transparentModal directly over an
+// identical framed screen (Workouts ⇄ Manage forge swipe): the screen underneath
+// provides the bg + border + hero, and this one overlays only its own content,
+// so the two bodies can cross-swipe inside what reads as ONE card.
+export default function ScreenFrame({ children, overlay = null, shatter = false, ready = true, colors = BLUE, maxWidth = 1100, duration = 4200, fill = false, holoEntry = true, ghost = false }) {
   const [size, setSize] = useState(null);
   // Decide on the FIRST render (lazy initializer) so the build's covers are
   // painted immediately — otherwise the card flashes for a frame before they
@@ -52,18 +57,20 @@ export default function ScreenFrame({ children, overlay = null, shatter = false,
     const { width, height } = e.nativeEvent.layout;
     setSize((prev) => prev || { width, height });
   };
-  const border = shatter && size
-    ? <FrameShatter width={size.width} height={size.height} />
-    : <ShimmerFrame style={styles.border} colors={colors} radius={18} thickness={4} duration={duration} active />;
+  const border = ghost
+    ? null
+    : shatter && size
+      ? <FrameShatter width={size.width} height={size.height} />
+      : <ShimmerFrame style={styles.border} colors={colors} radius={18} thickness={4} duration={duration} active />;
 
   // The border is overlaid as a sibling of the content-clip (not a child) so the
   // card's rounded `overflow:hidden` — needed to clip the screen content — can't
   // shave the frame thin at the corners. The content gets its own rounded clip.
   if (fill) {
     return (
-      <View style={styles.outerFill}>
-        <View style={[styles.frameBox, styles.frameBoxFill, { maxWidth }, shatter && styles.framedOpen]} onLayout={onLayout}>
-          <View style={[styles.contentClipFill, shatter && styles.framedOpen]}>
+      <View style={[styles.outerFill, ghost && styles.ghostBg]}>
+        <View style={[styles.frameBox, styles.frameBoxFill, { maxWidth }, shatter && styles.framedOpen, ghost && styles.ghostBox]} onLayout={onLayout}>
+          <View style={[styles.contentClipFill, shatter && styles.framedOpen, ghost && styles.ghostBg]}>
             {children}
             {overlay}
             {holo && <HoloBuild ready={ready} />}
@@ -75,15 +82,15 @@ export default function ScreenFrame({ children, overlay = null, shatter = false,
   }
 
   return (
-    <View style={styles.outer}>
+    <View style={[styles.outer, ghost && styles.ghostBg]}>
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        <View style={[styles.frameBox, { maxWidth }, shatter && styles.framedOpen]} onLayout={onLayout}>
-          <View style={[styles.contentClip, shatter && styles.framedOpen]}>
+        <View style={[styles.frameBox, { maxWidth }, shatter && styles.framedOpen, ghost && styles.ghostBox]} onLayout={onLayout}>
+          <View style={[styles.contentClip, shatter && styles.framedOpen, ghost && styles.ghostBg]}>
             {children}
             {overlay}
             {holo && <HoloBuild ready={ready} />}
@@ -118,6 +125,10 @@ const styles = StyleSheet.create({
   },
   // During the collapse, let the shattering pieces spill outside the card.
   framedOpen: { overflow: 'visible', backgroundColor: 'transparent' },
+  // Ghost mode — see the prop doc above: transparent bg, no glow (border is
+  // skipped separately). The screen underneath supplies all the chrome.
+  ghostBg:  { backgroundColor: 'transparent' },
+  ghostBox: { shadowOpacity: 0 },
 
   // ── Fill mode ──
   outerFill: { flex: 1, backgroundColor: C.bg, paddingHorizontal: FRAME_PAD, paddingVertical: 12, alignItems: 'center' },

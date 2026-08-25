@@ -6,6 +6,7 @@ import { supabase } from './supabase';
 export const WORKOUT_CATEGORIES = [
   { k: 'main',      l: 'MAIN QUEST',  color: '#4A9EBF' }, // ice
   { k: 'side',      l: 'SIDE QUEST',  color: '#A98BE0' }, // violet
+  { k: 'handstand', l: 'HANDSTAND',   color: '#E27BA6' }, // rose
   { k: 'accessory', l: 'ACCESSORIES', color: '#D9B65A' }, // gold
   { k: 'legs',      l: 'LEGS',        color: '#5FC79A' }, // green
 ];

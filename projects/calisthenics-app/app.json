@@ -1,16 +1,16 @@
 {
   "expo": {
-    "name": "levelx",
+    "name": "The System",
     "slug": "levelx",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#050912"
     },
     "ios": {
       "supportsTablet": true
@@ -19,7 +19,7 @@
       "package": "com.levelx.app",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#050912"
       },
       "edgeToEdgeEnabled": true
     },
@@ -32,7 +32,14 @@
       }
     },
     "plugins": [
-      "expo-font"
-    ]
+      "expo-font",
+      "expo-video"
+    ],
+    "updates": {
+      "url": "https://u.expo.dev/a030e9a0-893e-41e2-8d62-306e32485a57"
+    },
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    }
   }
 }

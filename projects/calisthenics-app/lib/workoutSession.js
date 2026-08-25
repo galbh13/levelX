@@ -10,10 +10,13 @@
 //     startedAt: ISO,
 //     segments: [{ start: ISO, end: ISO|null }],  // open last segment = active
 //     log: { [exerciseId]: [{ done: bool, reps: string }] },  // one entry per set
+//     lastActivityAt: ISO,  // last set check / reps edit / skip — drives the
+//                           // idle-trim when the player forgets to press FINISH
 //   }
 //
 // A "break" is the gap between one segment's end and the next segment's start —
-// i.e. the time the player spent out of Workout Mode (paused / phone away).
+// the time the player spent out of Workout Mode (exited / phone away) OR paused
+// in place via the ⏸ BREAK button (closed segment while still on the screen).
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 

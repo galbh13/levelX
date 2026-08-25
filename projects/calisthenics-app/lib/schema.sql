@@ -3,17 +3,32 @@ create table profiles (
   id         uuid primary key references auth.users(id) on delete cascade,
   email      text not null,
   full_name  text,
+  -- Captured at invite time so the coach can add them to the WhatsApp community.
+  phone      text,
   role       text not null default 'player' check (role in ('admin', 'player')),
   coach_id   uuid references profiles(id) on delete set null,  -- legacy/unused since self-coach refactor
+  -- Invited players start on a SHARED starter password, so they must replace it
+  -- before the app opens (App.js → SetPasswordScreen). See migrations/20260825_invite_player.sql.
+  must_change_password boolean not null default false,
   created_at timestamptz default now()
 );
 
--- Auto-insert a profile row when a new auth user is created (defaults to player)
+-- Auto-insert a profile row when a new auth user is created (defaults to player).
+-- `full_name` / `phone` / `must_change_password` ride in on the auth user's
+-- metadata, so an invite is one atomic createUser call with no follow-up write
+-- racing this trigger.
 create or replace function handle_new_user()
 returns trigger as $$
 begin
-  insert into profiles (id, email, role)
-  values (new.id, new.email, 'player');
+  insert into profiles (id, email, role, full_name, phone, must_change_password)
+  values (
+    new.id,
+    new.email,
+    'player',
+    nullif(trim(coalesce(new.raw_user_meta_data ->> 'full_name', '')), ''),
+    nullif(trim(coalesce(new.raw_user_meta_data ->> 'phone', '')), ''),
+    coalesce((new.raw_user_meta_data ->> 'must_change_password')::boolean, false)
+  );
   return new;
 end;
 $$ language plpgsql security definer;

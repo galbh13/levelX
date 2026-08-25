@@ -2,7 +2,10 @@ import React, { createContext, useContext, useState } from 'react';
 
 const CoachContext = createContext();
 
-export function CoachProvider({ children }) {
+// `isAdmin` marks the COACH-side provider (AdminNavigator). Screens shared by
+// both roles — WorkoutsScreen, StudentDetailScreen — read it to hide coach-only
+// tools (e.g. WORKOUTS LIBRARY) from players.
+export function CoachProvider({ children, isAdmin = false }) {
   const [selectedStudent,  setSelectedStudent]  = useState(null);
   const [selectedDay,      setSelectedDay]      = useState(null);
   const [pendingExercises, setPendingExercises] = useState([]);
@@ -28,6 +31,7 @@ export function CoachProvider({ children }) {
 
   return (
     <CoachContext.Provider value={{
+      isAdmin,
       selectedStudent, setSelectedStudent,
       selectedDay,     setSelectedDay,
       pendingExercises,

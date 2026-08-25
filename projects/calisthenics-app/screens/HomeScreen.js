@@ -8,6 +8,7 @@ import { F } from '../constants/fonts';
 import { supabase } from '../lib/supabase';
 import { computeLvl, computeClassMax } from '../lib/computeLvl';
 import { evaluatePrestige, prestigeStars } from '../lib/prestige';
+import { DEFAULT_JOB } from '../lib/jobs';
 import { israelToday } from '../lib/israelDate';
 import { materializeDay } from '../lib/schedule';
 import { categoryMeta } from '../lib/workouts';
@@ -18,6 +19,9 @@ import PopCheck from '../components/PopCheck';
 import { hapticTap } from '../lib/haptics';
 import { CARD_W, CARD_H } from '../constants/layout';
 import { sessionKey, activeSessionKeys } from '../lib/workoutSession';
+import GuidedTour from '../components/GuidedTour';
+import { markOnboardingSeen } from '../lib/onboarding';
+import { useTourTarget } from '../lib/tourTargets';
 
 // Off-program ACCESSORIES / LEGS missions glow in their type color; the dated
 // program keeps the default theme. Returns a color or null (= default).
@@ -52,6 +56,18 @@ function toRoman(token) {
   for (const [val, sym] of ROMAN) { while (rem >= val) { out += sym; rem -= val; } }
   return out;
 }
+
+// The gem is a ROTATED square, so the numeral doesn't get the gem's full width:
+// at the text's own cap height the diamond has already narrowed to roughly half
+// of it. A single "I" fits at full size, but "III" / "VIII" run into (and past)
+// the gold edge — which is why the numeral is sized by GLYPH COUNT rather than
+// set at one fixed size. Values are for the wide desktop card; makeDyn's card
+// scale multiplies on top. Wide numerals also drop their tracking to 0.
+const RANK_SIZE = { 1: 46, 2: 40, 3: 33 };
+const rankType = (text) => ({
+  fontSize: RANK_SIZE[text.length] ?? 26,
+  letterSpacing: text.length >= 3 ? 0 : 1,
+});
 
 // Bright pinks→white for the ENTER label, so it stays legible (and glows like the
 // light core) over the portal's dark button backing.
@@ -233,6 +249,9 @@ export default function HomeScreen({ navigation }) {
   const [dailyQuests,    setDailyQuests]    = useState([]);
   const [doneTodayIds,   setDoneTodayIds]   = useState(new Set());
   const [loading,        setLoading]        = useState(true);
+  // First-launch "How LevelX Works" walkthrough. Auto-opens once for a brand-new
+  // player (gated in AsyncStorage); the HOW IT WORKS button can reopen it anytime.
+  const [showOnboarding, setShowOnboarding] = useState(false);
   // Mission tapped → a red-gate portal the player steps through into the session.
   const [activeMission,  setActiveMission]  = useState(null);
   // Keys of workouts with a saved (in-progress) Workout Mode session on this
@@ -253,7 +272,8 @@ export default function HomeScreen({ navigation }) {
   // growing back to the full desktop look on wide windows. (Body text — mission /
   // quest rows, labels — is left near full size so it stays readable; see makeDyn.)
   const cardW = Math.min(CARD_W, winW - FRAME_PAD * 2);
-  const d     = useMemo(() => makeDyn(Math.min(1, Math.max(0.55, cardW / 1100))), [cardW]);
+  const scale = Math.min(1, Math.max(0.55, cardW / 1100));
+  const d     = useMemo(() => makeDyn(scale), [scale]);
 
   // ── Animations ────────────────────────────────────────────────────────────
   // Staggered entrance for the three vertical blocks (hero → stat → grid) plus a
@@ -281,6 +301,26 @@ export default function HomeScreen({ navigation }) {
     AccessibilityInfo.isReduceMotionEnabled?.().then(v => { if (alive) reduceMotion.current = !!v; });
     return () => { alive = false; };
   }, []);
+
+  // The tutorial opens ONLY when the player taps the TUTORIAL button — no
+  // first-launch auto-open.
+  const closeOnboarding = useCallback(() => {
+    markOnboardingSeen();
+    // The tour may have walked the player to another tab. Return to Home FIRST,
+    // while the overlay still covers the screen, then lift the overlay a beat
+    // later. Dismissing the overlay AND jumping the tab pager on the same frame
+    // desyncs react-native-pager-view (screen stuck half-shifted + unresponsive
+    // — the documented cross-tab hazard), which is what "skip goes crazy" was.
+    try { navigation.navigate('Home'); } catch {}
+    setTimeout(() => setShowOnboarding(false), 240);
+  }, [navigation]);
+
+  // Elements the guided tour measures + points its arrow at.
+  const tourLevelRef    = useTourTarget('home.level');
+  const tourMissionsRef = useTourTarget('home.missions');
+  // The FIRST mission row — the tour circles just one mission (not the whole panel)
+  // to teach "tap a single mission". Falls back to the panel on a rest day.
+  const tourMission1Ref = useTourTarget('home.mission1');
 
   // Entrance: stagger the blocks up, count the level up, and fill the bar — ONCE
   // per mount, the moment data is first ready. Depends on `!!profile` (a bool, not
@@ -339,7 +379,7 @@ export default function HomeScreen({ navigation }) {
 
       const { data: profileData } = await supabase
         .from('profiles')
-        .select('full_name, prestige_count, class_id')
+        .select('full_name, prestige_count, class_id, job')
         .eq('id', user.id)
         .single();
 
@@ -379,7 +419,10 @@ export default function HomeScreen({ navigation }) {
           ? supabase.from('class_quests').select('id, name, chain, quest_type, prerequisites').eq('class_id', profileData.class_id)
           : Promise.resolve({ data: [] }),
         supabase.from('student_quest_completions').select('quest_id').eq('student_id', user.id),
-        supabase.from('classes').select('id', { count: 'exact', head: true }),
+        // Per-job class count — stars reflect classes overcome within the
+        // player's own job ladder, not the total across every job.
+        supabase.from('classes').select('id', { count: 'exact', head: true })
+          .eq('job', profileData.job ?? DEFAULT_JOB),
       ]);
 
       setClassName(classRes.data?.name ?? null);
@@ -389,6 +432,7 @@ export default function HomeScreen({ navigation }) {
       // Gold bar = prestige actually AVAILABLE (full gate), not just the level
       // line. Same evaluator SkillsScreen uses.
       const prestigeEval = evaluatePrestige({
+        job:          profileData.job ?? DEFAULT_JOB,
         orderIndex:   classRes.data?.order_index ?? 0,
         quests:       questsRes.data ?? [],
         completedIds: new Set((complRes.data ?? []).map(c => c.quest_id)),
@@ -514,20 +558,15 @@ export default function HomeScreen({ navigation }) {
     await fetchData();
   }
 
-  // Jump straight into the live session for the tapped mission. WorkoutMode lives
-  // in the Workouts tab's stack, so reach it via nested navigation; it needs the
-  // dated workout (specific_date) to key the local session + completion write.
-  // `initial: false` keeps WorkoutsList beneath WorkoutMode in the stack so the
-  // EXIT button's goBack() lands on the Workouts tab — without it, the stack holds
-  // only WorkoutMode and goBack() bubbles up to the Tab navigator, which falls
-  // back to the first tab (Skills).
+  // Jump straight into the live session for the tapped mission. WorkoutMode is a
+  // ROOT screen pushed ABOVE the tab pager (registered in App.js's PlayerApp root
+  // stack), so this is a plain push that never moves the bottom-tab pager — the old
+  // cross-tab nested navigate desynced the pager and dropped us on the Workouts
+  // list. It needs the dated workout (specific_date) to key the local session +
+  // completion write. EXIT's goBack() pops back down to the tabs (on Home).
   function startWorkoutMode(workout) {
     setActiveMission(null);
-    navigation.navigate('Workouts', {
-      screen: 'WorkoutMode',
-      initial: false,
-      params: { workout: { ...workout, specific_date: TODAY } },
-    });
+    navigation.navigate('WorkoutMode', { workout: { ...workout, specific_date: TODAY } });
   }
 
   const missionLive  = !!activeMission && inProgress.has(sessionKey(TODAY, activeMission.id));
@@ -542,6 +581,8 @@ export default function HomeScreen({ navigation }) {
   const classParts  = (className ?? '').trim().split(/\s+/).filter(Boolean);
   const classRank   = classParts.length > 1 ? classParts[classParts.length - 1] : (classParts[0] ?? '');
   const classKicker = classParts.length > 1 ? classParts.slice(0, -1).join(' ') : null;
+  const rankNumeral = toRoman(classRank).toUpperCase();
+  const rankStyle   = rankType(rankNumeral);
 
   // Fade + rise as each block enters (native driver).
   const enterStyle = a => ({
@@ -554,17 +595,27 @@ export default function HomeScreen({ navigation }) {
     <View style={styles.card}>
     <View style={[styles.body, d.body]}>
 
-      {/* Sign Out */}
-      <TouchableOpacity
-        style={styles.signOutBtn}
-        activeOpacity={0.8}
-        onPress={() => supabase.auth.signOut()}
-      >
-        <View style={styles.powerIcon}>
-          <View style={styles.powerRing} />
-          <View style={styles.powerStem} />
-        </View>
-      </TouchableOpacity>
+      {/* Top row: HOW IT WORKS (replay the walkthrough) + Sign Out */}
+      <View style={styles.topBar}>
+        <TouchableOpacity
+          style={styles.helpBtn}
+          activeOpacity={0.8}
+          onPress={() => setShowOnboarding(true)}
+        >
+          <Text style={styles.helpLabel}>TUTORIAL</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.signOutBtn}
+          activeOpacity={0.8}
+          onPress={() => supabase.auth.signOut()}
+        >
+          <View style={styles.powerIcon}>
+            <View style={styles.powerRing} />
+            <View style={styles.powerStem} />
+          </View>
+        </TouchableOpacity>
+      </View>
 
       {/* The full layout ALWAYS renders, so the card never collapses to a spinner
           on load (the cause of the old size jump). While the first load is in
@@ -587,7 +638,20 @@ export default function HomeScreen({ navigation }) {
                   <View style={[styles.medallionWrap, d.medallionWrap]}>
                     <View style={[styles.medallion, d.medallion]} />
                     <View style={[styles.medallionInner, d.medallionInner]} />
-                    <Text style={[styles.medallionRank, d.medallionRank]}>{toRoman(classRank).toUpperCase()}</Text>
+                    <Text
+                      style={[
+                        styles.medallionRank,
+                        d.medallionRank,
+                        // Glyph-count sizing (III must be smaller than I to stay
+                        // inside the rotated gem), scaled with the card.
+                        { fontSize: Math.round(rankStyle.fontSize * scale), letterSpacing: rankStyle.letterSpacing },
+                      ]}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.7}
+                    >
+                      {rankNumeral}
+                    </Text>
                   </View>
 
                   {/* Right flourish — mirror of the left. */}
@@ -599,7 +663,14 @@ export default function HomeScreen({ navigation }) {
                 </View>
 
                 {classKicker && (
-                  <Text style={[styles.crestKicker, d.crestKicker]}>{classKicker.toUpperCase()}</Text>
+                  <Text
+                    style={[styles.crestKicker, d.crestKicker]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.6}
+                  >
+                    {classKicker.toUpperCase()}
+                  </Text>
                 )}
               </View>
             )}
@@ -607,7 +678,7 @@ export default function HomeScreen({ navigation }) {
 
           {/* ── LVL ── */}
           <Animated.View style={[styles.statsRow, d.statsRow, enterStyle(statAnim)]}>
-            <View style={[styles.statCard, d.statCard]}>
+            <View ref={tourLevelRef} style={[styles.statCard, d.statCard]}>
               <View style={styles.levelTopRow}>
                 <Text style={[styles.levelKicker, d.levelKicker]}>CURRENT LEVEL</Text>
                 {/* The % pill was dropped — the bar + "x / y" below already show
@@ -647,7 +718,7 @@ export default function HomeScreen({ navigation }) {
           <Animated.View style={[styles.sectionsRow, d.sectionsRow, enterStyle(gridAnim)]}>
 
             {/* Today's Missions */}
-            <View style={[styles.sectionPanel, d.sectionPanel]}>
+            <View ref={tourMissionsRef} style={[styles.sectionPanel, d.sectionPanel]}>
               <View style={styles.panelHeader}>
                 <View style={styles.panelHeaderBar} />
                 <Text style={[styles.panelHeaderText, d.panelHeaderText]} numberOfLines={2} ellipsizeMode="tail">
@@ -664,12 +735,28 @@ export default function HomeScreen({ navigation }) {
               <View style={styles.panelDivider} />
 
               {workouts.length === 0 ? (
-                <View style={styles.restDay}>
-                  <Text style={[styles.restDayText, d.restDayText]}>REST DAY</Text>
-                </View>
+                showOnboarding ? (
+                  // Tutorial-only demo mission: on a rest day there's no real card
+                  // for the "Start a Workout" step to box, so during the walkthrough
+                  // we show one placeholder mission (non-interactive) purely so the
+                  // player can SEE + experience what a mission looks like. Tagged as
+                  // home.mission1 so the tour highlights its exact shape.
+                  <View ref={tourMission1Ref} style={styles.missionCard} pointerEvents="none">
+                    <View style={styles.missionAccent} />
+                    <View style={styles.missionBody}>
+                      <Text style={styles.missionTitle} numberOfLines={1}>EXAMPLE WORKOUT</Text>
+                      <Text style={styles.missionPurpose} numberOfLines={1}>A sample mission — just for this tour</Text>
+                    </View>
+                    <View style={styles.missionCheckbox} />
+                  </View>
+                ) : (
+                  <View style={styles.restDay}>
+                    <Text style={[styles.restDayText, d.restDayText]}>REST DAY</Text>
+                  </View>
+                )
               ) : (
                 <>
-                  {workouts.map(workout => {
+                  {workouts.map((workout, mi) => {
                     // Mid-session today → swap in the live, animated card.
                     if (!workout.completed && inProgress.has(sessionKey(TODAY, workout.id))) {
                       return (
@@ -684,6 +771,7 @@ export default function HomeScreen({ navigation }) {
                     return (
                     <TouchableOpacity
                       key={workout.overrideId}
+                      ref={mi === 0 ? tourMission1Ref : undefined}
                       style={[
                         styles.missionCard,
                         workout.completed && styles.missionCardDone,
@@ -834,6 +922,15 @@ export default function HomeScreen({ navigation }) {
         </TouchableOpacity>
       </Modal>
 
+      {/* First-launch guided tour — walks the player through every tab (auto-opens
+          once for a new player; reopened via the HOW IT WORKS pill). It drives the
+          tab navigation itself so the real screens show behind each caption. */}
+      <GuidedTour
+        visible={showOnboarding}
+        onClose={closeOnboarding}
+        onNavigate={(tab) => navigation.navigate(tab)}
+      />
+
     </View>
     </View>
     </ScreenFrame>
@@ -856,8 +953,10 @@ function makeDyn(s) {
     medallionWrap:  { width: r(124), height: r(124) },
     medallion:      { width: r(98), height: r(98), borderRadius: r(14) },
     medallionInner: { width: r(70), height: r(70) },
-    medallionRank:  { fontSize: r(46) },
-    crestKicker:    { fontSize: r(30), marginTop: r(16), letterSpacing: 14 * s },
+    // No fontSize here — the numeral is sized by glyph count (see rankType) and
+    // multiplied by this same card scale in the render.
+    medallionRank:  { maxWidth: r(96) },
+    crestKicker:    { fontSize: r(46), marginTop: r(18), letterSpacing: 9 * s, paddingLeft: r(9) },
     statsRow:       { marginBottom: r(20) },
     statCard:       { paddingHorizontal: r(22), paddingVertical: r(18) },
     levelKicker:    { fontSize: rt(22) },
@@ -870,11 +969,15 @@ function makeDyn(s) {
 }
 
 const styles = StyleSheet.create({
-  // Fixed-height card (matches the Workouts/Weekly-Plan CARD_H) so the frame is a
-  // constant full-screen size from the first render — it never resizes with data
-  // or loading state. Content sits from the top; any slack is dead space below,
-  // exactly like the Workouts card.
-  card: { width: '100%', height: CARD_H },
+  // Constant-MINIMUM-height card (matches the Workouts/Weekly-Plan CARD_H) so the
+  // frame is a constant full-screen size from the first render — it never SHRINKS
+  // with data or loading state (no load-time size jump), so short-content days look
+  // identical to the other cards with dead space below. But unlike a hard `height`,
+  // `minHeight` lets the card GROW when a day has more missions/quests than fit in
+  // CARD_H — otherwise the overflow is clipped by ScreenFrame's `overflow:hidden`
+  // and unreachable (the old bug: extra daily quests sliced off the bottom). When it
+  // grows, ScreenFrame's outer ScrollView scrolls to reveal the rest.
+  card: { width: '100%', minHeight: CARD_H },
   // Content inside the card. The full layout ALWAYS renders — the load spinner is
   // overlaid, never swapped in — so the card never jumps size on load.
   body: {
@@ -891,14 +994,42 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
+  // Top chrome row: HOW IT WORKS on the left, the power/sign-out pill on the right.
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  // Quiet ice-pill that reopens the walkthrough — help without stealing focus.
+  helpBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    height: 44,
+    paddingHorizontal: 14,
+    borderRadius: 22,
+    borderWidth: 1.5,
+    borderColor: SL.accent,
+    backgroundColor: 'rgba(74,158,191,0.10)',
+    shadowColor: SL.accent,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.35,
+    shadowRadius: 10,
+    elevation: 4,
+  },
+  helpLabel: {
+    fontFamily: F.heading,
+    fontSize: 11,
+    letterSpacing: 1.5,
+    color: SL.accent,
+  },
   // Icon-only power pill — quiet chrome so the hero owns the top of the screen.
   signOutBtn: {
-    alignSelf: 'flex-end',
     alignItems: 'center',
     justifyContent: 'center',
     width: 44,
     height: 44,
-    marginBottom: 10,
     borderRadius: 22,
     borderWidth: 1.5,
     borderColor: SL.accent,
@@ -1050,19 +1181,23 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 18,
   },
+  // The JOB name — the title of the whole card. It is set in the heaviest display
+  // cut and large: at 30pt with 0.95 opacity it read as a caption next to the gem.
   crestKicker: {
     fontFamily: F.displayHeavy,
-    fontSize: 30,
+    fontWeight: '900',        // web fallback keeps the weight if Cinzel Black is late
+    fontSize: 46,
     color: SL.gold,
-    letterSpacing: 14,
-    // Cinzel renders as all-caps roman capitals; pad the left so the wide
-    // letter-spacing stays visually centered under the gem.
-    paddingLeft: 14,
-    marginTop: 16,
-    opacity: 0.95,
-    textShadowColor: 'rgba(255,215,0,0.6)',
+    // Tighter than before — at this size the old tracking read thin and stretched.
+    letterSpacing: 9,
+    // Cinzel renders as all-caps roman capitals; pad the left by one tracking step
+    // so the trailing space stays visually centered under the gem.
+    paddingLeft: 9,
+    marginTop: 18,
+    textAlign: 'center',
+    textShadowColor: 'rgba(255,215,0,0.55)',
     textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 10,
+    textShadowRadius: 16,
   },
   // ── Stats row ─────────────────────────────────────────────────────────────
 

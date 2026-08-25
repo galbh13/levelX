@@ -62,7 +62,7 @@ export default function WorkoutSummaryScreen({ route, navigation }) {
   const {
     title, dateStr, totalActiveMs, spanStart, spanEnd,
     segments = [], breaks = [], exercises = [], pathLabel = null,
-    totalSetsDone, totalSets,
+    totalSetsDone, totalSets, trimmedIdleMs = 0,
   } = summary;
 
   const hadBreaks = breaks.length > 0;
@@ -91,6 +91,9 @@ export default function WorkoutSummaryScreen({ route, navigation }) {
           <Text style={styles.heroLabel}>TRAINING TIME</Text>
           <Text style={styles.heroValue}>{fmtDur(totalActiveMs)}</Text>
           <Text style={styles.heroSpan}>{fmtClock(spanStart)} → {fmtClock(spanEnd)}</Text>
+          {trimmedIdleMs > 0 && (
+            <Text style={styles.heroTrim}>✂ {fmtDur(trimmedIdleMs)} idle after last set — not counted</Text>
+          )}
         </View>
 
         {/* Stat chips */}
@@ -165,7 +168,15 @@ export default function WorkoutSummaryScreen({ route, navigation }) {
         <PillButton
           label="DONE"
           size="lg"
-          onPress={() => navigation.navigate('Home')}
+          // Portal entry: the summary sits ABOVE the tabs in the root stack, so
+          // getParent() is undefined — hop to the Tabs screen's Home tab (this also
+          // pops the summary). Gallery entry: the summary is inside the Workouts/
+          // Admin stack, so getParent() is the tab navigator, which has Home.
+          onPress={() => {
+            const parent = navigation.getParent();
+            if (parent) parent.navigate('Home');
+            else navigation.navigate('Tabs', { screen: 'Home' });
+          }}
           style={{ marginTop: 4 }}
         />
       </View>
@@ -220,6 +231,7 @@ const styles = StyleSheet.create({
   heroLabel: { fontFamily: F.body, fontSize: 12, color: SL.muted, letterSpacing: 3 },
   heroValue: { fontFamily: F.heading, fontSize: 32, color: SL.text, letterSpacing: 2 },
   heroSpan: { fontFamily: F.bodyMed, fontSize: 13, color: SL.accent, letterSpacing: 1 },
+  heroTrim: { fontFamily: F.bodyMed, fontSize: 12, color: SL.muted, letterSpacing: 0.5, marginTop: 2 },
 
   statRow: { flexDirection: 'row', gap: 10 },
   statChip: {

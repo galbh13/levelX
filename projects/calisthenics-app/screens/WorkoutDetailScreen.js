@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
@@ -9,6 +9,19 @@ import { F } from '../constants/fonts';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
+
+// Normalize an exercise name for catalog matching — lowercased, punctuation and
+// extra whitespace stripped — so minor formatting differences between the workout
+// row and the gallery catalog still match. (Same rule as Workout Mode.)
+function normName(name) {
+  return String(name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Session-lifetime cache of everything the screen fetches, keyed by workout id.
+// A revisit renders the cached content INSTANTLY (no spinner) and then refetches
+// silently in the background, so "View Workout" feels immediate after the first
+// open. Module-level: survives unmount/remount, cleared on full app reload.
+const detailCache = new Map();
 
 const SL = {
   bg:     '#050912',
@@ -26,17 +39,29 @@ const SL = {
 export default function WorkoutDetailScreen({ route, navigation }) {
   const { workout, studentView } = route.params;
 
-  const [exercises,      setExercises]      = useState([]);
-  const [loading,        setLoading]        = useState(true);
-  const [workoutTitle,    setWorkoutTitle]    = useState(workout.title        ?? '');
-  const [workoutPurpose,  setWorkoutPurpose]  = useState(workout.purpose      ?? '');
-  const [coachFeedback,   setCoachFeedback]   = useState(workout.coachFeedback  ?? null);
-  const [feedbackIsRead,  setFeedbackIsRead]  = useState(workout.feedbackIsRead ?? false);
+  // Seed everything from the cache when this workout was opened before — the
+  // full content paints on the very first frame, no spinner.
+  const cached = detailCache.get(workout.id);
+
+  const [exercises,      setExercises]      = useState(cached?.exercises ?? []);
+  const [loading,        setLoading]        = useState(!cached);
+  const [workoutTitle,    setWorkoutTitle]    = useState(cached?.workoutTitle   ?? workout.title   ?? '');
+  const [workoutPurpose,  setWorkoutPurpose]  = useState(cached?.workoutPurpose ?? workout.purpose ?? '');
+  const [coachFeedback,   setCoachFeedback]   = useState(cached?.coachFeedback  ?? workout.coachFeedback  ?? null);
+  const [feedbackIsRead,  setFeedbackIsRead]  = useState(cached?.feedbackIsRead ?? workout.feedbackIsRead ?? false);
   // Fork paths: workouts.branches = [{key,label},{key,label}] (or empty/null).
-  const [branches,        setBranches]        = useState(workout.branches ?? []);
+  const [branches,        setBranches]        = useState(cached?.branches ?? workout.branches ?? []);
+  // Shared exercise catalog, keyed both ways so tapping a name can open its
+  // how-to card: exact `gallery_id` link first, normalized-name match as fallback.
+  const [galleryById,     setGalleryById]     = useState(cached?.galleryById   ?? {});
+  const [galleryByName,   setGalleryByName]   = useState(cached?.galleryByName ?? {});
+
+  // Only the FIRST load shows the spinner; focus refetches (e.g. coming back
+  // from an exercise card) are silent so the card never collapses and reloads.
+  const loadedRef = useRef(!!cached);
 
   const fetchExercises = useCallback(async () => {
-    setLoading(true);
+    if (!loadedRef.current) setLoading(true);
     try {
       const queries = [
         supabase
@@ -51,7 +76,7 @@ export default function WorkoutDetailScreen({ route, navigation }) {
           .single(),
         supabase
           .from('exercises_gallery')
-          .select('name, youtube_url'),
+          .select('*'),
       ];
       if (workout.overrideId) {
         queries.push(
@@ -64,26 +89,50 @@ export default function WorkoutDetailScreen({ route, navigation }) {
       }
       const [exercisesRes, workoutRes, galleryRes, overrideRes] = await Promise.all(queries);
       if (exercisesRes.error) console.error('[WorkoutDetail] exercises fetch error:', exercisesRes.error);
+      const next = {};
       if (workoutRes.data) {
-        setWorkoutTitle(workoutRes.data.title ?? '');
-        setWorkoutPurpose(workoutRes.data.purpose ?? '');
-        setBranches(workoutRes.data.branches ?? []);
+        next.workoutTitle   = workoutRes.data.title ?? '';
+        next.workoutPurpose = workoutRes.data.purpose ?? '';
+        next.branches       = workoutRes.data.branches ?? [];
+        setWorkoutTitle(next.workoutTitle);
+        setWorkoutPurpose(next.workoutPurpose);
+        setBranches(next.branches);
       }
       if (overrideRes?.data) {
-        setCoachFeedback(overrideRes.data.coach_feedback ?? null);
-        setFeedbackIsRead(overrideRes.data.feedback_is_read ?? false);
+        next.coachFeedback  = overrideRes.data.coach_feedback ?? null;
+        next.feedbackIsRead = overrideRes.data.feedback_is_read ?? false;
+        setCoachFeedback(next.coachFeedback);
+        setFeedbackIsRead(next.feedbackIsRead);
       }
-      const galleryMap = Object.fromEntries(
-        (galleryRes.data ?? []).map(g => [g.name.toLowerCase(), g.youtube_url])
-      );
+      const gById = {};
+      const gByName = {};
+      for (const g of galleryRes.data ?? []) {
+        gById[g.id] = g;
+        if (g.name) gByName[normName(g.name)] = g;
+      }
+      setGalleryById(gById);
+      setGalleryByName(gByName);
+
       const exercisesWithVideo = (exercisesRes.data ?? []).map(ex => ({
         ...ex,
-        youtube_url: galleryMap[ex.name?.toLowerCase()] ?? null,
+        youtube_url:
+          (ex.gallery_id ? gById[ex.gallery_id]?.youtube_url : null)
+          ?? gByName[normName(ex.name)]?.youtube_url
+          ?? null,
       }));
       setExercises(exercisesWithVideo);
+
+      detailCache.set(workout.id, {
+        ...detailCache.get(workout.id),
+        ...next,
+        exercises: exercisesWithVideo,
+        galleryById: gById,
+        galleryByName: gByName,
+      });
     } catch (e) {
       console.error('[WorkoutDetail] fetchExercises exception:', e);
     }
+    loadedRef.current = true;
     setLoading(false);
   }, [workout.id, workout.overrideId]);
 
@@ -93,6 +142,8 @@ export default function WorkoutDetailScreen({ route, navigation }) {
     if (!workout.overrideId) return;
     const newVal = !feedbackIsRead;
     setFeedbackIsRead(newVal);
+    const c = detailCache.get(workout.id);
+    if (c) detailCache.set(workout.id, { ...c, feedbackIsRead: newVal });
     const { error } = await supabase
       .from('workout_override_workouts')
       .update({ feedback_is_read: newVal })
@@ -103,6 +154,17 @@ export default function WorkoutDetailScreen({ route, navigation }) {
     }
   }
 
+  // Tapping an exercise name opens its how-to card (video + coaching cues).
+  // Resolve the catalog row by the exact `gallery_id` link first, then a
+  // normalized-name match; if nothing matches, fall back to a name-only card so
+  // every title stays tappable (same 3-tier resolution as Workout Mode).
+  const openExercise = (ex) => {
+    const guide = (ex.gallery_id ? galleryById[ex.gallery_id] : null)
+      ?? galleryByName[normName(ex.name)]
+      ?? { name: ex.name, movement_type: ex.variation ?? null };
+    navigation.navigate('ExerciseDetail', { exercise: guide, hideEdit: true });
+  };
+
   // One exercise card. `compact` shrinks it so two fit side by side in a fork path.
   const renderExercise = (ex, compact = false) => (
     <View key={ex.id} style={[styles.exCard, compact && styles.exCardCompact]}>
@@ -110,7 +172,15 @@ export default function WorkoutDetailScreen({ route, navigation }) {
         <Text style={[styles.letterText, compact && styles.letterTextSm]}>{ex.letter}</Text>
       </View>
       <View style={styles.exBody}>
-        <Text style={[styles.exName, compact && styles.exNameSm]}>{ex.name?.toUpperCase()}</Text>
+        <TouchableOpacity
+          onPress={() => openExercise(ex)}
+          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.exName, styles.exNameLink, compact && styles.exNameSm]}>
+            {ex.name?.toUpperCase()} <Text style={styles.exNameHint}>ⓘ</Text>
+          </Text>
+        </TouchableOpacity>
         {ex.variation ? <Text style={styles.exVariation}>※ {ex.variation}</Text> : null}
         <View style={styles.metaRow}>
           {ex.superset_group != null ? (
@@ -148,7 +218,9 @@ export default function WorkoutDetailScreen({ route, navigation }) {
   const branchExercises = (key) => exercises.filter(e => e.branch === key);
 
   return (
-    <ScreenFrame maxWidth={900} ready={!loading}>
+    // fill mode: the frame spans the whole viewport from the first frame — its
+    // size comes from the phone, never from the data, so loading can't shrink it.
+    <ScreenFrame fill maxWidth={900} ready={!loading}>
       <ScreenHeader title={workoutTitle} onBack={() => navigation.goBack()} />
       {workoutPurpose ? (
         <View style={styles.purposeRow}>
@@ -158,9 +230,15 @@ export default function WorkoutDetailScreen({ route, navigation }) {
       ) : null}
 
       {loading ? (
-        <ActivityIndicator color={SL.accent} style={{ marginTop: 48 }} size="large" />
+        <View style={styles.loadingBox}>
+          <ActivityIndicator color={SL.accent} size="large" />
+        </View>
       ) : (
-        <View style={styles.list}>
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={styles.list}
+          showsVerticalScrollIndicator={false}
+        >
           {/* Common (trunk) exercises — done by everyone, single column */}
           {trunk.map(ex => renderExercise(ex))}
 
@@ -256,7 +334,7 @@ export default function WorkoutDetailScreen({ route, navigation }) {
           )}
 
           <View style={{ height: 32 }} />
-        </View>
+        </ScrollView>
       )}
     </ScreenFrame>
   );
@@ -284,6 +362,9 @@ const styles = StyleSheet.create({
     color: SL.muted,
     letterSpacing: 0.5,
   },
+
+  // Centers the first-load spinner in the fixed full-height frame.
+  loadingBox: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 
   // Inner content padding — the ScreenFrame provides the glowing outer frame.
   list: {
@@ -405,6 +486,12 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     textTransform: 'uppercase',
   },
+  // The name is a button into the how-to card — ice-glow + ⓘ hint marks it tappable.
+  exNameLink: {
+    color: SL.accent,
+    textShadowColor: 'rgba(74,158,191,0.5)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
+  },
+  exNameHint: { fontFamily: F.heading, fontSize: 17, color: SL.accent },
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   metaChip: {
     borderWidth: 1,
