@@ -193,21 +193,88 @@ export async function fetchAllBilling() {
   return map;
 }
 
-export async function fetchPlayerBilling(playerId) {
+// ─── Contact details live on the PROFILE, not on the billing row ─────────────
+// PHONE and BIRTHDAY are global: one number, one date per player, typed once on
+// the ＋ NEW PLAYER form and shown wherever they're needed — the business card
+// included. `player_billing.phone` / `player_billing.birthday` predate that and
+// are legacy; nothing writes them anymore, and the migration backfilled whatever
+// was already in them onto `profiles`.
+//
+// The READ swallows its errors on purpose: the live schema has drifted from
+// migrations before, and a missing `profiles.birthday` must not be able to take
+// the whole MONEY & MEMBERSHIP card down — blank fields are survivable, a screen
+// that won't load is not. The WRITE does NOT swallow: a save that silently does
+// nothing is worse than an error, because you only find out months later that
+// the number you needed was never stored.
+const CONTACT_FIELDS = ['phone', 'birthday'];
+
+export async function fetchPlayerContact(playerId) {
+  try {
+    const { data, error } = await supabase
+      .from('profiles').select('phone, birthday').eq('id', playerId).maybeSingle();
+    if (error) throw error;
+    return { phone: data?.phone ?? null, birthday: data?.birthday ?? null };
+  } catch (e) {
+    console.warn('[billing] fetchPlayerContact:', e?.message ?? e);
+    return {};
+  }
+}
+
+export async function savePlayerContact(playerId, contact) {
+  // `.select()` on the update is the whole point of this call: PostgREST reports
+  // an update that matched NO rows as a perfectly happy success, so without it an
+  // RLS policy that hides other people's profiles looks identical to a save that
+  // worked. Missing columns surface as a real error; a blocked row surfaces as an
+  // empty array. Both have to be loud.
   const { data, error } = await supabase
-    .from('player_billing').select('*').eq('player_id', playerId).maybeSingle();
+    .from('profiles').update(contact).eq('id', playerId).select('id');
+  if (error) {
+    throw new Error(`Phone/birthday didn't save — ${error.message}`);
+  }
+  if (!data?.length) {
+    throw new Error(
+      "Phone/birthday didn't save — the profile row wasn't writable (row-level security).",
+    );
+  }
+}
+
+export async function fetchPlayerBilling(playerId) {
+  const [{ data, error }, contact] = await Promise.all([
+    supabase.from('player_billing').select('*').eq('player_id', playerId).maybeSingle(),
+    fetchPlayerContact(playerId),
+  ]);
   if (error) throw error;
-  return data;
+  // The profile wins over whatever the legacy billing columns still hold.
+  return data ? { ...data, ...contact } : null;
 }
 
 export async function savePlayerBilling(playerId, patch) {
-  const { data, error } = await supabase
-    .from('player_billing')
-    .upsert({ player_id: playerId, ...patch, updated_at: new Date().toISOString() })
-    .select()
-    .single();
+  // Peel the contact details off — they belong to the profile, and the billing
+  // row must not end up holding a second, divergent copy.
+  const contact = {};
+  const billing = { ...patch };
+  CONTACT_FIELDS.forEach((k) => {
+    if (k in billing) { contact[k] = billing[k]; delete billing[k]; }
+  });
+
+  // allSettled, not all: the two writes go to different tables and neither one
+  // failing should throw away the other's result. The billing row is reported
+  // first because it is the bigger loss.
+  const [billed, contacted] = await Promise.allSettled([
+    supabase
+      .from('player_billing')
+      .upsert({ player_id: playerId, ...billing, updated_at: new Date().toISOString() })
+      .select()
+      .single(),
+    Object.keys(contact).length ? savePlayerContact(playerId, contact) : null,
+  ]);
+
+  if (billed.status === 'rejected') throw billed.reason;
+  const { data, error } = billed.value;
   if (error) throw error;
-  return data;
+  if (contacted.status === 'rejected') throw contacted.reason;
+
+  return { ...data, ...contact };
 }
 
 /** Ledger rows. Omit `playerId` for the whole business. */

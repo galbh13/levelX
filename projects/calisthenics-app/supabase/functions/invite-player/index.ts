@@ -1,8 +1,9 @@
 // invite-player — the coach's "new disciple" button.
 //
-// Called from AdminDashboard with the signed-in admin's JWT (email, full name
-// and phone — the phone is how the coach adds them to the WhatsApp community).
-// It:
+// Called from AdminDashboard with the signed-in admin's JWT (email, full name,
+// phone and birthday — the phone is how the coach adds them to the WhatsApp
+// community; both land on `profiles` as the player's global contact details,
+// which the BUSINESS card then reads). It:
 //   1. verifies the caller is a real, logged-in `role = 'admin'` profile,
 //   2. creates the auth user with the shared starter password (email already
 //      confirmed, so they can log in immediately — no click-to-verify step),
@@ -77,7 +78,7 @@ Deno.serve(async (req) => {
   }
 
   // ── 2. Validate input ─────────────────────────────────────────────────────
-  let body: { email?: string; full_name?: string; phone?: string };
+  let body: { email?: string; full_name?: string; phone?: string; birthday?: string };
   try {
     body = await req.json();
   } catch {
@@ -93,6 +94,17 @@ Deno.serve(async (req) => {
   const phoneDigits = phoneRaw.replace(/\D/g, '');
   const phone = phoneRaw.startsWith('+') ? `+${phoneDigits}` : phoneDigits;
 
+  // Birthday is OPTIONAL (the coach may not know it yet) but must be a real
+  // YYYY-MM-DD if given — a `date` column rejects anything else, and inside the
+  // signup trigger that surfaces as the useless "Database error creating new
+  // user". Empty string means NULL.
+  const birthdayRaw = String(body.birthday ?? '').trim();
+  const birthdayOk = !birthdayRaw || (
+    /^\d{4}-\d{2}-\d{2}$/.test(birthdayRaw) &&
+    new Date(`${birthdayRaw}T00:00:00Z`).toISOString().slice(0, 10) === birthdayRaw
+  );
+  const birthday = birthdayRaw || null;
+
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return json({ error: 'That does not look like a valid email address.' }, 400);
   }
@@ -102,6 +114,9 @@ Deno.serve(async (req) => {
   if (phoneDigits.length < 7 || phoneDigits.length > 15) {
     return json({ error: 'That does not look like a valid phone number.' }, 400);
   }
+  if (!birthdayOk) {
+    return json({ error: 'Birthday must be a real date, written YYYY-MM-DD.' }, 400);
+  }
 
   // ── 3. Create the auth user ───────────────────────────────────────────────
   // The `on_auth_user_created` trigger turns this into a profiles row (role
@@ -110,7 +125,7 @@ Deno.serve(async (req) => {
     email,
     password: STARTER_PASSWORD,
     email_confirm: true,
-    user_metadata: { full_name: fullName, phone, must_change_password: true },
+    user_metadata: { full_name: fullName, phone, birthday, must_change_password: true },
   });
 
   if (createErr) {
@@ -121,14 +136,15 @@ Deno.serve(async (req) => {
     );
   }
 
-  // ── 3b. Safety net for the phone ──────────────────────────────────────────
-  // The trigger carries `phone` across from the metadata (migrations/
-  // 20260825_profile_phone.sql), but this project's live schema has drifted from
-  // migrations before. Writing it again costs one statement and means the number
-  // lands even if the live trigger is still the older one. Failure here is not
-  // fatal — the account exists and the number is still on the auth user.
+  // ── 3b. Safety net for the contact details ────────────────────────────────
+  // The trigger carries `phone` + `birthday` across from the metadata
+  // (migrations/20260825_profile_contact.sql), but this project's live schema
+  // has drifted from migrations before. Writing them again costs one statement
+  // and means they land even if the live trigger is still an older one. Failure
+  // here is not fatal — the account exists and both values are still on the auth
+  // user's metadata.
   if (created.user?.id) {
-    await admin.from('profiles').update({ phone }).eq('id', created.user.id);
+    await admin.from('profiles').update({ phone, birthday }).eq('id', created.user.id);
   }
 
   // ── 4. Email the player their credentials ─────────────────────────────────
@@ -151,13 +167,8 @@ Deno.serve(async (req) => {
     'The password above is a one-time starter — the app will ask you to set your',
     'own the first time you sign in. Pick something only you know.',
     '',
-    'Once you are inside:',
-    '  1. SKILLS   — your quest tree. This is your handstand ladder; complete nodes to level.',
-    '  2. HOME     — your daily quest. Do it every day.',
-    '  3. PERSONAL — message me directly and submit your check-ups.',
-    '',
     'Train hard.',
-    FROM_NAME,
+    'Gal Benhamo',
   ].join('\n');
 
   const html = `
@@ -186,14 +197,7 @@ Deno.serve(async (req) => {
           the first time you sign in. Pick something only you know.
         </p>
 
-        <div style="border-top:1px solid #1a3a5c;padding-top:22px;">
-          <div style="color:#4A9EBF;font-size:12px;letter-spacing:3px;margin-bottom:14px;">ONCE YOU ARE INSIDE</div>
-          <p style="margin:0 0 10px;"><b style="color:#4A9EBF;">SKILLS</b> &mdash; your quest tree. This is your handstand ladder; complete nodes to level.</p>
-          <p style="margin:0 0 10px;"><b style="color:#4A9EBF;">HOME</b> &mdash; your daily quest. Do it every day.</p>
-          <p style="margin:0 0 10px;"><b style="color:#4A9EBF;">PERSONAL</b> &mdash; message me directly and submit your check-ups.</p>
-        </div>
-
-        <p style="margin:26px 0 0;color:#4a6a8a;font-size:13px;">Train hard.<br/>${escapeHtml(FROM_NAME)}</p>
+        <p style="margin:0;border-top:1px solid #1a3a5c;padding-top:22px;color:#4a6a8a;font-size:13px;">Train hard.<br/>Gal Benhamo</p>
       </div>
     </div>
   </div>`;
@@ -235,5 +239,5 @@ Deno.serve(async (req) => {
     });
   }
 
-  return json({ ok: true, emailed: true, email, phone, user_id: created.user?.id });
+  return json({ ok: true, emailed: true, email, phone, birthday, user_id: created.user?.id });
 });

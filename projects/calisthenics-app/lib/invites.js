@@ -42,13 +42,31 @@ export function isValidPhone(phone) {
 }
 
 /**
+ * A birthday is `YYYY-MM-DD` or nothing — the same shape the business card uses,
+ * and what a Postgres `date` column takes. Empty is fine (it's optional; the
+ * coach may simply not know it yet), but a half-typed date is not: it would be
+ * rejected by the database mid-invite.
+ */
+export function isValidBirthday(birthday) {
+  const s = String(birthday ?? '').trim();
+  if (!s) return true;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  // Parsed as UTC, not local: `toISOString` reports UTC, so a local-midnight
+  // parse would shift the date a day backwards east of Greenwich and reject
+  // every valid birthday here in Israel.
+  const d = new Date(`${s}T00:00:00Z`);
+  // Round-trips only if the date really exists — 2001-02-30 parses but rolls over.
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
+/**
  * Create a player account and email them their credentials.
  * Resolves `{ ok, emailed, warning }` — `ok: true, emailed: false` means the
  * account exists but the mail failed, which is worth telling the admin about
  * without calling the whole thing a failure.
  * Rejects with an Error carrying the server's message on a real failure.
  */
-export async function invitePlayer({ email, fullName, phone }) {
+export async function invitePlayer({ email, fullName, phone, birthday }) {
   const { data, error } = await supabase.functions.invoke('invite-player', {
     body: {
       email: String(email).trim().toLowerCase(),
@@ -56,6 +74,7 @@ export async function invitePlayer({ email, fullName, phone }) {
       // Normalized here as well as server-side — the stored value is the one the
       // admin will paste into WhatsApp, so it should never carry the typing.
       phone: normalizePhone(phone),
+      birthday: String(birthday ?? '').trim(),   // '' → NULL server-side
     },
   });
 

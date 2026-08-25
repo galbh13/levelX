@@ -119,7 +119,8 @@ The central user table. One row per auth user.
 | `id` | uuid PK | References `auth.users(id)` |
 | `email` | text | Copied from auth on sign-up |
 | `full_name` | text | Set at invite time (the admin types it on the ＋ NEW PLAYER form; carried in via the auth user's `raw_user_meta_data`). Never editable afterwards — see Player Card. |
-| `phone` | text | **The player's WhatsApp number**, captured on the ＋ NEW PLAYER form (required there) and carried in via the auth user's `raw_user_meta_data` like `full_name`. Stored normalized — a leading `+` if one was typed, then digits only — because that is what gets pasted into a WhatsApp contact when the coach adds them to the community. `NULL` for accounts created before `migrations/20260825_profile_phone.sql`. |
+| `phone` | text | **The player's WhatsApp number**, captured on the ＋ NEW PLAYER form (required there) and carried in via the auth user's `raw_user_meta_data` like `full_name`. Stored normalized — a leading `+` if one was typed, then digits only — because that is what gets pasted into a WhatsApp contact when the coach adds them to the community. **This is the GLOBAL phone number**: `PlayerBillingScreen`'s PHONE field reads and writes it (see the note below). Added in `migrations/20260825_profile_contact.sql`. |
+| `birthday` | date | The player's birthday, optional, captured on the ＋ NEW PLAYER form as `YYYY-MM-DD` and carried in on `raw_user_meta_data`. **The GLOBAL birthday** — same field the business card edits. Added in `migrations/20260825_profile_contact.sql`. |
 | `role` | text | `'admin'` or `'player'` (default `'player'`). Coach/student roles removed in self-coach refactor. |
 | `coach_id` | uuid | FK → `profiles(id)`. **Legacy / unused** since self-coach refactor — always NULL. |
 | `current_lvl` | integer | **Legacy / unused** — LVL is computed from completions, not stored (see [lib/computeLvl.js](lib/computeLvl.js)) |
@@ -145,15 +146,31 @@ The central user table. One row per auth user.
 > Setup + deploy: `supabase/functions/README.md`.
 >
 > **The trigger does the profile insert.** `handle_new_user()` was extended to read
-> `full_name`, `phone` and `must_change_password` off the new auth user's
-> `raw_user_meta_data`, so the invite is ONE `auth.admin.createUser` call — no
-> follow-up profile write that could race the trigger. `job` still comes from the
-> column default (`'handstand'`), and `role` from the trigger (`'player'`).
-> The edge function does write `phone` a second time straight after the create
-> (`migrations/20260825_profile_phone.sql` adds the column AND rewrites the
-> trigger) — a deliberate belt-and-braces, because this project's live schema has
-> drifted from migrations before and a stale trigger would silently drop the
-> number.
+> `full_name`, `phone`, `birthday` and `must_change_password` off the new auth
+> user's `raw_user_meta_data`, so the invite is ONE `auth.admin.createUser` call —
+> no follow-up profile write that could race the trigger. `job` still comes from
+> the column default (`'handstand'`), and `role` from the trigger (`'player'`).
+> The edge function does write `phone` + `birthday` a second time straight after
+> the create (`migrations/20260825_profile_contact.sql` adds both columns AND
+> rewrites the trigger) — a deliberate belt-and-braces, because this project's
+> live schema has drifted from migrations before and a stale trigger would
+> silently drop them. The trigger casts `birthday` inside its own
+> `begin…exception` block for the same reason: a bad date must not turn into
+> Auth's useless "Database error creating new user".
+
+> **PHONE + BIRTHDAY are GLOBAL, and they live on `profiles` (2026-08-25).** One
+> number and one date per player, typed once on ＋ NEW PLAYER and shown wherever
+> they're needed. **`player_billing.phone` / `player_billing.birthday` are now
+> LEGACY** — nothing writes them; the migration backfilled whatever was already
+> typed into the business card onto `profiles` (filling blanks only, profile
+> wins). The MONEY & MEMBERSHIP card still shows both fields, but
+> `fetchPlayerBilling()` merges the profile values over the billing row and
+> `savePlayerBilling()` peels `phone`/`birthday` out of the patch and writes them
+> to `profiles` instead (`fetchPlayerContact` / `savePlayerContact` in
+> [lib/billing.js](lib/billing.js)). Editing the business card therefore updates
+> the same value the invite set. Both contact helpers **swallow their errors** —
+> a missing column on a drifted live database must not be able to take the whole
+> business card down.
 
 > **Profile screen removed (2026-07-14)** — the Profile tab was replaced by the
 > weekly check-up (see `checkups` below). Its three vanity columns
@@ -1224,7 +1241,8 @@ One row per player — the customer file. **No row = never commercially onboarde
 | `source` | text | **Acquisition channel** — referral / instagram / gym … The highest-value analytics field here: which channel produces customers who STAY is only knowable if it was recorded on day one |
 | `referred_by` | uuid | FK → `profiles(id)` — who sent them |
 | `goal` | text | Why they came (drives the upsell conversation) |
-| `phone` / `birthday` / `medical_notes` | text/date/text | Relationship fields |
+| `phone` / `birthday` | text/date | **LEGACY as of 2026-08-25** — the live values live on `profiles.phone` / `profiles.birthday` (global, set at invite time). Nothing writes these anymore; `lib/billing.js` reads and saves the profile columns behind the business card's PHONE / BIRTHDAY fields. Kept only so the backfill in `migrations/20260825_profile_contact.sql` has a source. |
+| `medical_notes` | text | Relationship field |
 | `churn_reason` | text | **Coded** (`price`/`time`/`injury`/`moved`/`results`/`ghosted`/`goal_reached`/`other`) so it aggregates |
 | `churn_note` | text | The colour behind the code |
 | `notes` | text | Private admin notes |

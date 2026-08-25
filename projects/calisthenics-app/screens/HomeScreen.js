@@ -456,7 +456,7 @@ export default function HomeScreen({ navigation }) {
         : (templateRes.data ?? []).map(t => ({ workout_id: t.workout_id, overrideId: null, completed: false }));
 
       if (resolved.length === 0) {
-        setWorkouts([]); loadedRef.current = true; setLoading(false); return;
+        setWorkouts([]); return;   // the `finally` clears loading
       }
 
       const workoutIds = [...new Set(resolved.map(r => r.workout_id))];
@@ -473,9 +473,15 @@ export default function HomeScreen({ navigation }) {
       setWorkouts(merged);
     } catch (e) {
       console.error('[HomeScreen] fetchData:', e);
+    } finally {
+      // MUST be `finally`: the early `return`s above (no user, no profile row)
+      // jump straight past the end of the function, and while these two lines
+      // lived out here that left `loading` true forever — the tab bar and frame
+      // rendered around a permanently empty card. A player whose profile can't
+      // be read now gets an empty home, not a dead black one.
+      loadedRef.current = true;
+      setLoading(false);
     }
-    loadedRef.current = true;
-    setLoading(false);
   }, []);
 
   useFocusEffect(useCallback(() => {

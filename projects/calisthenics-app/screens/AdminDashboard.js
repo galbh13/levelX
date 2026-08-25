@@ -8,7 +8,9 @@ import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { useAdminNotify } from '../context/AdminNotifyContext';
 import { prestigeStars } from '../lib/prestige';
-import { invitePlayer, isValidEmail, isValidPhone, normalizePhone, STARTER_PASSWORD } from '../lib/invites';
+import {
+  invitePlayer, isValidEmail, isValidPhone, isValidBirthday, normalizePhone, STARTER_PASSWORD,
+} from '../lib/invites';
 import { DEFAULT_JOB } from '../lib/jobs';
 import { F } from '../constants/fonts';
 import { CARD_H, CARD_W } from '../constants/layout';
@@ -122,18 +124,20 @@ function NotifyBtn({ label, count, tone = 'alert', onPress }) {
 }
 
 // ─── Invite modal ──────────────────────────────────────────────────────────────
-// The coach's "new disciple" flow: type an email + full name + phone, and the
-// `invite-player` edge function creates the account and emails them their
+// The coach's "new disciple" flow: type an email + full name + phone + birthday,
+// and the `invite-player` edge function creates the account and emails them their
 // credentials. Everything privileged happens server-side (see lib/invites.js);
 // this is purely the form + its three states (form → sending → sent).
 //
-// The phone is asked for here because this is the ONE moment the coach has it in
-// hand — it's what they use to add the new player to the WhatsApp community, and
-// the success card repeats it back ready to copy.
+// Phone and birthday are asked for here because this is the ONE moment the coach
+// has them in hand. They land on `profiles` as the player's GLOBAL contact
+// details — the same two values the BUSINESS card shows — and the phone is
+// repeated back on the success card ready to paste into WhatsApp.
 function InviteModal({ visible, onClose, onInvited }) {
   const [email,    setEmail]    = useState('');
   const [fullName, setFullName] = useState('');
   const [phone,    setPhone]    = useState('');
+  const [birthday, setBirthday] = useState('');
   const [busy,     setBusy]     = useState(false);
   const [error,    setError]    = useState('');
   const [done,     setDone]     = useState(null); // { email, phone, emailed, warning }
@@ -141,17 +145,24 @@ function InviteModal({ visible, onClose, onInvited }) {
   // Reopening is always a blank slate — a stale success card or error from the
   // last invite must never greet the next one.
   useEffect(() => {
-    if (visible) { setEmail(''); setFullName(''); setPhone(''); setError(''); setDone(null); setBusy(false); }
+    if (visible) {
+      setEmail(''); setFullName(''); setPhone(''); setBirthday('');
+      setError(''); setDone(null); setBusy(false);
+    }
   }, [visible]);
 
-  const canSubmit = isValidEmail(email) && fullName.trim().length > 0 && isValidPhone(phone) && !busy;
+  // Birthday is the one optional field — a coach who doesn't know it yet can
+  // fill it in later on the business card. A half-typed date still blocks.
+  const canSubmit =
+    isValidEmail(email) && fullName.trim().length > 0 &&
+    isValidPhone(phone) && isValidBirthday(birthday) && !busy;
 
   async function submit() {
     if (!canSubmit) return;
     setBusy(true);
     setError('');
     try {
-      const res = await invitePlayer({ email, fullName, phone });
+      const res = await invitePlayer({ email, fullName, phone, birthday });
       setDone({
         email: email.trim().toLowerCase(),
         phone: res?.phone || normalizePhone(phone),
@@ -239,6 +250,22 @@ function InviteModal({ visible, onClose, onInvited }) {
                 autoCapitalize="none"
                 autoCorrect={false}
                 keyboardType="phone-pad"
+                editable={!busy}
+              />
+
+              {/* Optional — the coach can fill it in later on the business card.
+                  Same YYYY-MM-DD shape that card uses, because it's the same
+                  value: profiles.birthday. */}
+              <Text style={styles.fieldLabel}>BIRTHDAY · OPTIONAL</Text>
+              <TextInput
+                style={styles.input}
+                value={birthday}
+                onChangeText={setBirthday}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor={SL.muted}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="numbers-and-punctuation"
                 editable={!busy}
                 onSubmitEditing={submit}
               />

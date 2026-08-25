@@ -3,7 +3,7 @@ import {
   View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Switch,
 } from 'react-native';
 import {
-  fetchPlans, fetchPlayerBilling, savePlayerBilling, fetchPayments, fetchSettings,
+  fetchPlans, fetchPlayerBilling, savePlayerBilling, fetchPlayerContact, fetchPayments, fetchSettings,
   addPayment, deletePayment, markPaid,
   playerMoney, accessState, money, bagText, labelOf, todayISO, monthRange,
   STATUSES, SOURCES, METHODS, CHURN_REASONS, CURRENCIES, PRICING, OFFERED_PLANS,
@@ -62,9 +62,10 @@ export default function PlayerBillingScreen({ navigation, route }) {
     if (!player?.id) return;
     try {
       setError(null);
-      const [pl, b, pay, st, eng] = await Promise.all([
+      const [pl, b, contact, pay, st, eng] = await Promise.all([
         fetchPlans(),
         fetchPlayerBilling(player.id),
+        fetchPlayerContact(player.id),   // for the no-row seed below
         fetchPayments({ playerId: player.id }),
         fetchSettings(),
         fetchEngagement([player.id], { today }),
@@ -74,8 +75,12 @@ export default function PlayerBillingScreen({ navigation, route }) {
       setSettings(st);
       setEngagement(eng[player.id]);
       // No row yet → seed a sensible new-customer draft rather than a blank form.
+      // PHONE and BIRTHDAY come from the profile either way (they were typed on
+      // the ＋ NEW PLAYER form), so they show here before any billing row exists.
       setForm(b ?? {
         player_id: player.id,
+        phone: contact.phone ?? '',
+        birthday: contact.birthday ?? '',
         status: 'active',
         started_at: today,
         billing_day: Number(today.slice(8, 10)) > 28 ? 28 : Number(today.slice(8, 10)),

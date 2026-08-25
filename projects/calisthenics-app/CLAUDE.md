@@ -26,20 +26,39 @@ the admin creates every account from the dashboard (see "Player onboarding" belo
 
 ## Player onboarding — invite + welcome email (2026-08-25)
 A new disciple joins in one action: the coach taps **＋ NEW PLAYER** on the
-AdminDashboard top bar, types their **email + full name + phone**, and the account
-exists and has been emailed its credentials. No self-serve sign-up exists.
-- **The phone is required, and it is for WhatsApp** (2026-08-25). The coach adds
-  every new player to the WhatsApp community by hand, and the invite is the one
-  moment they have the number in front of them — so the form asks for it and the
-  success card repeats it back under the starter password ("PHONE · ADD TO
-  WHATSAPP"). Stored normalized on `profiles.phone`: a leading `+` if typed, then
-  digits only — the form WhatsApp wants pasted into a contact. Validation is
-  deliberately loose (7–15 digits, any separators), client- AND server-side;
-  `normalizePhone` / `isValidPhone` live in [lib/invites.js](lib/invites.js).
-  Migration `migrations/20260825_profile_phone.sql` — **must be run on the live
-  Supabase** (it adds the column and rewrites `handle_new_user()`). The edge
-  function ALSO writes `phone` right after the create, so a stale live trigger
-  can't silently drop the number.
+AdminDashboard top bar, types their **email + full name + phone + birthday**, and
+the account exists and has been emailed its credentials. No self-serve sign-up
+exists.
+- **PHONE + BIRTHDAY are GLOBAL, and they live on `profiles` (2026-08-25).** One
+  number and one date per player, typed at invite time — the one moment the coach
+  has them in front of them — and shown everywhere they're needed. **The phone is
+  required and it is for WhatsApp**: the coach adds every new player to the
+  WhatsApp community by hand, so the success card repeats the number back under
+  the starter password ("PHONE · ADD TO WHATSAPP"). **The birthday is optional**
+  (`YYYY-MM-DD`) — it can be filled in later on the business card.
+  · Stored normalized on `profiles.phone`: a leading `+` if typed, then digits
+    only — the form WhatsApp wants pasted into a contact. Validation is
+    deliberately loose (7–15 digits, any separators); the birthday must be a real
+    `YYYY-MM-DD` or empty. Both are checked client- AND server-side —
+    `normalizePhone` / `isValidPhone` / `isValidBirthday` in
+    [lib/invites.js](lib/invites.js). **Parse dates as UTC** (`T00:00:00Z`) when
+    round-tripping through `toISOString`, or a local-midnight parse rejects every
+    valid birthday east of Greenwich.
+  · **The BUSINESS card edits the same two values.** `player_billing.phone` /
+    `player_billing.birthday` are now LEGACY: `fetchPlayerBilling()` merges the
+    profile values over the billing row and `savePlayerBilling()` peels
+    `phone`/`birthday` out of the patch and writes them to `profiles` instead
+    (`fetchPlayerContact` / `savePlayerContact` in [lib/billing.js](lib/billing.js),
+    both error-swallowing so a drifted live schema can't break the card).
+    `PlayerBillingScreen` needs no changes beyond seeding its no-billing-row draft
+    from the profile.
+  · Migration `migrations/20260825_profile_contact.sql` — **must be run on the
+    live Supabase**. It adds both columns, backfills them from any values already
+    typed into the business card, and rewrites `handle_new_user()` to carry both
+    across (casting the birthday inside its own exception block, so a bad date
+    can't become Auth's useless "Database error creating new user"). The edge
+    function ALSO writes both right after the create, so a stale live trigger
+    can't silently drop them.
 - **All the privileged work is in a Supabase edge function**,
   `supabase/functions/invite-player`. It needs the **service-role key** (to create
   an auth user) and the **Gmail app password** (to send the mail); neither may ever
@@ -50,11 +69,11 @@ exists and has been emailed its credentials. No self-serve sign-up exists.
   [lib/invites.js](lib/invites.js) (`invitePlayer` / `isValidEmail` /
   `STARTER_PASSWORD` / `clearMustChangePassword`).
 - **The profile row comes from the trigger, not a second write.** `full_name`,
-  `phone` and `must_change_password` ride in on the auth user's `user_metadata`, and
+  `phone`, `birthday` and `must_change_password` ride in on the auth user's `user_metadata`, and
   `handle_new_user()` reads them off `raw_user_meta_data` — so the invite is ONE
   atomic call with nothing to race the trigger. `role` = `'player'` and `job` =
   `'handstand'` (the column default) come for free, which is why the invite form
-  asks for nothing else beyond the phone.
+  asks for nothing else beyond the phone and birthday.
 - **The starter password is SHARED (`PASSWORD`) and must not survive first
   contact.** Every invited account is flagged `profiles.must_change_password`, and
   `App.js` renders **`SetPasswordScreen`** instead of the app while it's true —

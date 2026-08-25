@@ -491,11 +491,23 @@ export default function App() {
 
   async function fetchRole(userId) {
     try {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('profiles')
         .select('role')
         .eq('id', userId)
         .single();
+
+      // No row at all (PGRST116 = zero rows from `.single()`) means this token
+      // outlived its account — the coach deleted the player, but the access
+      // token stays valid for the rest of its hour. Defaulting to 'player' there
+      // mounts the whole tab app on top of a user that no longer exists, and
+      // every screen then reads nothing: the black-home bug. Sign the ghost out
+      // so they land on the login card instead.
+      if (error?.code === 'PGRST116') {
+        await supabase.auth.signOut();
+        return;
+      }
+
       setRole(data?.role ?? 'player');
     } catch {
       setRole('player'); // a failed role lookup defaults to player rather than bricking startup
