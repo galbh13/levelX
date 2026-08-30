@@ -9,7 +9,6 @@ import { JOBS, DEFAULT_JOB } from '../lib/jobs';
 import { deletePlayer } from '../lib/invites';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
-import { CARD_W } from '../constants/layout';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import { ShimmerRing, BLUE } from '../components/Shimmer';
@@ -108,12 +107,6 @@ export default function PlayerAdminScreen({ navigation, route }) {
 
   const actions = [
     {
-      key: 'coachchat',
-      label: 'COACH CHAT',
-      desc: 'Direct 1-on-1 message with this player',
-      onPress: () => navigation.navigate('CoachChat', { player, isAdmin: true }),
-    },
-    {
       key: 'checkup',
       label: 'CHECK-UP',
       desc: 'Review, feedback & customize their check-up',
@@ -143,7 +136,7 @@ export default function PlayerAdminScreen({ navigation, route }) {
   ];
 
   return (
-    <ScreenFrame fill maxWidth={CARD_W}>
+    <ScreenFrame fill>
       <View style={styles.card}>
         <ScreenHeader title="MANAGE PLAYER" onBack={() => navigation.goBack()} />
 

@@ -11,15 +11,21 @@ import { supabase } from '../lib/supabase';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import { useTourTarget, useTourScroller } from '../lib/tourTargets';
+import { useTour } from '../context/TourContext';
 import PillButton from '../components/PillButton';
+import SystemConfirm from '../components/SystemConfirm';
 import VideoPlayer from '../components/VideoPlayer';
 import {
-  CHECKUP_BUCKET, MAX_VIDEO_BYTES, MAX_VIDEO_MB, purgeExpiredCheckups,
+  CHECKUP_BUCKET, MAX_VIDEO_BYTES, purgeExpiredCheckups,
   purgePreviousCheckups, deleteCheckupVideo,
-  checkupSchedule, checkupCycleStart, resolvePlayerTemplate, splitTemplateParts, groupCheckupVideos,
+  checkupSchedule, checkupCycleStart, resolvePlayerTemplate, splitTemplateParts,
+  discardDraftCheckup, bindVideosToExercises, repairVideoLinks, normalizePrompt,
+  EXERCISE_NOTE_BASE, splitCheckupAnswers, buildExerciseCards, fetchLatestFeedback,
 } from '../lib/checkups';
 import { useCheckupNotify } from '../context/CheckupNotifyContext';
-import { loadCheckupDraft, saveCheckupDraft, clearCheckupDraft } from '../lib/checkupDraft';
+import { loadCheckupDraft, saveCheckupDraft, clearCheckupDraft, remapDraftKeys } from '../lib/checkupDraft';
+import { markFeedbackSeen } from '../lib/checkupSeen';
+import { uploadAssetToBucket, videoMeta } from '../lib/storageUpload';
 
 const NOTE_MAX = 600;
 
@@ -58,6 +64,9 @@ export default function CheckupScreen() {
   // tour points at the submitted answers instead — see targetNames in GuidedTour.
   const tourAnswersRef  = useTourTarget('checkup.answers');
   const tourFeedbackRef = useTourTarget('checkup.feedback');
+  // Part 2 gets its own tour step — the filming is the half people skip.
+  const tourVideosRef    = useTourTarget('checkup.videos');
+  const tourExercisesRef = useTourTarget('checkup.exercises');
   // This screen is a long form, so the tour drives its scroll (see useTourScroller):
   // it brings a step's element into view before highlighting it instead of pointing
   // an arrow at something below the fold.
@@ -77,6 +86,11 @@ export default function CheckupScreen() {
   const [checkup,   setCheckup]   = useState(null);
   const [composing, setComposing] = useState(true);
   const [checkupDay,setCheckupDay]= useState(null);
+  // The coach's most recent reply, whichever check-up it was written on. Held
+  // separately from `checkup` so it stays on screen while a NEWLY sent check-up
+  // is still awaiting feedback — the player must never be left with a blank
+  // screen where their coach's last note and video used to be.
+  const [lastFeedback, setLastFeedback] = useState(null);
 
   // Resolved template (while composing)
   const [templateSource, setTemplateSource] = useState('none'); // 'player' | 'class' | 'none'
@@ -87,15 +101,29 @@ export default function CheckupScreen() {
   const [answers, setAnswers]   = useState({});  // questionItemId → text
   const [exVideos, setExVideos] = useState({});  // exerciseItemId → checkup_videos row[] (many clips per exercise)
   const [exNotes, setExNotes]   = useState({});  // exerciseItemId → text
+  // Clips that no longer belong to ANY exercise on the current template (the coach
+  // rewrote Part 2 after they were filmed). Shown, not hidden — a clip the player
+  // cannot see is a clip they re-upload, which is how duplicates were born.
+  const [orphanVideos, setOrphanVideos] = useState([]);
 
   // Submitted (read-only)
   const [subAnswers, setSubAnswers] = useState([]);
   const [subVideos,  setSubVideos]  = useState([]);
+  const [subNotes,   setSubNotes]   = useState([]);   // Part-2 notes (clip or no clip)
+
+  // The submitted check-up a player left behind by tapping START NEW CHECK-UP.
+  // Kept in memory (the row itself is untouched in the DB) so the new form always
+  // has a way BACK — starting a new check-up by accident used to be a one-way door.
+  const [prevSubmission, setPrevSubmission] = useState(null);
+  // Pending in-app confirmation: { title, message, confirmLabel, onConfirm }.
+  // Nothing on this screen is confirmed by an OS dialog — see SystemConfirm.
+  const [confirm, setConfirm] = useState(null);
 
   const [savedAt,   setSavedAt]   = useState(null);   // when the draft text last hit the device
   const [saveState, setSaveState] = useState('idle'); // 'idle' | 'saving' | 'saved' | 'empty' (button feedback)
 
   const [uploadingId, setUploadingId] = useState(null);
+  const [uploadPct, setUploadPct] = useState(0);
   const [submitting,  setSubmitting]  = useState(false);
   const [errorMsg,    setErrorMsg]    = useState('');
 
@@ -108,6 +136,10 @@ export default function CheckupScreen() {
   const hydratedRef  = useRef(false);                       // don't save before the load fills state
   const saveTimerRef = useRef(null);
   const savedFlashRef = useRef(null);   // reverts the SAVE button out of its ✓ state
+  // True between START NEW CHECK-UP and either submitting the new one or backing
+  // out of it. Tells the (re)load NOT to drop the player back into the submitted
+  // view just because their last row is still the submitted one.
+  const newSessionRef = useRef(false);
 
   const fetchCheckup = useCallback(async () => {
     if (!loadedRef.current) setLoading(true);
@@ -115,8 +147,8 @@ export default function CheckupScreen() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
       userIdRef.current = user.id;
-      const localDraft = await loadCheckupDraft(user.id);
-      setSavedAt(localDraft?.updatedAt ?? null);
+      const savedDraft = await loadCheckupDraft(user.id);
+      setSavedAt(savedDraft?.updatedAt ?? null);
 
       const { data: prof } = await supabase
         .from('profiles')
@@ -128,11 +160,15 @@ export default function CheckupScreen() {
       // Resolve the admin-authored template for this player.
       const tpl = await resolvePlayerTemplate(user.id, prof?.class_id ?? null);
       const { questions: qs, exercises: exs } = splitTemplateParts(tpl.items);
+      // The coach may have re-authored (or personalised) the template since the
+      // player last typed — carry their unsent text onto the new item ids.
+      const localDraft = remapDraftKeys(savedDraft, tpl.items);
       setTemplateSource(tpl.source);
       setQuestions(qs);
       setExercises(exs);
 
       await purgeExpiredCheckups(user.id);
+      setLastFeedback(await fetchLatestFeedback(user.id));
 
       const { data: latest } = await supabase
         .from('checkups')
@@ -156,19 +192,35 @@ export default function CheckupScreen() {
             .select('*')
             .eq('checkup_id', latest.id)
             .order('order_index', { ascending: true });
-          setSubAnswers(ans ?? []);
+          const split = splitCheckupAnswers(ans ?? []);
+          setSubAnswers(split.questionRows);
+          setSubNotes(split.exerciseNotes);
           setSubVideos(vids ?? []);
-          setComposing(false);
+          if (newSessionRef.current) {
+            // They chose to start a NEW check-up: their latest row is still the old
+            // submitted one, so keep them in the empty form and hold that submission
+            // behind the BACK button instead of yanking them into the read-only view.
+            setPrevSubmission({
+              checkup: latest, subAnswers: split.questionRows,
+              subNotes: split.exerciseNotes, subVideos: vids ?? [],
+            });
+            setCheckup(null);          // → SUBMIT creates a fresh row, not an edit
+            setExVideos({});
+            setAnswers(localDraft?.answers ?? {});
+            setExNotes(localDraft?.notes ?? {});
+            setComposing(true);
+          } else {
+            setComposing(false);
+          }
         } else {
-          // Restore a draft's uploaded clips + notes into the compose maps.
-          // Many clips per exercise → group into an array keyed by item_id.
-          const vmap = {}, nmap = {};
-          (vids ?? []).forEach(v => {
-            if (!v.item_id) return;
-            (vmap[v.item_id] ||= []).push(v);
-            if (v.answer_text && nmap[v.item_id] == null) nmap[v.item_id] = v.answer_text;
-          });
+          // Restore a draft's uploaded clips + notes into the compose maps, binding
+          // each clip to the exercise it answers (by id, else by its prompt — see
+          // bindVideosToExercises).
+          const bound = bindVideosToExercises(vids ?? [], exs);
+          const vmap = bound.byItem, nmap = bound.notes;
           setExVideos(vmap);
+          setOrphanVideos(bound.orphans);
+          repairVideoLinks(bound.repairs);
           // Locally-saved text wins over anything mirrored onto the clips — it is
           // the newest thing the player typed.
           setExNotes({ ...nmap, ...(localDraft?.notes ?? {}) });
@@ -179,6 +231,8 @@ export default function CheckupScreen() {
         setCheckup(null);
         setAnswers(localDraft?.answers ?? {});
         setExNotes(localDraft?.notes ?? {});
+        setExVideos({});
+        setOrphanVideos([]);
         setComposing(true);
       }
     } catch (e) {
@@ -190,6 +244,18 @@ export default function CheckupScreen() {
   }, []);
 
   useEffect(() => { fetchCheckup(); }, [fetchCheckup]);
+
+  // Opening this screen IS reading the feedback — the card is on it, at the top,
+  // in every state. Stamp it read and drop the gold dot from the CHECKUP tab.
+  const seenStampRef = useRef(null);
+  useEffect(() => {
+    const at = lastFeedback?.feedback_at;
+    if (loading || !at || !userIdRef.current) return;
+    if (!lastFeedback.feedback_note && !lastFeedback.feedback_url) return;
+    if (seenStampRef.current === at) return;      // already stamped this reply
+    seenStampRef.current = at;
+    markFeedbackSeen(userIdRef.current, at).then(refreshCheckupDot);
+  }, [lastFeedback, loading, refreshCheckupDot]);
 
   // Has the player actually typed anything? Drives whether SAVE has work to do.
   const hasDraftText = useMemo(
@@ -232,7 +298,11 @@ export default function CheckupScreen() {
   useEffect(() => () => { if (savedFlashRef.current) clearTimeout(savedFlashRef.current); }, []);
 
   useEffect(() => {
-    draftRef.current = { answers, notes: exNotes };
+    // The prompt of every live item rides along with the text, so the draft can be
+    // re-keyed if the coach changes the template underneath it (remapDraftKeys).
+    const prompts = {};
+    [...questions, ...exercises].forEach(i => { prompts[i.id] = i.prompt; });
+    draftRef.current = { answers, notes: exNotes, prompts };
     if (!hydratedRef.current || !userIdRef.current) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
@@ -240,7 +310,7 @@ export default function CheckupScreen() {
       persistDraft();
     }, 400);
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
-  }, [answers, exNotes, persistDraft]);
+  }, [answers, exNotes, questions, exercises, persistDraft]);
 
   // The app going to the background is the exact moment the text would have been
   // lost before — write it out there too, not just on the debounce.
@@ -288,26 +358,22 @@ export default function CheckupScreen() {
     const asset = result.assets[0];
 
     setUploadingId(item.id);
+    setUploadPct(0);
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not signed in.');
 
-      const response = await fetch(asset.uri);
-      const blob = await response.blob();
-      if (blob.size > MAX_VIDEO_BYTES) {
-        throw new Error(`That clip is ${(blob.size / 1024 / 1024).toFixed(0)} MB. Max is ${MAX_VIDEO_MB} MB — lower the recording quality on your phone and try again.`);
-      }
-
       const draft = await ensureDraft();
-      const ext = (asset.uri.split('.').pop() ?? 'mp4').toLowerCase().split('?')[0];
+      const { ext, contentType } = videoMeta(asset.uri);
       const path = `${user.id}/${draft.id}/${item.id}-${Date.now()}.${ext}`;
 
-      const { error: upErr } = await supabase.storage
-        .from(CHECKUP_BUCKET)
-        .upload(path, blob, { contentType: blob.type || `video/${ext}`, upsert: true });
-      if (upErr) throw upErr;
-
-      const { data: { publicUrl } } = supabase.storage.from(CHECKUP_BUCKET).getPublicUrl(path);
+      // Streams the clip straight off the device — the plain fetch→blob→upload
+      // path dies on the APK; see lib/storageUpload.js for why.
+      const publicUrl = await uploadAssetToBucket(CHECKUP_BUCKET, path, asset, {
+        contentType, upsert: true,
+        maxBytes: MAX_VIDEO_BYTES, sizeLabel: 'clip',
+        onProgress: f => setUploadPct(Math.round(f * 100)),
+      });
 
       // Many clips per exercise — APPEND this one (don't replace prior clips).
       const { data: row, error: insErr } = await supabase
@@ -326,6 +392,7 @@ export default function CheckupScreen() {
       setErrorMsg(e.message ?? 'Video upload failed.');
     }
     setUploadingId(null);
+    setUploadPct(0);
   }
 
   async function handleRemoveVideo(item, video) {
@@ -337,9 +404,10 @@ export default function CheckupScreen() {
   async function handleSubmit() {
     setErrorMsg('');
     const anyAnswer = Object.values(answers).some(t => t && t.trim());
+    const anyNote  = Object.values(exNotes).some(t => t && t.trim());
     const anyVideo = Object.values(exVideos).some(arr => arr && arr.length > 0);
-    if (!anyAnswer && !anyVideo) {
-      setErrorMsg('Answer at least one question or add an exercise video before submitting.');
+    if (!anyAnswer && !anyNote && !anyVideo) {
+      setErrorMsg('Answer at least one question, write a note or add an exercise video before submitting.');
       return;
     }
     setSubmitting(true);
@@ -350,23 +418,44 @@ export default function CheckupScreen() {
 
       // Part 1 — write a snapshot answer row per question (fresh each submit).
       await supabase.from('checkup_answers').delete().eq('checkup_id', draft.id);
-      if (questions.length) {
-        const rows = questions.map((q, i) => ({
-          checkup_id: draft.id, student_id: user.id, item_id: q.id,
-          prompt: q.prompt, answer_text: (answers[q.id] ?? '').trim() || null, order_index: i,
-        }));
-        const { error: ansErr } = await supabase.from('checkup_answers').insert(rows);
+      const answerRows = questions.map((q, i) => ({
+        checkup_id: draft.id, student_id: user.id, item_id: q.id,
+        prompt: q.prompt, answer_text: (answers[q.id] ?? '').trim() || null, order_index: i,
+      }));
+      // Part 2 — the per-exercise note gets a row of its OWN (order_index above
+      // EXERCISE_NOTE_BASE marks it as a Part-2 note). Without this, "no clip, but
+      // here's what happened" vanished at submit because notes only lived on clips.
+      exercises.forEach((ex, i) => {
+        const note = (exNotes[ex.id] ?? '').trim();
+        if (!note) return;
+        answerRows.push({
+          checkup_id: draft.id, student_id: user.id, item_id: ex.id,
+          prompt: ex.prompt, answer_text: note, order_index: EXERCISE_NOTE_BASE + i,
+        });
+      });
+      if (answerRows.length) {
+        const { error: ansErr } = await supabase.from('checkup_answers').insert(answerRows);
         if (ansErr) throw ansErr;
       }
 
       // Part 2 — attach the player's per-exercise note to every clip of that
       // exercise (mirrored so it survives if any single clip is later removed).
+      // The clip's item_id/prompt/order are re-stamped from the exercise it is
+      // shown under, so a check-up submitted after a template change is stored the
+      // way it was filled in — not the way it was first uploaded.
       await Promise.all(
-        Object.entries(exVideos).flatMap(([itemId, arr]) =>
-          (arr ?? []).map(v =>
+        Object.entries(exVideos).flatMap(([itemId, arr]) => {
+          const ex = exercises.find(e => e.id === itemId);
+          return (arr ?? []).map(v =>
             supabase.from('checkup_videos')
-              .update({ answer_text: (exNotes[itemId] ?? '').trim() || null })
-              .eq('id', v.id)))
+              .update({
+                answer_text: (exNotes[itemId] ?? '').trim() || null,
+                item_id: itemId,
+                prompt: ex?.prompt ?? v.prompt ?? null,
+                order_index: ex?.order_index ?? v.order_index ?? 0,
+              })
+              .eq('id', v.id));
+        })
       );
 
       const { data, error } = await supabase
@@ -391,7 +480,9 @@ export default function CheckupScreen() {
       // Reload submitted view from what we just wrote.
       await fetchCheckup();
       setCheckup(data);
-      draftRef.current = { answers: {}, notes: {} };   // nothing left to autosave
+      draftRef.current = { answers: {}, notes: {}, prompts: {} };   // nothing left to autosave
+      newSessionRef.current = false;
+      setPrevSubmission(null);        // the new submission IS the check-up now
       setAnswers({});
       setExNotes({});
       refreshCheckupDot();   // this week's check-up is in → drop the tab dot
@@ -401,18 +492,85 @@ export default function CheckupScreen() {
     setSubmitting(false);
   }
 
+  // Open a blank check-up over the submitted one. The submitted row is NOT touched
+  // (it is replaced only when the new one is actually sent) — we simply stash it so
+  // BACK TO MY CHECK-UP can restore it. Confirmed first while it is still awaiting
+  // feedback, because that is the tap people regret.
   function startNew() {
-    setErrorMsg('');
-    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
-    clearCheckupDraft(userIdRef.current);
-    setSavedAt(null);
-    setCheckup(null);
-    setAnswers({});
-    setExVideos({});
-    setExNotes({});
-    setSubAnswers([]);
-    setSubVideos([]);
-    setComposing(true);
+      const stash = checkup?.submitted_at
+      ? { checkup, subAnswers, subVideos, subNotes }
+      : null;
+    const go = () => {
+      setErrorMsg('');
+      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+      clearCheckupDraft(userIdRef.current);
+      draftRef.current = { answers: {}, notes: {}, prompts: {} };
+      setSavedAt(null);
+      setCheckup(null);
+      setAnswers({});
+      setExVideos({});
+      setExNotes({});
+      setOrphanVideos([]);
+      setSubAnswers([]);
+      setSubVideos([]);
+      setSubNotes([]);
+      newSessionRef.current = !!stash;
+      setPrevSubmission(stash);
+      setComposing(true);
+    };
+    if (stash && !checkup.feedback_at) {
+      setConfirm({
+        title: 'START NEW CHECK-UP',
+        message: 'The one you already sent stays saved — you can go back to it any time until you send the new one.',
+        confirmLabel: '＋  START NEW',
+        onConfirm: go,
+      });
+    } else {
+      go();
+    }
+  }
+
+  // The way OUT of a new check-up started by mistake: throw away the blank one
+  // (and the draft row a clip may have created) and put the submitted check-up
+  // back on screen exactly as it was.
+  function backToSubmitted() {
+    const prev = prevSubmission;
+    if (!prev) return;
+    const started = hasDraftText || Object.values(exVideos).some(v => v?.length);
+    const go = async () => {
+      setErrorMsg('');
+      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+      // A clip added to the new check-up already created its row — drop it, or it
+      // would stay the player's latest check-up and hide the submitted one.
+      if (checkup?.id && !checkup.submitted_at && checkup.id !== prev.checkup.id) {
+        await discardDraftCheckup(checkup.id);
+      }
+      await clearCheckupDraft(userIdRef.current);
+      draftRef.current = { answers: {}, notes: {}, prompts: {} };
+      setSavedAt(null);
+      setAnswers({});
+      setExVideos({});
+      setExNotes({});
+      setOrphanVideos([]);
+      newSessionRef.current = false;
+      setPrevSubmission(null);
+      setCheckup(prev.checkup);
+      setSubAnswers(prev.subAnswers);
+      setSubVideos(prev.subVideos);
+      setSubNotes(prev.subNotes ?? []);
+      setComposing(false);
+    };
+    if (started) {
+      setConfirm({
+        title: 'GO BACK',
+        message: 'Return to the check-up you already sent? What you put into this new one will be discarded.',
+        confirmLabel: '←  GO BACK, DISCARD THIS',
+        tone: 'danger',
+        onConfirm: go,
+      });
+    } else {
+      go();
+    }
   }
 
   // Re-open the SUBMITTED check-up for editing (same row): pour its saved answers,
@@ -421,21 +579,71 @@ export default function CheckupScreen() {
   // while awaiting feedback — once the coach has replied, editing is closed.
   function editSubmission() {
     setErrorMsg('');
-    const amap = {}, nmap = {};
-    subAnswers.forEach(a => { if (a.item_id) amap[a.item_id] = a.answer_text ?? ''; });
-    const vmap = {};
-    groupCheckupVideos(subVideos).forEach(g => {
-      if (g.item_id == null) return;
-      vmap[g.item_id] = g.videos;
-      if (g.note != null) nmap[g.item_id] = g.note;
+    // Part 1 — answers bind by item_id, else by the prompt snapshot, for the same
+    // reason the clips do: the coach may have re-authored the template since.
+    const amap = {};
+    const qByName = new Map();
+    questions.forEach(q => {
+      const k = normalizePrompt(q.prompt);
+      if (k && !qByName.has(k)) qByName.set(k, q);
+    });
+    const qIds = new Set(questions.map(q => q.id));
+    subAnswers.forEach(a => {
+      const target = (a.item_id && qIds.has(a.item_id))
+        ? a.item_id
+        : qByName.get(normalizePrompt(a.prompt))?.id;
+      if (target) amap[target] = a.answer_text ?? '';
+    });
+
+    // Part 2 — the clips the player already sent must come BACK into the form.
+    const bound = bindVideosToExercises(subVideos, exercises);
+    // Notes stored as their own rows win over the copy mirrored onto the clips —
+    // and they are the ONLY home a note has when the exercise was never filmed.
+    const nmap = { ...bound.notes };
+    const exByName = new Map();
+    exercises.forEach(e => {
+      const k = normalizePrompt(e.prompt);
+      if (k && !exByName.has(k)) exByName.set(k, e);
+    });
+    const exIds = new Set(exercises.map(e => e.id));
+    subNotes.forEach(n => {
+      const target = (n.item_id && exIds.has(n.item_id))
+        ? n.item_id
+        : exByName.get(normalizePrompt(n.prompt))?.id;
+      if (target && n.answer_text) nmap[target] = n.answer_text;
     });
     setAnswers(amap);
-    setExVideos(vmap);
+    setExVideos(bound.byItem);
     setExNotes(nmap);
+    setOrphanVideos(bound.orphans);
+    repairVideoLinks(bound.repairs);
     setComposing(true);
   }
 
+  // Drop a clip that has no exercise left to belong to.
+  async function handleRemoveOrphan(video) {
+    setOrphanVideos(list => list.filter(x => x.id !== video.id));
+    await deleteCheckupVideo(video);
+  }
+
+  // The submitted Part 2: one card per exercise — the clips grouped by exercise,
+  // plus any exercise the player only wrote a note for (nothing filmed).
+  const subCards = useMemo(() => buildExerciseCards(subVideos, subNotes), [subVideos, subNotes]);
+
   const reviewed = !composing && !!checkup?.feedback_at;
+  // TUTORIAL-ONLY preview of the coach's reply. On the tour's GET FEEDBACK step a
+  // player who hasn't been answered yet has nothing on screen to point at, so the
+  // step used to describe an invisible card. Instead we render an EXAMPLE of it —
+  // same card, same WATCH FEEDBACK VIDEO button — tagged as the real one so the
+  // highlight lands on it. It exists only while that step is showing (the tour
+  // publishes its id) and only when there is no real feedback to show instead.
+  const { stepId } = useTour();
+  // The coach's last reply, shown as a standing card whenever the CURRENT
+  // check-up isn't the one carrying it (composing, or sent and still waiting).
+  const standingFeedback = !reviewed && lastFeedback && (lastFeedback.feedback_note || lastFeedback.feedback_url)
+    ? lastFeedback
+    : null;
+  const showFeedbackDemo = stepId === 'checkup.feedback' && !reviewed && !standingFeedback;
   const editing  = composing && !!checkup?.submitted_at;   // re-opening a submitted check-up
   const hasTemplate = templateSource !== 'none' && (questions.length + exercises.length) > 0;
   // Has a submission landed inside the CURRENT weekly cycle? (Same rule as the
@@ -445,7 +653,7 @@ export default function CheckupScreen() {
     && new Date(checkup.submitted_at) >= cycleStart;
 
   return (
-    <ScreenFrame fill maxWidth={640} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <View style={styles.card}>
         <ScreenHeader title="WEEKLY CHECK-UP" />
 
@@ -461,15 +669,66 @@ export default function CheckupScreen() {
           onLayout={e => { tourViewport.current.viewportH = e.nativeEvent.layout.height; }}
         >
           {!loading && (
-            <View ref={tourStatusRef}>
+            <View ref={tourStatusRef} collapsable={false}>
               <ScheduleBar checkupDay={checkupDay} sent={sentThisCycle} reviewed={reviewed} />
+            </View>
+          )}
+
+          {/* The coach's LATEST feedback — always here. It survives sending a new
+              check-up (see purgePreviousCheckups), so the note and the video link
+              stay readable right through the wait for the next reply. */}
+          {!!standingFeedback && (
+            <View ref={tourFeedbackRef} collapsable={false} style={styles.feedbackCard}>
+              <SectionTitle>COACH FEEDBACK</SectionTitle>
+              <Text style={styles.feedbackMeta}>
+                {'LATEST  ·  ' + formatDate(standingFeedback.feedback_at)}
+              </Text>
+              {!!standingFeedback.feedback_note && (
+                <Text style={styles.feedbackNote}>{standingFeedback.feedback_note}</Text>
+              )}
+              {!!standingFeedback.feedback_url && (
+                <PillButton
+                  label="▶  WATCH FEEDBACK VIDEO"
+                  onPress={() => Linking.openURL(standingFeedback.feedback_url)}
+                  variant="solid"
+                  tone="accent"
+                  style={{ marginTop: 14 }}
+                />
+              )}
+            </View>
+          )}
+
+          {/* Tutorial-only: what the coach's reply will look like when it lands.
+              Sits at the top so the tour's scroll-to-top puts it in view, and
+              carries the REAL feedback tag (the two can never co-exist — this
+              only renders when there is no actual feedback). */}
+          {showFeedbackDemo && (
+            <View
+              ref={tourFeedbackRef}
+              collapsable={false}
+              style={[styles.feedbackCard, styles.feedbackDemo]}
+              pointerEvents="none"
+            >
+              <SectionTitle>COACH FEEDBACK</SectionTitle>
+              <Text style={styles.feedbackDemoTag}>EXAMPLE — THIS IS WHAT ARRIVES</Text>
+              <Text style={styles.feedbackNote}>
+                Solid week. Your handstand line is straighter — keep the ribs closed on
+                the entry. Full notes in the video.
+              </Text>
+              <PillButton
+                label="▶  WATCH FEEDBACK VIDEO"
+                onPress={() => {}}
+                variant="solid"
+                tone="accent"
+                style={{ marginTop: 14 }}
+              />
             </View>
           )}
 
           {loading ? (
             <View style={styles.center}><ActivityIndicator size="large" color={C.iceGlow} /></View>
           ) : composing && !hasTemplate ? (
-            <View ref={tourFormRef} style={styles.emptyBox}>
+            <View ref={tourFormRef} collapsable={false} style={styles.emptyBox}>
               <Text style={styles.emptyIcon}>◇</Text>
               <Text style={styles.emptyTitle}>NO CHECK-UP YET</Text>
               <Text style={styles.emptyText}>
@@ -481,6 +740,23 @@ export default function CheckupScreen() {
             <>
               {/* Only the EDIT state still explains itself — the plain "fill this
                   in" blurb was noise above a form that speaks for itself. */}
+              {!!prevSubmission && (
+                <View style={styles.backNotice}>
+                  <Text style={styles.backNoticeText}>
+                    NEW CHECK-UP — your sent one is still saved
+                  </Text>
+                  <PillButton
+                    label="←  BACK TO MY CHECK-UP"
+                    onPress={backToSubmitted}
+                    disabled={submitting || !!uploadingId}
+                    tone="accent"
+                    variant="outline"
+                    size="md"
+                    style={{ marginTop: 10 }}
+                  />
+                </View>
+              )}
+
               {editing && (
                 <Text style={styles.intro}>
                   Editing your submitted check-up — change any answer, add or remove clips,
@@ -491,7 +767,7 @@ export default function CheckupScreen() {
               {/* Part 1 — questions */}
               {questions.length > 0 && (
                 <>
-                  <View ref={tourFormRef}><PartTitle n={1} label="QUESTIONS" /></View>
+                  <View ref={tourFormRef} collapsable={false}><PartTitle n={1} label="QUESTIONS" /></View>
                   {questions.map(q => (
                     <View key={q.id} style={styles.qBlock}>
                       <Text style={styles.qPrompt}>{q.prompt}</Text>
@@ -513,11 +789,23 @@ export default function CheckupScreen() {
               {exercises.length > 0 && (
                 <>
                   <View style={{ height: 10 }} />
-                  <PartTitle n={2} label="EXERCISES" />
-                  {exercises.map(ex => {
+                  <View ref={tourVideosRef} collapsable={false}>
+                    <PartTitle n={2} label="EXERCISES" />
+                  </View>
+                  {exercises.map((ex, exi) => {
                     const vids = exVideos[ex.id] ?? [];
                     return (
                       <View key={ex.id} style={styles.exCard}>
+                        {/* Numbered header + accent rail: with several exercises
+                            stacked, the eye needs a hard start for each one. */}
+                        <View style={styles.exHead}>
+                          <Text style={styles.exIndex}>EXERCISE {exi + 1} / {exercises.length}</Text>
+                          {vids.length > 0 && (
+                            <Text style={styles.exCount}>
+                              {vids.length} {vids.length > 1 ? 'CLIPS' : 'CLIP'}
+                            </Text>
+                          )}
+                        </View>
                         <Text style={styles.exName}>{ex.prompt}</Text>
                         {!!ex.description && <Text style={styles.exDesc}>{ex.description}</Text>}
                         {!!ex.video_url && (
@@ -531,7 +819,10 @@ export default function CheckupScreen() {
                           {vids.length > 1 ? `YOUR VIDEOS · ${vids.length}` : 'YOUR VIDEO'}
                         </Text>
                         {vids.map((v, i) => (
-                          <View key={v.id} style={[styles.clipCard, i > 0 && { marginTop: 12 }]}>
+                          <View key={v.id} style={[styles.clipCard, i > 0 && { marginTop: 14 }]}>
+                            {vids.length > 1 && (
+                              <Text style={styles.clipTag}>CLIP {i + 1} OF {vids.length}</Text>
+                            )}
                             <VideoPlayer url={v.video_url} height={190} />
                             <View style={styles.clipActions}>
                               <TouchableOpacity onPress={() => Linking.openURL(v.video_url)}>
@@ -545,7 +836,7 @@ export default function CheckupScreen() {
                         ))}
                         <PillButton
                           label={uploadingId === ex.id
-                            ? 'UPLOADING…'
+                            ? (uploadPct > 0 ? `UPLOADING… ${uploadPct}%` : 'UPLOADING…')
                             : vids.length ? '＋  ADD ANOTHER VIDEO' : '＋  ADD YOUR VIDEO'}
                           onPress={() => handleAddVideo(ex)}
                           loading={uploadingId === ex.id}
@@ -556,7 +847,7 @@ export default function CheckupScreen() {
 
                         <TextInput
                           style={[styles.answerInput, { marginTop: 12 }]}
-                          placeholder="A few words about how it felt…"
+                          placeholder="A few words about how it felt — or why there's no clip…"
                           placeholderTextColor={C.textMuted}
                           value={exNotes[ex.id] ?? ''}
                           onChangeText={t => setExNotes(m => ({ ...m, [ex.id]: t }))}
@@ -568,6 +859,35 @@ export default function CheckupScreen() {
                     );
                   })}
                 </>
+              )}
+
+              {/* Clips left over from an exercise the coach has since removed or
+                  renamed. Visible and removable — never silently carried along. */}
+              {orphanVideos.length > 0 && (
+                <View style={[styles.exCard, styles.orphanCard]}>
+                  <View style={styles.exHead}>
+                    <Text style={styles.orphanIndex}>UNLINKED CLIPS</Text>
+                    <Text style={styles.exCount}>{orphanVideos.length}</Text>
+                  </View>
+                  <Text style={styles.orphanNote}>
+                    These clips belong to an exercise your coach has changed. They are still
+                    attached to this check-up — remove them if they no longer apply.
+                  </Text>
+                  {orphanVideos.map((v, i) => (
+                    <View key={v.id} style={[styles.clipCard, { marginTop: i > 0 ? 14 : 14 }]}>
+                      {!!v.prompt && <Text style={styles.clipTag}>{v.prompt}</Text>}
+                      <VideoPlayer url={v.video_url} height={190} />
+                      <View style={styles.clipActions}>
+                        <TouchableOpacity onPress={() => Linking.openURL(v.video_url)}>
+                          <Text style={styles.openLink}>⤓  OPEN</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.removeBtn} onPress={() => handleRemoveOrphan(v)}>
+                          <Text style={styles.removeBtnText}>✕  REMOVE</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ))}
+                </View>
               )}
 
               {!!errorMsg && <ErrorBox msg={errorMsg} />}
@@ -598,7 +918,7 @@ export default function CheckupScreen() {
                 </>
               )}
 
-              <View ref={tourSubmitRef}>
+              <View ref={tourSubmitRef} collapsable={false}>
                 <PillButton
                   label={submitting ? (editing ? 'SAVING…' : 'SUBMITTING…') : editing ? 'SAVE CHANGES' : 'SUBMIT CHECK-UP'}
                   onPress={handleSubmit}
@@ -610,6 +930,17 @@ export default function CheckupScreen() {
                   style={styles.submitBtn}
                 />
               </View>
+              {!!prevSubmission && (
+                <PillButton
+                  label="←  BACK TO MY CHECK-UP"
+                  onPress={backToSubmitted}
+                  disabled={submitting || !!uploadingId}
+                  tone="muted"
+                  variant="outline"
+                  size="md"
+                  style={{ marginTop: 12 }}
+                />
+              )}
               {editing && (
                 <PillButton
                   label="✕  CANCEL EDIT"
@@ -638,8 +969,11 @@ export default function CheckupScreen() {
 
               {/* Coach feedback */}
               {reviewed && (
-                <View ref={tourFeedbackRef} style={styles.feedbackCard}>
+                <View ref={tourFeedbackRef} collapsable={false} style={styles.feedbackCard}>
                   <SectionTitle>COACH FEEDBACK</SectionTitle>
+                  <Text style={styles.feedbackMeta}>
+                    {'ON THIS CHECK-UP  ·  ' + formatDate(checkup.feedback_at)}
+                  </Text>
                   {!!checkup.feedback_note && <Text style={styles.feedbackNote}>{checkup.feedback_note}</Text>}
                   {!!checkup.feedback_url && (
                     <PillButton
@@ -656,7 +990,7 @@ export default function CheckupScreen() {
               {/* Their submission (read-only) */}
               {subAnswers.length > 0 && (
                 <>
-                  <View ref={tourAnswersRef}><SectionTitle>YOUR ANSWERS</SectionTitle></View>
+                  <View ref={tourAnswersRef} collapsable={false}><SectionTitle>YOUR ANSWERS</SectionTitle></View>
                   {subAnswers.map(a => (
                     <View key={a.id} style={styles.qBlock}>
                       <Text style={styles.qPrompt}>{a.prompt}</Text>
@@ -667,18 +1001,28 @@ export default function CheckupScreen() {
                   ))}
                 </>
               )}
-              {subVideos.length > 0 && (
+              {subCards.length > 0 && (
                 <>
-                  <SectionTitle>YOUR EXERCISES</SectionTitle>
-                  {groupCheckupVideos(subVideos).map(g => (
+                  <View ref={tourExercisesRef} collapsable={false}>
+                    <SectionTitle>YOUR EXERCISES</SectionTitle>
+                  </View>
+                  {subCards.map((g, gi, all) => (
                     <View key={g.key} style={styles.exCard}>
-                      {!!g.prompt && (
-                        <Text style={styles.exName}>
-                          {g.prompt}{g.videos.length > 1 ? `  ·  ${g.videos.length} CLIPS` : ''}
-                        </Text>
-                      )}
+                      <View style={styles.exHead}>
+                        <Text style={styles.exIndex}>EXERCISE {gi + 1} / {all.length}</Text>
+                        {g.videos.length > 1 && (
+                          <Text style={styles.exCount}>{g.videos.length} CLIPS</Text>
+                        )}
+                        {g.videos.length === 0 && (
+                          <Text style={styles.exCount}>NOTE ONLY</Text>
+                        )}
+                      </View>
+                      {!!g.prompt && <Text style={styles.exName}>{g.prompt}</Text>}
                       {g.videos.map((v, i) => (
-                        <View key={v.id} style={i > 0 ? { marginTop: 14 } : undefined}>
+                        <View key={v.id} style={i > 0 ? styles.clipSplit : undefined}>
+                          {g.videos.length > 1 && (
+                            <Text style={styles.clipTag}>CLIP {i + 1} OF {g.videos.length}</Text>
+                          )}
                           <VideoPlayer url={v.video_url} height={190} style={{ marginTop: 10 }} />
                           <TouchableOpacity onPress={() => Linking.openURL(v.video_url)}>
                             <Text style={styles.openLink}>⤓  OPEN</Text>
@@ -718,6 +1062,16 @@ export default function CheckupScreen() {
         </ScrollView>
         </View>
       </View>
+
+      <SystemConfirm
+        visible={!!confirm}
+        title={confirm?.title}
+        message={confirm?.message}
+        confirmLabel={confirm?.confirmLabel}
+        tone={confirm?.tone ?? 'accent'}
+        onConfirm={() => { const fn = confirm?.onConfirm; setConfirm(null); fn?.(); }}
+        onCancel={() => setConfirm(null)}
+      />
     </ScreenFrame>
   );
 }
@@ -837,6 +1191,17 @@ const styles = StyleSheet.create({
   },
   center: { paddingVertical: 80, alignItems: 'center', justifyContent: 'center' },
 
+  // Sits above the blank form while a submitted check-up waits behind it.
+  backNotice: {
+    borderWidth: 1.5, borderRadius: 14, paddingVertical: 14, paddingHorizontal: 18,
+    borderColor: C.iceGlow, backgroundColor: 'rgba(74,158,191,0.10)',
+    marginBottom: 22,
+  },
+  backNoticeText: {
+    fontFamily: F.heading, fontSize: 15, color: C.iceGlow,
+    letterSpacing: 1.4, textAlign: 'center',
+  },
+
   intro: {
     fontFamily: F.body, fontSize: 16, color: C.text, opacity: 0.85,
     lineHeight: 24, letterSpacing: 0.3, marginBottom: 26,
@@ -877,9 +1242,30 @@ const styles = StyleSheet.create({
   // Exercise card
   exCard: {
     backgroundColor: C.surface, borderWidth: 1.5, borderColor: C.lockedBorder, borderRadius: 16,
-    padding: 16, marginBottom: 16,
+    borderLeftWidth: 5, borderLeftColor: C.iceGlow,
+    padding: 16, marginBottom: 28,
   },
-  exName: { fontFamily: F.heading, fontSize: 17, color: C.text, letterSpacing: 1 },
+  exHead: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    borderBottomWidth: 1, borderBottomColor: C.lockedBorder,
+    paddingBottom: 8, marginBottom: 10,
+  },
+  exIndex: { fontFamily: F.heading, fontSize: 12, color: C.iceGlow, letterSpacing: 2.5 },
+  orphanCard:  { borderLeftColor: '#B4884A' },
+  orphanIndex: { fontFamily: F.heading, fontSize: 12, color: '#B4884A', letterSpacing: 2.5 },
+  orphanNote:  {
+    fontFamily: F.body, fontSize: 14, color: C.textMuted,
+    lineHeight: 21, letterSpacing: 0.3, marginTop: 2,
+  },
+  exCount: { fontFamily: F.heading, fontSize: 12, color: C.textMuted, letterSpacing: 2 },
+  exName: { fontFamily: F.heading, fontSize: 22, color: C.iceGlow, letterSpacing: 1.2, lineHeight: 28 },
+  // Clip 2+ of the SAME exercise — a quiet rule, deliberately weaker than the
+  // gap between two exercise cards.
+  clipSplit: {
+    marginTop: 18, paddingTop: 14,
+    borderTopWidth: 1, borderTopColor: C.cardBorder,
+  },
+  clipTag: { fontFamily: F.heading, fontSize: 11, color: C.textMuted, letterSpacing: 2 },
   exDesc: { fontFamily: F.body, fontSize: 15, color: C.textMuted, lineHeight: 21, marginTop: 8 },
   refBlock: { marginTop: 14, gap: 8 },
   refLabel: { fontFamily: F.heading, fontSize: 12, color: C.iceGlow, letterSpacing: 2 },
@@ -924,6 +1310,22 @@ const styles = StyleSheet.create({
   },
   feedbackNote: {
     fontFamily: F.body, fontSize: 16, color: C.text, lineHeight: 24, marginTop: 10, letterSpacing: 0.3,
+  },
+  // When the feedback was written — and whether it belongs to the check-up on
+  // screen or to the last one the coach answered.
+  feedbackMeta: {
+    fontFamily: F.heading, fontSize: 13, color: C.iceGlow, opacity: 0.8,
+    letterSpacing: 1.6, marginTop: 8,
+  },
+  // The tutorial's example reply. Dashed edge + the EXAMPLE tag so it can never be
+  // mistaken for a real message from the coach.
+  feedbackDemo: {
+    borderStyle: 'dashed',
+    opacity: 0.92,
+  },
+  feedbackDemoTag: {
+    fontFamily: F.heading, fontSize: 11, letterSpacing: 2,
+    color: C.textMuted, marginTop: 8,
   },
 
   notePanel: {

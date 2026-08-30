@@ -2,8 +2,8 @@ import { useContext, useState } from 'react';
 import { View, ScrollView, StyleSheet } from 'react-native';
 import { NavigationContext } from '@react-navigation/native';
 import { C } from '../constants/colors';
+import { CARD_W, useAppInsets } from '../constants/layout';
 import { ShimmerFrame, BLUE } from './Shimmer';
-import FrameShatter from './FrameShatter';
 import HoloBuild from './HoloBuild';
 import { consumeHoloEntry } from '../lib/holoEntry';
 
@@ -11,16 +11,32 @@ import { consumeHoloEntry } from '../lib/holoEntry';
 // that size content off the window width (e.g. the gallery grid) import this so
 // their layout matches the framed inner width.
 export const FRAME_PAD = 12;
+// Vertical margin above/below the card. Constant, exactly like FRAME_PAD.
+export const FRAME_PAD_V = 12;
+// THE card width. Every framed screen is this wide (capped by the window) —
+// the old per-screen widths (560 / 640 / 720 / 900 / 920 / 1800) are what made
+// the cards look mismatched next to each other on a wide screen.
+export const FRAME_MAX_W = CARD_W;
 
-// Wraps a screen's content in one centered, max-width, animated "cool frame" —
+// Wraps a screen's content in ONE fixed, full-screen, animated "cool frame" —
 // a rounded border that slowly sweeps the palette (the Skills / Challenges look).
 //
-//   • Default (hug) mode: the frame wraps the content TIGHTLY (no dead space) and
-//     is centered both horizontally and vertically; it scrolls if the content is
-//     taller than the screen. Pass plain content as children.
-//   • fill mode: the frame fills the screen height and the child manages its own
-//     scroll/layout (used for the gallery's FlatList, which can't nest in a
-//     ScrollView).
+// THE FRAME IS THE SAME BOX ON EVERY SCREEN. It always fills the viewport
+// (minus a constant margin) and its size NEVER depends on the content: a screen
+// with two rows and a screen with forty draw the identical card, and the card
+// does not resize as data loads, a tab switches, or a list grows. Content that
+// is taller than the card scrolls INSIDE it.
+//
+//   • Default mode: the frame owns the scroll — children are laid out top-down
+//     inside a ScrollView that fills the card.
+//   • fill mode: the child manages its own scroll/layout (used for FlatLists,
+//     inverted chat lists, the quest tree — anything that can't nest in a
+//     ScrollView). Identical outer geometry, just no inner ScrollView.
+//
+// Do NOT give a screen's root child a fixed height to "make the card tall" —
+// the card is already full height, and a fixed height only re-introduces the
+// mismatch (it overflows a short phone and falls short of a tall one). Use
+// `flexGrow: 1` when the content should stretch to the bottom.
 //
 // The frame is drawn ON TOP of the content edges so an opaque child background
 // can't paint over it; it's non-interactive (taps pass through).
@@ -28,19 +44,21 @@ export const FRAME_PAD = 12;
 // above the content but below the border — used for effects that must stay
 // contained to the card, e.g. the login deviation glitch.
 //
-// `shatter`: when true, the solid border is replaced by FrameShatter (the frame
-// breaks into falling bricks) and the box clip is lifted so all the shattering
-// pieces can spill outside the card.
 // `ready`: when the screen's own data is still loading, pass `false` so the
-// hologram-build entrance holds (the card stays covered) until the content —
-// and therefore the card's final size — is settled.
+// hologram-build entrance holds (the card stays covered) until the content is
+// settled.
 // `ghost`: renders the frame CHROMELESS — transparent background, no border, no
 // glow. Used when the screen is stacked as a transparentModal directly over an
 // identical framed screen (Workouts ⇄ Manage forge swipe): the screen underneath
 // provides the bg + border + hero, and this one overlays only its own content,
 // so the two bodies can cross-swipe inside what reads as ONE card.
-export default function ScreenFrame({ children, overlay = null, shatter = false, ready = true, colors = BLUE, maxWidth = 1100, duration = 4200, fill = false, holoEntry = true, ghost = false }) {
-  const [size, setSize] = useState(null);
+//
+// `maxWidth` is deliberately NOT a per-screen styling knob any more: every card
+// is FRAME_MAX_W wide. It survives in the signature only as an escape hatch —
+// prefer leaving it alone.
+export default function ScreenFrame({ children, overlay = null, ready = true, colors = BLUE, maxWidth = FRAME_MAX_W, duration = 4200, fill = false, holoEntry = true, ghost = false }) {
+  // Keep the card clear of the status bar / notch (edge-to-edge on Android).
+  const insets = useAppInsets();
   // Decide on the FIRST render (lazy initializer) so the build's covers are
   // painted immediately — otherwise the card flashes for a frame before they
   // appear. The first ScreenFrame to mount after login consumes the latch.
@@ -53,89 +71,68 @@ export default function ScreenFrame({ children, overlay = null, shatter = false,
   const [holo] = useState(
     () => holoEntry && (!navigation || navigation.isFocused()) && consumeHoloEntry()
   );
-  const onLayout = (e) => {
-    const { width, height } = e.nativeEvent.layout;
-    setSize((prev) => prev || { width, height });
-  };
   const border = ghost
     ? null
-    : shatter && size
-      ? <FrameShatter width={size.width} height={size.height} />
-      : <ShimmerFrame style={styles.border} colors={colors} radius={18} thickness={4} duration={duration} active />;
+    : <ShimmerFrame style={styles.border} colors={colors} radius={18} thickness={4} duration={duration} active />;
 
+  // Default mode's scroll lives INSIDE the card, so scrolling moves the content
+  // and never the frame.
+  const body = fill ? children : (
+    <ScrollView
+      style={styles.scroll}
+      contentContainerStyle={styles.scrollContent}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
+    >
+      {children}
+    </ScrollView>
+  );
+
+  // ONE geometry for both modes: outer (full screen, constant margin) →
+  // frameBox (flex, max-width, glow + border) → contentClip (rounded clip).
   // The border is overlaid as a sibling of the content-clip (not a child) so the
   // card's rounded `overflow:hidden` — needed to clip the screen content — can't
-  // shave the frame thin at the corners. The content gets its own rounded clip.
-  if (fill) {
-    return (
-      <View style={[styles.outerFill, ghost && styles.ghostBg]}>
-        <View style={[styles.frameBox, styles.frameBoxFill, { maxWidth }, shatter && styles.framedOpen, ghost && styles.ghostBox]} onLayout={onLayout}>
-          <View style={[styles.contentClipFill, shatter && styles.framedOpen, ghost && styles.ghostBg]}>
-            {children}
-            {overlay}
-            {holo && <HoloBuild ready={ready} />}
-          </View>
-          {border}
-        </View>
-      </View>
-    );
-  }
-
+  // shave the frame thin at the corners.
   return (
-    <View style={[styles.outer, ghost && styles.ghostBg]}>
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      >
-        <View style={[styles.frameBox, { maxWidth }, shatter && styles.framedOpen, ghost && styles.ghostBox]} onLayout={onLayout}>
-          <View style={[styles.contentClip, shatter && styles.framedOpen, ghost && styles.ghostBg]}>
-            {children}
-            {overlay}
-            {holo && <HoloBuild ready={ready} />}
-          </View>
-          {border}
+    <View style={[styles.outer, { paddingTop: FRAME_PAD_V + insets.top }, ghost && styles.ghostBg]}>
+      <View style={[styles.frameBox, { maxWidth }, ghost && styles.ghostBox]}>
+        <View style={[styles.contentClip, ghost && styles.ghostBg]}>
+          {body}
+          {overlay}
+          {holo && <HoloBuild ready={ready} />}
         </View>
-      </ScrollView>
+        {border}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  // ── Hug + center mode ──
-  outer: { flex: 1, backgroundColor: C.bg },
-  scroll: { flex: 1 },
-  // flexGrow + center → centered when shorter than the screen, scrolls (from the
-  // top, no clipping) when taller.
-  scrollContent: {
-    flexGrow: 1, justifyContent: 'center', alignItems: 'center',
-    paddingVertical: 18, paddingHorizontal: FRAME_PAD,
+  // The screen behind the card: full bleed, constant margin on all four sides.
+  outer: {
+    flex: 1, backgroundColor: C.bg, alignItems: 'center',
+    paddingHorizontal: FRAME_PAD, paddingVertical: FRAME_PAD_V,
   },
   // Outer box: holds the rounded content-clip + the non-clipped border overlay.
   // overflow VISIBLE so the border (a sibling) is never clipped at the corners.
   // The glow lives here (the inner clip would clip its own shadow).
+  // flex: 1 → the card is always exactly as tall as the screen allows.
   frameBox: {
-    width: '100%', borderRadius: 18,
+    flex: 1, width: '100%', alignSelf: 'center', borderRadius: 18,
     shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.3, shadowRadius: 18,
   },
   // The screen content, clipped to rounded corners (this is the only clip).
   contentClip: {
-    width: '100%', borderRadius: 18, overflow: 'hidden', backgroundColor: C.bg,
+    flex: 1, width: '100%', borderRadius: 18, overflow: 'hidden', backgroundColor: C.bg,
   },
-  // During the collapse, let the shattering pieces spill outside the card.
-  framedOpen: { overflow: 'visible', backgroundColor: 'transparent' },
+  // Default mode's inner scroll: fills the card and scrolls only when the
+  // content outgrows it — so the CARD never changes size, only the content does.
+  scroll: { flex: 1, width: '100%' },
+  scrollContent: { flexGrow: 1 },
   // Ghost mode — see the prop doc above: transparent bg, no glow (border is
   // skipped separately). The screen underneath supplies all the chrome.
   ghostBg:  { backgroundColor: 'transparent' },
   ghostBox: { shadowOpacity: 0 },
-
-  // ── Fill mode ──
-  outerFill: { flex: 1, backgroundColor: C.bg, paddingHorizontal: FRAME_PAD, paddingVertical: 12, alignItems: 'center' },
-  frameBoxFill: { flex: 1, alignSelf: 'center' },
-  contentClipFill: {
-    flex: 1, width: '100%', alignSelf: 'center', borderRadius: 18, overflow: 'hidden', backgroundColor: C.bg,
-  },
 
   border: {
     ...StyleSheet.absoluteFillObject, borderRadius: 18,

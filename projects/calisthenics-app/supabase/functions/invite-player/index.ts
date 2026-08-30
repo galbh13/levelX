@@ -13,10 +13,15 @@
 // function secrets. They must never reach the app bundle — the app ships the
 // anon key (lib/supabase.js) and nothing else.
 //
+// The MAIL ITSELF is `welcome-email.ts` next door — a pure builder, so it can be
+// previewed with `node preview.mjs` without inviting anyone. This file owns the
+// account, the config and the sending; that file owns every word and pixel.
+//
 // Deploy + secrets: see supabase/functions/README.md.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.4';
 import { SMTPClient } from 'https://deno.land/x/denomailer@1.6.0/mod.ts';
+import { buildWelcomeEmail } from './welcome-email.ts';
 
 // The starter password every invited player receives. Deliberately shared and
 // memorable — the account is flagged `must_change_password`, so the player is
@@ -27,6 +32,74 @@ const APP_URL = Deno.env.get('APP_URL') ?? 'https://levelx.expo.app';
 const GMAIL_USER = Deno.env.get('GMAIL_USER') ?? '';
 const GMAIL_APP_PASSWORD = Deno.env.get('GMAIL_APP_PASSWORD') ?? '';
 const FROM_NAME = Deno.env.get('MAIL_FROM_NAME') ?? 'The Handstand System';
+
+// ── The store links ──────────────────────────────────────────────────────────
+// The app is going to Google Play and the App Store. Neither listing exists yet,
+// so both are UNSET, and the mail renders each as a dead "SOON" chip rather than
+// a link that 404s. The browser link (APP_URL) is the real way in until then.
+//
+// When a listing goes live, set the secret and redeploy; nothing else changes:
+//   npx supabase secrets set PLAY_URL=https://play.google.com/store/apps/details?id=com.levelx.app
+//   npx supabase secrets set IOS_URL=https://apps.apple.com/app/id0000000000
+//   npx supabase functions deploy invite-player
+const PLAY_URL = Deno.env.get('PLAY_URL') ?? '';
+const IOS_URL = Deno.env.get('IOS_URL') ?? '';
+
+// ── The coach's own line ─────────────────────────────────────────────────────
+// The mail no longer carries a "message me" section — every player already has
+// the coach's number from the sales call. This is here because the onboarding
+// button falls back to it.
+const COACH_WHATSAPP = '972533453199';   // digits only, country code, no + or spaces
+
+// ── The onboarding call ──────────────────────────────────────────────────────
+// The single action the welcome email asks for. Nobody receiving that mail is a
+// stranger — they have already been on a sales call and been placed — so the
+// next thing that matters is the setup call, not opening the app.
+//
+// The default is the coach's own WhatsApp with the message pre-typed, because it
+// works today and needs nothing set up. Point it at a booking page the moment
+// one exists, and the button follows with no code change:
+//   npx supabase secrets set ONBOARDING_URL=https://calendly.com/...
+const ONBOARDING_MESSAGE = "I'm in. Let's book my onboarding call.";
+const ONBOARDING_URL = Deno.env.get('ONBOARDING_URL')
+  || `https://wa.me/${COACH_WHATSAPP}?text=${encodeURIComponent(ONBOARDING_MESSAGE)}`;
+
+// ── The coaching agreement / terms of service ────────────────────────────────
+// The document does not exist yet. Unset, the mail reserves its slot as a dead
+// "THE AGREEMENT · SOON" chip rather than a link to nothing. Host the PDF
+// anywhere public (Supabase storage, Drive, the site) and point this at it:
+//   npx supabase secrets set AGREEMENT_URL=https://.../the-system-agreement.pdf
+const AGREEMENT_URL = Deno.env.get('AGREEMENT_URL') ?? '';
+
+// The WhatsApp community, as two buttons near the bottom of the welcome email.
+//
+// This is the whole automation, and it is a link rather than an API call on
+// purpose: there is NO way to add someone to a WhatsApp group programmatically.
+// The official Cloud API has no group endpoints at all, and even in the app a
+// player's "who can add me to groups" privacy setting can refuse it. An invite
+// link is the mechanism — the player taps once and joins themselves.
+//
+// The links are group invite links (WhatsApp → Group info → Invite via link).
+// They are shareable tokens by design; if one ever ends up somewhere unwanted,
+// hit Reset link in WhatsApp, paste the new one here and redeploy the function.
+// The coach calls these "the official one / the announcement group" and "the
+// open group / the open community" — same two, in that order.
+const WHATSAPP_GROUPS = [
+  {
+    // Official. Broadcast-only: the coach is the only one who can post.
+    label: 'ANNOUNCEMENTS',
+    blurb: 'Coach only. Drops, updates, and everything you need to know.',
+    color: '#FFD700',
+    url: 'https://chat.whatsapp.com/Bbo0pdkFc1lL0474MyYOQm',
+  },
+  {
+    // The open community — everyone posts.
+    label: 'THE OPEN GROUP',
+    blurb: 'Winning environment, same goals, unlimited support.',
+    color: '#1FD79A',
+    url: 'https://chat.whatsapp.com/Bt3ISJjjJAA9tEZNbb8iIg',
+  },
+].filter((g) => g.url);
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -39,12 +112,6 @@ const json = (body: unknown, status = 200) =>
     status,
     headers: { ...CORS, 'Content-Type': 'application/json' },
   });
-
-function escapeHtml(s: string) {
-  return s.replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!
-  ));
-}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
@@ -152,55 +219,17 @@ Deno.serve(async (req) => {
   // than rolling back — the admin can read the password off the screen and pass
   // it on manually, and deleting a live account on a transient SMTP blip would
   // be worse than an un-emailed one.
-  const firstNameRaw = fullName.split(/\s+/)[0];
-  const firstName = escapeHtml(firstNameRaw);
-  const subject = 'Welcome to The System — your access';
-  const text = [
-    `${firstNameRaw},`,
-    '',
-    'You are in. The System is live for you.',
-    '',
-    `Open the app:  ${APP_URL}`,
-    `Username:      ${email}`,
-    `Password:      ${STARTER_PASSWORD}`,
-    '',
-    'The password above is a one-time starter — the app will ask you to set your',
-    'own the first time you sign in. Pick something only you know.',
-    '',
-    'Train hard.',
-    'Gal Benhamo',
-  ].join('\n');
-
-  const html = `
-  <div style="background:#050912;padding:32px 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
-    <div style="max-width:560px;margin:0 auto;background:#070d1a;border:2px solid #1a3a5c;border-radius:6px;overflow:hidden;">
-      <div style="padding:28px 32px;border-bottom:2px solid #1a3a5c;text-align:center;">
-        <div style="font-size:26px;letter-spacing:8px;color:#4A9EBF;font-weight:700;">THE SYSTEM</div>
-      </div>
-      <div style="padding:32px;color:#E8F4FF;font-size:15px;line-height:1.7;">
-        <p style="margin:0 0 18px;">${firstName},</p>
-        <p style="margin:0 0 24px;">You are in. The System is live for you.</p>
-
-        <div style="background:#0a1424;border:1px solid #1a3a5c;border-radius:4px;padding:20px;margin:0 0 24px;">
-          <div style="color:#4a6a8a;font-size:11px;letter-spacing:2px;margin-bottom:6px;">USERNAME</div>
-          <div style="color:#E8F4FF;font-size:16px;margin-bottom:16px;">${escapeHtml(email)}</div>
-          <div style="color:#4a6a8a;font-size:11px;letter-spacing:2px;margin-bottom:6px;">PASSWORD</div>
-          <div style="color:#FFD700;font-size:20px;letter-spacing:3px;font-weight:700;">${STARTER_PASSWORD}</div>
-        </div>
-
-        <div style="text-align:center;margin:0 0 24px;">
-          <a href="${APP_URL}" style="display:inline-block;background:rgba(74,158,191,0.15);border:2px solid #4A9EBF;color:#4A9EBF;text-decoration:none;padding:14px 34px;border-radius:4px;letter-spacing:3px;font-weight:700;font-size:14px;">ENTER THE SYSTEM</a>
-        </div>
-
-        <p style="margin:0 0 24px;color:#8fb3cc;font-size:13px;">
-          That password is a one-time starter &mdash; the app will ask you to set your own
-          the first time you sign in. Pick something only you know.
-        </p>
-
-        <p style="margin:0;border-top:1px solid #1a3a5c;padding-top:22px;color:#4a6a8a;font-size:13px;">Train hard.<br/>Gal Benhamo</p>
-      </div>
-    </div>
-  </div>`;
+  const { subject, text, html } = buildWelcomeEmail({
+    email,
+    fullName,
+    password: STARTER_PASSWORD,
+    appUrl: APP_URL,
+    playUrl: PLAY_URL,
+    iosUrl: IOS_URL,
+    onboardingCallUrl: ONBOARDING_URL,
+    agreementUrl: AGREEMENT_URL,
+    whatsappGroups: WHATSAPP_GROUPS,
+  });
 
   if (!GMAIL_USER || !GMAIL_APP_PASSWORD) {
     return json({

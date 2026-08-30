@@ -7,7 +7,6 @@ import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { importGalleryWorkout, WORKOUT_CATEGORIES } from '../lib/workouts';
 import { F } from '../constants/fonts';
-import { CARD_H, CARD_W } from '../constants/layout';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
@@ -98,7 +97,7 @@ export default function EliteWorkoutsScreen({ navigation }) {
   }
 
   return (
-    <ScreenFrame maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <View style={styles.card}>
         <ScreenHeader
           title="WORKOUT LIBRARY"
@@ -233,7 +232,7 @@ export default function EliteWorkoutsScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  card: { height: CARD_H },
+  card: { flex: 1 },
 
   // Smaller title so the long "WORKOUT LIBRARY" doesn't overrun the BACK pill on
   // a narrow phone card (the default 28px + 5 letter-spacing overflows its slot).

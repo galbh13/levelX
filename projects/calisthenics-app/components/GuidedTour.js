@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  Modal, View, Text, StyleSheet, TouchableOpacity, Animated, Easing,
+  Modal, View, Text, StyleSheet, TouchableOpacity, Animated, Easing, Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Circle, Rect, Path } from 'react-native-svg';
 import { C } from '../constants/colors';
 import { F } from '../constants/fonts';
+import { NATIVE_SCALE } from '../constants/layout';
 import PillButton from './PillButton';
 import { measureTourTarget, revealTourTarget, scrollTourTop } from '../lib/tourTargets';
 
@@ -32,6 +34,24 @@ import { measureTourTarget, revealTourTarget, scrollTourTop } from '../lib/tourT
 // Shown once (gated in AsyncStorage — see lib/onboarding); the HOW IT WORKS
 // button on HomeScreen replays it. On-brand: dark navy, ice-glow, Exo2/Cinzel,
 // symbol glyphs, NEVER emojis (design rule).
+
+// ── THE MODAL IS OUTSIDE ScaledRoot ──────────────────────────────────────────
+// On native App.js lays the whole tree out on an oversized canvas and scales it
+// back by NATIVE_SCALE (see constants/layout). A React Native <Modal> renders in
+// its OWN native window, so it does NOT inherit that transform: everything drawn
+// in here came out 1/0.72 ≈ 39% BIGGER than the app behind it, which is why the
+// caption card ate the phone screen and buried the arrows.
+// `S` puts the overlay back on the app's density: every fixed pixel value in
+// this file is expressed in canvas units and multiplied by S, and the card
+// itself is scaled as one block (so PillButton and the fonts come along too).
+// Web renders the modal INSIDE the zoomed root, so there S is 1 and nothing
+// changes.
+const S = Platform.OS === 'web' ? 1 : NATIVE_SCALE;
+const s = (n) => n * S;
+
+// Height of the player tab bar (canvas units, App.js `tabStyles.bar`) — the
+// caption must never sit on it.
+const TABBAR_H = 88;
 
 const TONES = {
   ice:   C.iceGlow,   // #4A9EBF
@@ -95,7 +115,7 @@ const STEPS = [
     targetName: 'skills.sidelabel', target: { x: 0.5, y: 0.72, r: 50 },
     title: 'Side Quests',
     line: 'SIDE quests are extra skills, grouped into tiers. Clear them to grow further, vary your workouts and skill set — and earn LVL points too.' },
-  { phase: 'SKILLS', tone: 'gold', tab: 'Skills', captionGap: 152,
+  { phase: 'SKILLS', tone: 'gold', tab: 'Skills',
     targetName: 'skills.prestige', target: { x: 0.5, y: 0.5, r: 52 },
     title: 'Prestige (Rank Up)',
     line: 'Fulfil the requirements to unlock PRESTIGE — then your coach ranks you up to the next class.' },
@@ -106,31 +126,32 @@ const STEPS = [
     line: 'Your guide for the week. Get your mind organized on what you need to do, and modify your life accordingly.' },
   // Targets sit in the UPPER area (week strip / the two tiles), so park the caption
   // in the lower dead space but lifted off the bottom wall so it "fits".
-  { phase: 'WORKOUTS', tone: 'ice', tab: 'Workouts', captionGap: 180,
+  // `calendarRow` LAYS OUT at roughly half the height its day cells actually
+  // occupy (the cells overflow their row), so a measurement of it boxes the
+  // weekday names and stops mid-cell. `pad` grows it back down over the numbers
+  // and the accent dots, i.e. over the whole SUN→SAT node the player sees.
+  // Tuned against the real strip — if the cells' height changes, retune it.
+  { phase: 'WORKOUTS', tone: 'ice', tab: 'Workouts', pad: { bottom: 66 },
     targetName: 'workouts.week', target: { x: 0.5, y: 0.56, r: 54 },
     title: 'Your Week',
     line: 'Every day of the week is here. Tap a day to see the workouts on it.' },
-  { phase: 'WORKOUTS', tone: 'ice', tab: 'Workouts', caption: 'bottom', captionGap: 180,
+  { phase: 'WORKOUTS', tone: 'ice', tab: 'Workouts', caption: 'bottom',
     targetName: 'workouts.editday', target: { x: 0.75, y: 0.54, r: 46 },
     title: 'Edit a Day',
     line: "Life happened? Can't train today? Well, you're the lucky one — just move workouts from one day to another to navigate through life and still achieve your calisthenics goals like a killer." },
-  { phase: 'WORKOUTS', tone: 'ice', tab: 'Workouts', captionGap: 180,
+  { phase: 'WORKOUTS', tone: 'ice', tab: 'Workouts',
     targetName: 'workouts.myworkouts', target: { x: 0.72, y: 0.36, r: 50 },
     title: 'My Workouts',
     line: 'Here you have your workouts list. Before attempting a new workout, look inside and explore — make sure you understand everything and have all the equipment available.' },
-  { phase: 'WORKOUTS', tone: 'ice', tab: 'Workouts', captionGap: 180, bow: 'left',
+  { phase: 'WORKOUTS', tone: 'ice', tab: 'Workouts', bow: 'left',
     targetName: 'workouts.daily', target: { x: 0.28, y: 0.36, r: 50 },
     title: 'Daily Quests',
     line: 'Tap DAILY QUESTS to set small habits you check off every single day.' },
 
-  // ── PERSONAL ──
-  { phase: 'PERSONAL', tone: 'ice', tab: 'Personal', caption: 'center',
-    title: 'Personal',
-    line: 'Your own corner of the app — a direct line to your coach, and whatever the System has in store for you.' },
-  { phase: 'PERSONAL', tone: 'jade', tab: 'Personal', bow: 'left',
-    targetName: 'personal.coach', target: { x: 0.5, y: 0.28, r: 50 },
-    title: 'Message Your Coach',
-    line: 'This is where you can contact your coach. Use it — this is to your advantage.' },
+  // ── THE SYSTEM ── (route name is still `Personal`; only the label changed)
+  { phase: 'THE SYSTEM', tone: 'ice', tab: 'Personal', caption: 'center',
+    title: 'The System',
+    line: 'Everything around the training: sleep, nutrition, recovery, socialize, mentality.' },
 
   // ── CHECK-UP ──
   // Opens at the TOP of the form, then the SUBMIT step scrolls the player down
@@ -146,6 +167,13 @@ const STEPS = [
     targetNames: ['checkup.form', 'checkup.answers'],
     title: 'Fill It In',
     line: 'Answer a few questions and film a couple of exercises.' },
+  // Part 2 is the half people miss — the questions are obvious, the filming is
+  // not. It gets its own step, and names the read-only heading as a stand-in for
+  // a player who has already submitted.
+  { phase: 'CHECK-UP', tone: 'green', tab: 'Checkup',
+    targetNames: ['checkup.videos', 'checkup.exercises'],
+    title: 'Film Your Exercises',
+    line: 'Part 2 is the filming. Each exercise shows your coach’s reference clip — watch it, then record your own and add it. You can upload as many takes as you want, plus a note.' },
   { phase: 'CHECK-UP', tone: 'green', tab: 'Checkup',
     targetName: 'checkup.submit',
     title: 'Send It',
@@ -153,7 +181,11 @@ const STEPS = [
   // NO target on purpose. The feedback card doesn't exist yet for a new player, and
   // they'll be told about it by the notification when it lands — so this step just
   // explains it from the top of the card rather than aiming an arrow at nothing.
-  { phase: 'CHECK-UP', tone: 'green', tab: 'Checkup', scrollTop: 'checkup', caption: 'center',
+  // `id` lets CheckupScreen know this step is showing: with no coach reply yet it
+  // renders a DEMO feedback card so the player sees what lands and where, instead
+  // of reading a description of something invisible. It disappears on NEXT.
+  { phase: 'CHECK-UP', tone: 'green', tab: 'Checkup', scrollTop: 'checkup',
+    id: 'checkup.feedback', targetName: 'checkup.feedback',
     title: 'Get Feedback',
     line: 'Your coach sends back a feedback video (a URL) — open it to see their notes right next to your own clip. It gets detailed.' },
 
@@ -179,13 +211,42 @@ const AP = Animated.createAnimatedComponent(Path);
 // L-shaped corner marks around a box — the app's "system" targeting-reticle look
 // (a HUD lock-on) instead of a plain outline.
 function cornerBrackets(x, y, w, h) {
-  const L = Math.max(14, Math.min(28, Math.min(w, h) * 0.30));
+  const L = Math.max(s(14), Math.min(s(28), Math.min(w, h) * 0.30));
   return [
     `M${x} ${y + L} L${x} ${y} L${x + L} ${y}`,
     `M${x + w - L} ${y} L${x + w} ${y} L${x + w} ${y + L}`,
     `M${x + w} ${y + h - L} L${x + w} ${y + h} L${x + w - L} ${y + h}`,
     `M${x + L} ${y + h} L${x} ${y + h} L${x} ${y + h - L}`,
   ];
+}
+
+// Build a rect mark, CLIPPED to the overlay. A highlight must never be able to
+// paint outside the screen: a measurement that comes back wrong (this is exactly
+// what Android's untransformed measureInWindow size did — see lib/tourTargets)
+// used to run the reticle off the right edge and down over the panel below its
+// target, and an off-screen edge also drags the arrow's endpoint out with it.
+// Clamping here means the worst case is a highlight that's merely too big, never
+// one that's half off the display.
+function fitMark(x, y, w, h, box) {
+  // A NaN/Infinity anywhere in an SVG prop is a HARD NATIVE CRASH on Android
+  // (react-native-svg passes the number straight through to the platform path
+  // builder) — it takes the whole app down, not just the tour. A measurement can
+  // go non-finite legitimately: a view that unmounts mid-poll measures as
+  // `undefined`, and undefined * scale is NaN. So nothing reaches the renderer
+  // without passing through here.
+  if (![x, y, w, h, box.w, box.h].every(Number.isFinite)) return null;
+  const x0 = Math.max(0, Math.min(x, box.w));
+  const y0 = Math.max(0, Math.min(y, box.h));
+  const x1 = Math.max(x0, Math.min(x + w, box.w));
+  const y1 = Math.max(y0, Math.min(y + h, box.h));
+  const cw = x1 - x0, ch = y1 - y0;
+  // Degenerate after clipping = the element is off-screen. Draw NOTHING rather
+  // than a zero-size reticle sitting on the edge with an arrow into it.
+  if (cw < 2 || ch < 2) return null;
+  return {
+    type: 'rect', x: x0, y: y0, w: cw, h: ch, rx: 14,
+    cx: x0 + cw / 2, cy: y0 + ch / 2, rad: Math.max(cw, ch) / 2,
+  };
 }
 
 // First of `names` that actually measures → { ...box, name }, else null. Lets a
@@ -199,6 +260,9 @@ async function measureFirst(names) {
 }
 
 // measureInWindow → Promise (null on failure).
+// NOTE this one is used ONLY for the overlay itself, which lives in the modal's
+// own window with no transform above it — so unlike the app-tree measurements in
+// lib/tourTargets it must NOT be size-corrected. Don't "fix" it to match.
 function measureNode(node) {
   return new Promise((resolve) => {
     if (!node || typeof node.measureInWindow !== 'function') { resolve(null); return; }
@@ -207,7 +271,7 @@ function measureNode(node) {
   });
 }
 
-export default function GuidedTour({ visible, onClose, onNavigate }) {
+export default function GuidedTour({ visible, onClose, onNavigate, onStep }) {
   const [box, setBox] = useState({ w: 0, h: 0 });   // overlay size, layout px (SVG space)
   const [capH, setCapH] = useState(0);              // measured caption height
   const [spot, setSpot] = useState(null);           // measured element, fractions of overlay
@@ -216,6 +280,12 @@ export default function GuidedTour({ visible, onClose, onNavigate }) {
   const [measuredSize, setMeasuredSize] = useState(null); // real {i,fw,fh} even when off-screen
   const [probed, setProbed] = useState(null);       // {i} — this step's target isn't here
   const overlayRef = useRef(null);
+  // The modal is its own window, so it covers the status bar AND the Android nav
+  // bar — nobody pads them for us. These come back in the SAME px the overlay is
+  // measured in (device px on native, 0 on web), so they are NOT run through s().
+  const rawInsets = useSafeAreaInsets();
+  const safeTop    = Platform.OS === 'web' ? 0 : rawInsets.top;
+  const safeBottom = Platform.OS === 'web' ? 0 : rawInsets.bottom;
   const fade  = useRef(new Animated.Value(1)).current;
   const pulse = useRef(new Animated.Value(0)).current;
   const lastTab = useRef(null);
@@ -238,6 +308,15 @@ export default function GuidedTour({ visible, onClose, onNavigate }) {
   }, [visible]);
 
   const step = STEPS[i];
+
+  // Publish the current step's `id` so a SCREEN can react to it (CheckupScreen
+  // shows an example coach reply on the feedback step). Steps without an `id`
+  // publish null, and so does closing the tour — a demo element must never
+  // outlive the step that asked for it.
+  useEffect(() => {
+    onStep?.(visible ? (step.id ?? null) : null);
+  }, [visible, i]);
+  useEffect(() => () => onStep?.(null), []);
 
   // Navigate to this step's tab when it changes.
   useEffect(() => {
@@ -390,28 +469,49 @@ export default function GuidedTour({ visible, onClose, onNavigate }) {
       // spills its highlight past the card's side walls, while tiny elements still
       // get a little breathing room. (A flat 12px overhung wide elements.)
       const ew = curSpot.fw * box.w, eh = curSpot.fh * box.h;
-      const padX = Math.max(3, Math.min(8, ew * 0.03));
-      const padY = Math.max(3, Math.min(8, eh * 0.14));
-      const w = ew + padX * 2;
-      const h = eh + padY * 2;
-      const x = curSpot.fx * box.w - padX;
-      const y = curSpot.fy * box.h - padY;
-      mark = { type: 'rect', x, y, w, h, rx: 14, cx: x + w / 2, cy: y + h / 2, rad: Math.max(w, h) / 2 };
-      anchorCy = mark.cy;
+      // A step can widen its own box with `pad` (canvas units) when the element it
+      // measures is smaller than the thing the player actually sees — e.g. the
+      // week strip's row, whose day cells read as one block below it.
+      const p = step.pad || {};
+      const padX = Math.max(s(3), Math.min(s(8), ew * 0.03)) + s(p.x ?? 0);
+      const padT = Math.max(s(3), Math.min(s(8), eh * 0.14)) + s(p.top ?? 0);
+      const padB = Math.max(s(3), Math.min(s(8), eh * 0.14)) + s(p.bottom ?? 0);
+      mark = fitMark(
+        curSpot.fx * box.w - padX,
+        curSpot.fy * box.h - padT,
+        ew + padX * 2,
+        eh + padT + padB,
+        box,
+      );
+      // fitMark returns null for an unusable measurement — keep the caption
+      // anchored where the element roughly is so it still parks on the right side.
+      anchorCy = mark ? mark.cy : curSpot.fy * box.h;
     } else if (fellBack && step.target) {
       const cx = step.target.x * box.w, cy = step.target.y * box.h;
       const ms = measuredSize && measuredSize.i === i ? measuredSize : null;
       if (ms) {
         // We know the element's real size (measured off-screen) — draw a properly
         // sized BOX at the step's location instead of a generic circle.
-        const PAD = 6;
+        const PAD = s(6);
         const w = ms.fw * box.w + PAD * 2, h = ms.fh * box.h + PAD * 2;
-        const x = cx - w / 2, y = cy - h / 2;
-        mark = { type: 'rect', x, y, w, h, rx: 14, cx, cy, rad: Math.max(w, h) / 2 };
+        mark = fitMark(cx - w / 2, cy - h / 2, w, h, box);
       } else {
-        mark = { type: 'circle', cx, cy, rad: step.target.r ?? 48 };
+        // A circle mark carries the SAME x/y/w/h box as a rect one. It used to
+        // carry only cx/cy/rad — and the caption placement below reads `mark.y`
+        // and `mark.h` to find the room above/below it. On this fallback those
+        // were `undefined`, so the room came out NaN, the placement collapsed to
+        // a NaN `capY`, and that NaN went straight into the SVG arrow path — a
+        // hard native crash that closed the whole app. Every mark, whatever its
+        // shape, must expose a complete box.
+        const rad = s(step.target.r ?? 48);
+        mark = [cx, cy, rad].every(Number.isFinite)
+          ? {
+              type: 'circle', cx, cy, rad,
+              x: cx - rad, y: cy - rad, w: rad * 2, h: rad * 2,
+            }
+          : null;
       }
-      anchorCy = cy;
+      anchorCy = Number.isFinite(cy) ? cy : null;
     } else if (step.target) {
       anchorCy = step.target.y * box.h;   // measuring — position the caption, draw nothing yet
     }
@@ -421,16 +521,60 @@ export default function GuidedTour({ visible, onClose, onNavigate }) {
   // A step may FORCE its position (`caption`); otherwise it lands in the dead space
   // opposite the highlighted element (target up top → caption bottom, and vice
   // versa; no target → bottom).
-  const capW = box.w > 0 ? Math.min(box.w - 32, 640) : 640;
-  const capX = box.w > 0 ? (box.w - capW) / 2 : 16;
-  const autoPlacement = (anchorCy == null || anchorCy < box.h * 0.5) ? 'bottom' : 'top';
-  const placement = step.caption || autoPlacement;   // 'center' | 'top' | 'bottom'
-  const capY =
-    placement === 'center' ? Math.max(84, (box.h - capH) / 2)
-    : placement === 'top'  ? 84
-    // bottom: sit above the ~88px tab bar; a step can lift itself further off the
-    // wall via `captionGap` (default 104).
-    : /* bottom */           Math.max(96, box.h - capH - (step.captionGap ?? 104));
+  // The card is drawn at scale S (see the note at the top), so its LAYOUT height
+  // (`capH`, what onLayout reports) is not its VISUAL height — every bit of the
+  // math below works in visual px and uses capHv.
+  const capW = box.w > 0 ? Math.min(box.w - s(32), s(640)) : s(640);
+  const capX = box.w > 0 ? (box.w - capW) / 2 : s(16);
+  const capHv = capH * S;
+  // The playable band: below the status bar, above the tab bar (+ the Android
+  // nav bar under it). The modal covers BOTH — nothing else pads them for us.
+  const topMin = safeTop + s(16);
+  const botMax = box.h - safeBottom - s(TABBAR_H) - s(12);
+  const clampY = (y) => Math.max(topMin, Math.min(y, botMax - capHv));
+  const autoSide = (anchorCy == null || anchorCy < box.h * 0.5) ? 'bottom' : 'top';
+  const placement = step.caption || autoSide;   // 'center' | 'top' | 'bottom'
+
+  let capY;
+  if (!mark) {
+    // Nothing to dodge — honour the step's request inside the safe band.
+    capY = clampY(
+      placement === 'center' ? (box.h - capHv) / 2
+      : placement === 'top'  ? topMin
+      : /* bottom */           botMax - capHv,
+    );
+  } else {
+    // A mark IS on screen, so the card's job is to stay OFF it and leave the
+    // arrow a visible run. Measure the real room on each side of the mark and
+    // take the side the card actually fits on — this is what the old fixed
+    // `captionGap` numbers were trying (and failing) to hand-tune per step.
+    const GAP = s(26);
+    const roomAbove = (mark.y - GAP) - topMin;
+    const roomBelow = botMax - (mark.y + mark.h + GAP);
+    // 'center' has no meaningful side once there's something to dodge → auto.
+    const want = placement === 'center' ? autoSide : placement;
+    const fitsAbove = roomAbove >= capHv;
+    const fitsBelow = roomBelow >= capHv;
+    let side;
+    if (want === 'top')  side = fitsAbove ? 'top' : (fitsBelow ? 'bottom' : (roomAbove >= roomBelow ? 'top' : 'bottom'));
+    else                 side = fitsBelow ? 'bottom' : (fitsAbove ? 'top' : (roomBelow >= roomAbove ? 'bottom' : 'top'));
+    // PUSH TO THE WALL. Once the side is chosen the card goes as FAR from the
+    // mark as the safe band allows — flush to the top edge, or flush to the
+    // bottom above the tab bar — instead of hugging it at GAP. Hugging made the
+    // connector arrow a stub you couldn't read as a pointer; the whole point of
+    // the arrow is the distance it travels. clampY keeps it inside the band, and
+    // the mark-clearance term only bites when the card is too tall to fit on the
+    // chosen side at all (in which case the side-picking above already failed and
+    // there is nothing better to do).
+    capY = side === 'top'
+      ? clampY(Math.min(topMin, mark.y - GAP - capHv))
+      : clampY(Math.max(botMax - capHv, mark.y + mark.h + GAP));
+  }
+  // Belt AND braces: whatever happened above, the caption gets a real number.
+  // `capY` feeds the arrow's start point, and a NaN there reaches react-native-svg
+  // as a path coordinate — which crashes the app natively rather than throwing
+  // something the error boundary could catch.
+  if (!Number.isFinite(capY)) capY = clampY(topMin);
 
   // ── Connector arrow: caption edge → mark ──
   let arrow = null;
@@ -438,7 +582,7 @@ export default function GuidedTour({ visible, onClose, onNavigate }) {
     const startX = capX + capW / 2;
     // Exit whichever caption edge faces the mark (bottom edge if the caption sits
     // above it, top edge if below) so the connector always leaves toward the target.
-    const startY = (capY + capH / 2) < mark.cy ? capY + capH : capY;
+    const startY = (capY + capHv / 2) < mark.cy ? capY + capHv : capY;
     const dx = mark.cx - startX, dy = mark.cy - startY;
     const len = Math.hypot(dx, dy) || 1;
     const ux = dx / len, uy = dy / len;
@@ -452,8 +596,8 @@ export default function GuidedTour({ visible, onClose, onNavigate }) {
     } else {
       edge = mark.rad;
     }
-    const endX = mark.cx - ux * (edge + 3);
-    const endY = mark.cy - uy * (edge + 3);
+    const endX = mark.cx - ux * (edge + s(3));
+    const endY = mark.cy - uy * (edge + s(3));
     const mx = (startX + endX) / 2, my = (startY + endY) / 2;
     // Perpendicular for the bow. A step can flip which SIDE it bows to via
     // `bow: 'left'` (default bows the other way).
@@ -461,7 +605,7 @@ export default function GuidedTour({ visible, onClose, onNavigate }) {
     const px = -uy * bowSign, py = ux * bowSign;
     // Bow scales with length; the cap only bites on LONG arrows — raise it so long
     // arrows bow more, while short arrows (below the cap) stay exactly as they were.
-    const curve = Math.min(150, len * 0.30);
+    const curve = Math.min(s(150), len * 0.30);
     const ctrlX = mx + px * curve, ctrlY = my + py * curve;
     const d = `M${startX} ${startY} Q${ctrlX} ${ctrlY} ${endX} ${endY}`;
     // Chevron head — drawn with the SAME stroke as the shaft (not a filled
@@ -469,17 +613,21 @@ export default function GuidedTour({ visible, onClose, onNavigate }) {
     // line as one continuous arrow instead of a separate shape stuck on top.
     let tgx = endX - ctrlX, tgy = endY - ctrlY;
     const tl = Math.hypot(tgx, tgy) || 1; tgx /= tl; tgy /= tl;
-    const BARB = 15, a = 0.46;                           // barb length / spread (~26°)
+    const BARB = s(15), a = 0.46;                        // barb length / spread (~26°)
     const cos = Math.cos(a), sin = Math.sin(a);
     const bx = -tgx, by = -tgy;                          // back along the tangent
     const h1x = endX + (bx * cos - by * sin) * BARB, h1y = endY + (bx * sin + by * cos) * BARB;
     const h2x = endX + (bx * cos + by * sin) * BARB, h2y = endY + (-bx * sin + by * cos) * BARB;
     const head = `M${h1x} ${h1y} L${endX} ${endY} L${h2x} ${h2y}`;
-    arrow = { d, head, sx: startX, sy: startY };
+    // Final gate before anything becomes an SVG path: one non-finite coordinate
+    // in `d` / `head` is a native crash, not a JS error. No arrow beats no app.
+    const finite = [startX, startY, endX, endY, ctrlX, ctrlY, h1x, h1y, h2x, h2y]
+      .every(Number.isFinite);
+    arrow = finite ? { d, head, sx: startX, sy: startY } : null;
   }
 
   const glowO = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.55, 1] });
-  const glowW = pulse.interpolate({ inputRange: [0, 1], outputRange: [2, 4] });
+  const glowW = pulse.interpolate({ inputRange: [0, 1], outputRange: [s(2), s(4)] });
 
   const go = (next) => {
     if (next < 0 || next > total - 1) return;
@@ -504,9 +652,9 @@ export default function GuidedTour({ visible, onClose, onNavigate }) {
               {mark.type === 'rect' ? (
                 <>
                   {/* lit interior + faint full frame */}
-                  <Rect x={mark.x} y={mark.y} width={mark.w} height={mark.h} rx={mark.rx} fill={tone} fillOpacity={0.06} />
-                  <Rect x={mark.x} y={mark.y} width={mark.w} height={mark.h} rx={mark.rx}
-                        stroke={tone} strokeOpacity={0.20} strokeWidth={1.5} fill="none" />
+                  <Rect x={mark.x} y={mark.y} width={mark.w} height={mark.h} rx={s(mark.rx)} fill={tone} fillOpacity={0.06} />
+                  <Rect x={mark.x} y={mark.y} width={mark.w} height={mark.h} rx={s(mark.rx)}
+                        stroke={tone} strokeOpacity={0.20} strokeWidth={s(1.5)} fill="none" />
                   {/* breathing system corner brackets (lock-on) */}
                   {cornerBrackets(mark.x, mark.y, mark.w, mark.h).map((d, idx) => (
                     <AP key={idx} d={d} stroke={tone} strokeOpacity={glowO} strokeWidth={glowW}
@@ -522,19 +670,19 @@ export default function GuidedTour({ visible, onClose, onNavigate }) {
               {arrow && (
                 <>
                   {/* soft glow underlay (shaft + head as one) */}
-                  <Path d={arrow.d} stroke={tone} strokeOpacity={0.22} strokeWidth={9}
+                  <Path d={arrow.d} stroke={tone} strokeOpacity={0.22} strokeWidth={s(9)}
                         fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                  <Path d={arrow.head} stroke={tone} strokeOpacity={0.22} strokeWidth={9}
+                  <Path d={arrow.head} stroke={tone} strokeOpacity={0.22} strokeWidth={s(9)}
                         fill="none" strokeLinecap="round" strokeLinejoin="round" />
                   {/* crisp arrow — shaft and chevron share the SAME stroke, so it
                       reads as one continuous shape */}
-                  <Path d={arrow.d} stroke={tone} strokeWidth={3.5}
+                  <Path d={arrow.d} stroke={tone} strokeWidth={s(3.5)}
                         fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                  <Path d={arrow.head} stroke={tone} strokeWidth={3.5}
+                  <Path d={arrow.head} stroke={tone} strokeWidth={s(3.5)}
                         fill="none" strokeLinecap="round" strokeLinejoin="round" />
                   {/* origin node on the caption edge — reads as a system connector */}
-                  <Circle cx={arrow.sx} cy={arrow.sy} r={7.5} stroke={tone} strokeOpacity={0.4} strokeWidth={1.5} fill="none" />
-                  <Circle cx={arrow.sx} cy={arrow.sy} r={4} fill={tone} />
+                  <Circle cx={arrow.sx} cy={arrow.sy} r={s(7.5)} stroke={tone} strokeOpacity={0.4} strokeWidth={s(1.5)} fill="none" />
+                  <Circle cx={arrow.sx} cy={arrow.sy} r={s(4)} fill={tone} />
                 </>
               )}
             </Svg>
@@ -544,7 +692,17 @@ export default function GuidedTour({ visible, onClose, onNavigate }) {
         {/* Caption, parked in dead space */}
         {box.w > 0 && (
           <Animated.View
-            style={[styles.card, { left: capX, top: capY, width: capW, borderColor: tone, shadowColor: tone, opacity: fade }]}
+            style={[styles.card, {
+              left: capX, top: capY,
+              // The card lays itself out at FULL canvas size and is scaled down as
+              // ONE block from its top-left corner, so PillButton, the fonts and
+              // every pad shrink together and match the app behind the overlay.
+              // Its visual width is capW; its visual height is capH * S (capHv).
+              width: capW / S,
+              transform: [{ scale: S }],
+              transformOrigin: 'top left',
+              borderColor: tone, shadowColor: tone, opacity: fade,
+            }]}
             onLayout={e => setCapH(e.nativeEvent.layout.height)}
           >
             <View style={styles.topRow}>
@@ -598,9 +756,9 @@ const styles = StyleSheet.create({
     backgroundColor: C.surface,
     borderRadius: 20,
     borderWidth: 1.5,
-    paddingHorizontal: 28,
-    paddingTop: 18,
-    paddingBottom: 22,
+    paddingHorizontal: 26,
+    paddingTop: 15,
+    paddingBottom: 17,
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.55,
     shadowRadius: 20,
@@ -610,7 +768,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   phase: { fontFamily: F.heading, fontSize: 12, letterSpacing: 3 },
   topRight: { flexDirection: 'row', alignItems: 'center', gap: 14 },
@@ -622,7 +780,7 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: C.lockedBorder,
     overflow: 'hidden',
-    marginBottom: 14,
+    marginBottom: 12,
   },
   progressFill: {
     height: 3,
@@ -636,21 +794,21 @@ const styles = StyleSheet.create({
   // ScreenHeader titles), not the Cinzel serif — reads sharper + more "system".
   title: {
     fontFamily: F.heading,
-    fontSize: 25,
+    fontSize: 24,
     letterSpacing: 2,
     textTransform: 'uppercase',
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 12,
-    marginBottom: 11,
+    marginBottom: 9,
   },
   // Info text: Exo2 SemiBold, brighter + a touch of tracking for legibility.
   line: {
     fontFamily: F.body,
-    fontSize: 21,
-    lineHeight: 31,
+    fontSize: 20,
+    lineHeight: 28,
     letterSpacing: 0.3,
     color: '#D3E6F5',
-    marginBottom: 20,
+    marginBottom: 16,
   },
 
   footer: {

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import {
-  View, Text, StyleSheet, TextInput, KeyboardAvoidingView, Platform, ScrollView,
+  View, Text, StyleSheet, TextInput, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { clearMustChangePassword } from '../lib/invites';
@@ -52,8 +52,10 @@ export default function SetPasswordScreen({ userId, onDone }) {
       style={styles.root}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-        <ScreenFrame maxWidth={560} duration={5200}>
+      {/* No outer ScrollView: ScreenFrame is a fixed full-screen card that scrolls
+          its own content — wrapping it in a scroll would let it shrink to the
+          form's height, which is exactly the size-jumping this card must avoid. */}
+      <ScreenFrame duration={5200}>
           <View style={styles.card}>
             <Text style={styles.kicker}>FIRST LOGIN</Text>
             <Text style={styles.title}>SET YOUR PASSWORD</Text>
@@ -113,16 +115,15 @@ export default function SetPasswordScreen({ userId, onDone }) {
               style={styles.signOut}
             />
           </View>
-        </ScreenFrame>
-      </ScrollView>
+      </ScreenFrame>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
   root:   { flex: 1, backgroundColor: C.bg },
-  scroll: { flexGrow: 1, justifyContent: 'center' },
-  card:   { paddingHorizontal: 32, paddingVertical: 40 },
+
+  card:   { flexGrow: 1, justifyContent: 'center', paddingHorizontal: 32, paddingVertical: 40 },
 
   kicker: {
     fontFamily: F.heading,

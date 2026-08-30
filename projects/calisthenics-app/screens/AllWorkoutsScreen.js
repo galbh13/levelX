@@ -11,7 +11,6 @@ import { WORKOUT_CATEGORIES, UNTYPED_CATEGORY } from '../lib/workouts';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
-import { CARD_H, CARD_W } from '../constants/layout';
 
 const DOW_FULL = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'];
 // First letter of each weekday for the compact at-a-glance week strip on each card.
@@ -293,7 +292,7 @@ export default function AllWorkoutsScreen({ navigation }) {
 
   if (!student) {
     return (
-      <ScreenFrame maxWidth={CARD_W}>
+      <ScreenFrame>
         <View style={{ paddingVertical: 120, alignItems: 'center', gap: 16 }}>
           <Text style={styles.emptyText}>NO STUDENT SELECTED</Text>
           <PillButton label="← GO BACK" onPress={() => navigation.goBack()} />
@@ -303,7 +302,7 @@ export default function AllWorkoutsScreen({ navigation }) {
   }
 
   return (
-    <ScreenFrame maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <View style={styles.cardFrame}>
       <ScreenHeader
         title="MY WORKOUTS"
@@ -481,7 +480,7 @@ const styles = StyleSheet.create({
   },
 
   // Fixed card height so the frame is the same size regardless of data.
-  cardFrame: { height: CARD_H },
+  cardFrame: { flex: 1 },
 
   // ── Type filter bar ───────────────────────────────────────────────────────
   filterWrap: {

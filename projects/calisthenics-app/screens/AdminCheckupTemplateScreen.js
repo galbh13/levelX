@@ -4,7 +4,6 @@ import {
 } from 'react-native';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
-import { CARD_W } from '../constants/layout';
 import { supabase } from '../lib/supabase';
 import { jobLabel } from '../lib/jobs';
 import ScreenFrame from '../components/ScreenFrame';
@@ -61,7 +60,7 @@ export default function AdminCheckupTemplateScreen({ navigation }) {
   }
 
   return (
-    <ScreenFrame fill maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <View style={styles.card}>
         <ScreenHeader title="CHECK-UP TEMPLATES" onBack={() => navigation.goBack()} />
 

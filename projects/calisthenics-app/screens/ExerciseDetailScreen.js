@@ -6,6 +6,7 @@ import { WebView } from 'react-native-webview';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
 import ScreenFrame from '../components/ScreenFrame';
+import VideoPlayer from '../components/VideoPlayer';
 
 function getYouTubeEmbedUrl(url) {
   if (!url) return null;
@@ -34,39 +35,21 @@ function VideoSection({ exercise, ratio, width, height, onRatio }) {
   const storageUrl = exercise.video_url;
   const embedUrl   = getYouTubeEmbedUrl(exercise.youtube_url);
 
-  // Storage video — uploaded to Supabase
+  // Storage video — uploaded to Supabase. Both platforms go through the shared
+  // VideoPlayer: it never autoplays, pauses when the screen loses focus, and
+  // reports the clip's real aspect ratio on native as well as web (the old
+  // native branch pointed a WebView at the bare .mp4, which reports no metadata
+  // — every portrait phone clip sat letterboxed inside a default 16:9 box).
   if (storageUrl) {
-    if (Platform.OS === 'web') {
-      return (
-        // eslint-disable-next-line jsx-a11y/media-has-caption
-        <video
-          src={storageUrl}
-          controls
-          // Buffer the clip as soon as the element mounts (both pages mount up
-          // front) so it's ready the instant the user swipes over — no 3s wait.
-          preload="auto"
-          playsInline
-          onLoadedMetadata={(e) => {
-            const v = e.target;
-            if (v.videoWidth && v.videoHeight) onRatio(v.videoWidth / v.videoHeight);
-          }}
-          style={{
-            width,
-            height,
-            display: 'block',
-            objectFit: 'contain',
-            backgroundColor: C.lockedBg,
-          }}
-        />
-      );
-    }
-    // Native: use WebView to stream (avoids needing expo-av)
     return (
-      <WebView
-        source={{ uri: storageUrl }}
-        style={{ width, height }}
-        allowsFullscreenVideo
-        mediaPlaybackRequiresUserAction={false}
+      <VideoPlayer
+        url={storageUrl}
+        width={width}
+        height={height}
+        onRatio={onRatio}
+        // Both pages mount up front — buffer now so the clip is ready the
+        // instant the user swipes over to it.
+        preload="auto"
       />
     );
   }
@@ -158,8 +141,6 @@ export default function ExerciseDetailScreen({ route, navigation }) {
   };
 
   // ── The two pages ──────────────────────────────────────────────────────────
-  const hasBody = !!exercise.description || cues.length > 0;
-
   const infoPage = size && (
     <ScrollView
       style={{ width: size.width, height: size.height }}
@@ -169,9 +150,11 @@ export default function ExerciseDetailScreen({ route, navigation }) {
       {/* Hero — a bold accent bar anchors the movement name; the type sits as a
           glowing eyebrow above it, and a gradient rule closes the block. */}
       <View style={styles.hero}>
-        <View style={styles.typeBadge}>
-          <Text style={styles.typeText}>{exercise.movement_type}</Text>
-        </View>
+        {!!exercise.movement_type && (
+          <View style={styles.typeBadge}>
+            <Text style={styles.typeText}>{exercise.movement_type}</Text>
+          </View>
+        )}
         <View style={styles.titleRow}>
           <View style={styles.titleBar} />
           <Text style={styles.title}>{exercise.name}</Text>
@@ -211,21 +194,6 @@ export default function ExerciseDetailScreen({ route, navigation }) {
           </View>
         </View>
       )}
-
-      {/* Nothing written up yet — fill the space with a calm placeholder
-          instead of a big empty gap, and point to the video. */}
-      {!hasBody && (
-        <View style={styles.emptyState}>
-          <View style={styles.emptyIconRing}>
-            <Text style={styles.emptyIcon}>▶</Text>
-          </View>
-          <Text style={styles.emptyTitle}>NO NOTES YET</Text>
-          <Text style={styles.emptyText}>
-            No description or coaching cues have been added for this movement.
-            Swipe left to watch the demo.
-          </Text>
-        </View>
-      )}
     </ScrollView>
   );
 
@@ -247,7 +215,7 @@ export default function ExerciseDetailScreen({ route, navigation }) {
   })();
 
   return (
-    <ScreenFrame fill maxWidth={720}>
+    <ScreenFrame fill>
       <View style={styles.card}>
         {/* Slim top bar: BACK · page dots · EDIT */}
         <View style={styles.topBar}>
@@ -437,25 +405,5 @@ const styles = StyleSheet.create({
   cueText: {
     fontFamily: F.body, fontSize: 18, color: C.text,
     lineHeight: 28, flex: 1, letterSpacing: 0.4,
-  },
-
-  // Empty state — centered in the leftover space so the page never looks broken.
-  emptyState: {
-    flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16,
-    paddingHorizontal: 20, paddingVertical: 40,
-  },
-  emptyIconRing: {
-    width: 76, height: 76, borderRadius: 999,
-    borderWidth: 2, borderColor: C.lockedBorder, backgroundColor: C.lockedBg,
-    justifyContent: 'center', alignItems: 'center',
-  },
-  emptyIcon: { fontSize: 30, color: C.textMuted, marginLeft: 4 },
-  emptyTitle: {
-    fontFamily: F.heading, fontSize: 15, color: C.textMuted,
-    letterSpacing: 3, textTransform: 'uppercase',
-  },
-  emptyText: {
-    fontFamily: F.bodyMed, fontSize: 14, color: C.textMuted,
-    lineHeight: 22, letterSpacing: 0.5, textAlign: 'center', maxWidth: 320,
   },
 });

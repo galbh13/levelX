@@ -1,7 +1,11 @@
-import { useEffect, useState } from 'react';
-import { Animated, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from 'react-native';
-import { NavigationContainer, DefaultTheme, getFocusedRouteNameFromRoute } from '@react-navigation/native';
+import { useEffect, useRef, useState } from 'react';
+import { Animated, Easing, Platform, StyleSheet, Text, TextInput, TouchableOpacity, View, useWindowDimensions } from 'react-native';
+import {
+  NavigationContainer, DefaultTheme, getFocusedRouteNameFromRoute, useNavigationContainerRef,
+} from '@react-navigation/native';
 import { C } from './constants/colors';
+import { NATIVE_SCALE as APP_NATIVE_SCALE, useAppInsets } from './constants/layout';
+import { SafeAreaProvider, initialWindowMetrics } from 'react-native-safe-area-context';
 import { createMaterialTopTabNavigator } from '@react-navigation/material-top-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import {
@@ -12,14 +16,20 @@ import {
 } from '@expo-google-fonts/exo-2';
 import { Cinzel_700Bold, Cinzel_900Black } from '@expo-google-fonts/cinzel';
 import * as SplashScreen from 'expo-splash-screen';
+import * as Updates from 'expo-updates';
 import { F } from './constants/fonts';
 import { supabase } from './lib/supabase';
+import GuidedTour from './components/GuidedTour';
+import TourBoundary from './components/TourBoundary';
+import { TourProvider, useTour } from './context/TourContext';
+import { markOnboardingSeen } from './lib/onboarding';
 
 import HomeScreen        from './screens/HomeScreen';
 import SkillsScreen      from './screens/SkillsScreen';
 import WorkoutsScreen    from './screens/WorkoutsScreen';
 import CheckupScreen      from './screens/CheckupScreen';
 import LoginScreen           from './screens/LoginScreen';
+import JoinScreen            from './screens/JoinScreen';
 import SetPasswordScreen     from './screens/SetPasswordScreen';
 import AdminDashboard        from './screens/AdminDashboard';
 import PlayerAdminScreen     from './screens/PlayerAdminScreen';
@@ -41,22 +51,21 @@ import QuestTreeScreen         from './screens/QuestTreeScreen';
 import PersonalScreen          from './screens/PersonalScreen';
 import CommunityGroupScreen    from './screens/CommunityGroupScreen';
 import CommunityChatScreen     from './screens/CommunityChatScreen';
-import CoachChatScreen         from './screens/CoachChatScreen';
 import HunterStatusScreen      from './screens/HunterStatusScreen';
 import SystemScreen            from './screens/SystemScreen';
 import AdminCommunityScreen    from './screens/AdminCommunityScreen';
 import AdminGroupScreen        from './screens/AdminGroupScreen';
 import AdminCheckupInboxScreen from './screens/AdminCheckupInboxScreen';
-import AdminChatNotesScreen    from './screens/AdminChatNotesScreen';
 import AdminBusinessScreen     from './screens/AdminBusinessScreen';
 import AdminPlansScreen        from './screens/AdminPlansScreen';
 import PlayerBillingScreen     from './screens/PlayerBillingScreen';
 import { CoachProvider, useCoach } from './context/CoachContext';
 import { CheckupNotifyProvider, useCheckupNotify } from './context/CheckupNotifyContext';
 import { AdminNotifyProvider } from './context/AdminNotifyContext';
-import { armHoloEntry } from './lib/holoEntry';
+import { armHoloEntry, isHoloComing, onHoloStart } from './lib/holoEntry';
 import SystemIntro from './components/SystemIntro';
 import IntroBoundary from './components/IntroBoundary';
+import ScreenFrame from './components/ScreenFrame';
 
 // One-line kill switch for the cold-start title sequence.
 const INTRO_ENABLED = true;
@@ -91,7 +100,9 @@ const WEB_ZOOM = 0.7;
 // canvas (so every screen lays out with more room) then scale it back down to
 // fill the device. Layout reflows correctly and touches map through the
 // transform. Web keeps its own zoom and is untouched. Tweak to taste.
-const NATIVE_SCALE = 0.72;
+// Single source of truth lives in constants/layout.js, so screens can size their
+// layout off the SAME canvas this scales (see useAppDimensions there).
+const NATIVE_SCALE = APP_NATIVE_SCALE;
 
 function ScaledRoot({ children }) {
   const { width, height } = useWindowDimensions();
@@ -112,6 +123,25 @@ function ScaledRoot({ children }) {
   );
 }
 
+// The card, with nothing in it. THE FRAME IS THE SAME BOX ON EVERY SCREEN, so
+// it must never blink out between two of them: the role lookup after sign-in
+// used to render a bare dark View, which dropped the border for a split second
+// and made the login → home hand-off read as a reload. This holds the identical
+// card on screen for that gap, so the only thing that changes is what's inside
+// it — the login card dissolves to empty, this IS empty, and the landing card
+// builds up out of it.
+// holoEntry={false} matters: the build latch belongs to the real landing card,
+// and this shell must not consume it.
+function FrameShell() {
+  return (
+    <ScaledRoot>
+      <ScreenFrame fill holoEntry={false}>
+        <View style={{ flex: 1 }} />
+      </ScreenFrame>
+    </ScaledRoot>
+  );
+}
+
 const Tab           = createMaterialTopTabNavigator();
 const RootStack     = createNativeStackNavigator();
 const SkillsStack   = createNativeStackNavigator();
@@ -124,12 +154,68 @@ const AdminStack    = createNativeStackNavigator();
 // label; inactive tabs read as muted siblings on the same surface.
 const INDICATOR_W = 34;
 
+// The label a tab SHOWS, when it differs from its route name. The route name is
+// the app's internal address (navigate('Personal'), the guided tour, swipeAtRoot)
+// and renaming it would ripple everywhere — so only the reading changes here.
+const TAB_LABEL = { Personal: 'SYSTEM' };
+
+// How long the bar takes to rise, and the safety net if the build never fires.
+const BAR_RISE_MS = 300;
+const BAR_RISE_FALLBACK_MS = 6000;
+
 function PlayerTabBar({ state, navigation, position }) {
+  // Edge-to-edge: the Android nav bar (48dp with three buttons) sits ON the app,
+  // so the labels landed on top of it. Pad the bar by the real inset — never
+  // less than the original 22 so a gesture-bar phone keeps the same look.
+  const insets = useAppInsets();
+  const barPad = Math.max(22, insets.bottom + 8);
+  const barH = 66 + barPad;
+
+  // ── The bar UNFOLDS, and the card's bottom edge rides on it ───────────────
+  // Sliding the bar up on its own was two motions, not one: the card's lower
+  // border sat still while the bar travelled past underneath it. What actually
+  // has to move is the BOUNDARY they share.
+  // So the bar animates its own LAYOUT HEIGHT from 0 to full. The pager above it
+  // is flex:1, so as the bar grows, the card's bottom edge is pushed up by the
+  // exact same pixels in the exact same frame — one line rising, with the bar
+  // unfolding beneath it. That is why this is a height animation and not a
+  // transform (a transform moves the bar THROUGH a fixed layout; only a layout
+  // change can carry the card's border with it), and why it can't use the native
+  // driver. Keep it short; it re-lays out the card on every frame.
+  // The bar's contents are pinned to the TOP of the growing box, so the labels
+  // rise with the boundary instead of being revealed in place.
+  const [hidesForBuild] = useState(() => isHoloComing());
+  const unfold = useRef(new Animated.Value(hidesForBuild ? 0 : barH)).current;
+  useEffect(() => {
+    if (!hidesForBuild) return;
+    let done = false;
+    const play = () => {
+      if (done) return;
+      done = true;
+      Animated.timing(unfold, {
+        toValue: barH, duration: BAR_RISE_MS, easing: Easing.out(Easing.cubic), useNativeDriver: false,
+      }).start();
+    };
+    const off = onHoloStart(play);
+    // A build that never starts (a screen stuck loading) must not leave the bar
+    // collapsed — open it regardless.
+    const t = setTimeout(play, BAR_RISE_FALLBACK_MS);
+    return () => { off(); clearTimeout(t); };
+  }, [hidesForBuild, unfold, barH]);
+  // Insets can land after the first frame; keep a bar that is already open in
+  // step with its own height.
+  useEffect(() => { if (!hidesForBuild) unfold.setValue(barH); }, [barH, hidesForBuild, unfold]);
   // Slide the glow marker continuously with the pager: `position` is a float
   // (0…routes-1) that tracks the swipe in real time, so the line moves in the
   // same ratio as the drag instead of jumping at the end.
   const [barWidth, setBarWidth] = useState(0);
-  const { state: checkupState } = useCheckupNotify();   // 'none' | 'due' | 'late'
+  const { state: checkupState, feedbackUnseen } = useCheckupNotify();   // 'none' | 'due' | 'late' (+ unread reply)
+  // One dot, three meanings, in order of urgency: LATE (red) → the coach has
+  // replied and it hasn't been opened (gold) → this week's check-up is due (ice).
+  const checkupDot = checkupState === 'late' ? 'late'
+    : feedbackUnseen ? 'feedback'
+    : checkupState !== 'none' ? 'due'
+    : null;
   const count = state.routes.length;
   const tabWidth = barWidth / count;
 
@@ -157,7 +243,11 @@ function PlayerTabBar({ state, navigation, position }) {
   });
 
   return (
-    <View style={tabStyles.bar} onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}>
+    <Animated.View style={[tabStyles.barBox, { height: unfold }]}>
+      <View
+        style={[tabStyles.bar, { height: barH, paddingBottom: barPad }]}
+        onLayout={(e) => setBarWidth(e.nativeEvent.layout.width)}
+      >
       {barWidth > 0 && (
         <Animated.View
           pointerEvents="none"
@@ -192,21 +282,32 @@ function PlayerTabBar({ state, navigation, position }) {
                   focused ? tabStyles.labelActive : tabStyles.labelMuted,
                 ]}
               >
-                {route.name.toUpperCase()}
+                {(TAB_LABEL[route.name] ?? route.name).toUpperCase()}
               </Text>
-              {route.name === 'Checkup' && checkupState !== 'none' && (
-                <View style={[tabStyles.dot, checkupState === 'late' && tabStyles.dotLate]} />
+              {route.name === 'Checkup' && !!checkupDot && (
+                <View style={[
+                  tabStyles.dot,
+                  checkupDot === 'late' && tabStyles.dotLate,
+                  checkupDot === 'feedback' && tabStyles.dotFeedback,
+                ]} />
               )}
             </View>
           </TouchableOpacity>
         );
       })}
-    </View>
+      </View>
+    </Animated.View>
   );
 }
 
 const tabStyles = StyleSheet.create({
+  // The growing box. Its HEIGHT is what the pager above reads, so animating it
+  // moves the card's bottom border; `bar` inside is pinned to its top edge at
+  // full size and clipped, so the labels ride up with that edge.
+  barBox: { width: '100%', overflow: 'hidden', backgroundColor: C.navBg },
   bar: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0,
     flexDirection: 'row',
     height: 88,
     paddingBottom: 22,
@@ -252,6 +353,9 @@ const tabStyles = StyleSheet.create({
   },
   // Late — the grace day and still nothing sent.
   dotLate: { backgroundColor: '#E11D48', shadowColor: '#E11D48' },
+  // New feedback from the coach, not opened yet — gold, the app's "there is
+  // something FOR you here" colour, so it never reads as another thing owed.
+  dotFeedback: { backgroundColor: '#E8B23A', shadowColor: '#E8B23A' },
 
   labelActive: {
     color: C.iceGlow,
@@ -296,12 +400,12 @@ function WorkoutsNavigator() {
   );
 }
 
-// Personal stack: the player's private space — coach chat + The System.
+// The System stack (route name `Personal`, label SYSTEM): the five out-of-training
+// pillars — sleep, nutrition, recovery, socialize, mentality.
 function PersonalNavigator() {
   return (
     <PersonalStack.Navigator screenOptions={{ headerShown: false }}>
       <PersonalStack.Screen name="PersonalList" component={PersonalScreen} />
-      <PersonalStack.Screen name="CoachChat"    component={CoachChatScreen} />
       <PersonalStack.Screen name="System"       component={SystemScreen} />
     </PersonalStack.Navigator>
   );
@@ -334,10 +438,8 @@ function AdminNavigator() {
         <AdminStack.Screen name="AdminCommunity"    component={AdminCommunityScreen} />
         <AdminStack.Screen name="AdminGroup"        component={AdminGroupScreen} />
         <AdminStack.Screen name="CommunityChat"     component={CommunityChatScreen} />
-        <AdminStack.Screen name="CoachChat"         component={CoachChatScreen} />
         <AdminStack.Screen name="HunterStatus"      component={HunterStatusScreen} />
         <AdminStack.Screen name="CheckupInbox"      component={AdminCheckupInboxScreen} />
-        <AdminStack.Screen name="ChatNotes"         component={AdminChatNotesScreen} />
         {/* Business layer — admin-only money surfaces (migration 20260825_business_billing). */}
         <AdminStack.Screen name="Business"          component={AdminBusinessScreen} />
         <AdminStack.Screen name="BillingPlans"      component={AdminPlansScreen} />
@@ -396,13 +498,68 @@ function PlayerTabs() {
   );
 }
 
+// ── The guided tour, hoisted OUT of the tab pager ────────────────────────────
+// It used to be rendered by HomeScreen. On the APK that broke the moment the
+// tour navigated to another tab: Home is one page of the pager, React Navigation
+// deactivates an inactive scene, and a <Modal> inside a detached native screen is
+// torn down with it — the overlay disappeared on the Skills step and the player
+// was stranded. Rendered here it is a sibling of the whole navigator, so no tab
+// change can touch it. (Web never showed this — there are no native screens to
+// detach, which is why it only ever bit the build on the phone.)
+// Navigation goes through the container ref for the same reason: this sits
+// outside every navigator, so there is no `useNavigation()` to call.
+function PlayerTour({ navRef }) {
+  const { tourOpen, closeTour, setStepId } = useTour();
+
+  // Three of the tabs are STACKS, and a tab remembers where the player left it.
+  // Jumping to the tab alone lands on whatever is on top of that stack — open a
+  // quest tree once and the tour's SKILLS steps then play over QuestTreeScreen,
+  // where none of the elements they point at exist (the screen underneath is
+  // still mounted, so they even measure — as a hidden view, which is how the
+  // highlight ended up stranded in the top-left corner). So the tour always asks
+  // for the tab's ROOT route, which pops the stack back to it.
+  const TAB_ROOT = {
+    Skills:   'SkillsList',
+    Workouts: 'WorkoutsList',
+    Personal: 'PersonalList',
+  };
+
+  const go = (target) => {
+    const root = TAB_ROOT[target];
+    try {
+      if (!navRef.isReady()) return;
+      navRef.navigate('Tabs', root ? { screen: target, params: { screen: root } } : { screen: target });
+    } catch {}
+  };
+
+  const handleClose = () => {
+    markOnboardingSeen();
+    // The tour may have walked the player to another tab. Return to Home FIRST,
+    // while the overlay still covers the screen, then lift the overlay a beat
+    // later. Dismissing the overlay AND jumping the tab pager on the same frame
+    // desyncs react-native-pager-view (screen stuck half-shifted + unresponsive).
+    go('Home');
+    setTimeout(closeTour, 240);
+  };
+
+  // Boundary: the tour renders at the ROOT, so an unhandled throw inside it would
+  // unmount the whole tree and drop the player out of the app. Catch it and close
+  // the tutorial instead — the TUTORIAL pill on Home restarts it.
+  return (
+    <TourBoundary onFail={closeTour}>
+      <GuidedTour visible={tourOpen} onClose={handleClose} onNavigate={go} onStep={setStepId} />
+    </TourBoundary>
+  );
+}
+
 // The full player experience: their consumption tabs + self-coaching authoring,
 // all sharing one CoachProvider seeded with the player's own profile.
-function PlayerApp() {
+function PlayerApp({ navRef }) {
   return (
     <CoachProvider>
       <SelfStudentSync />
       <CheckupNotifyProvider>
+      <TourProvider>
         {/* The live Workout Mode session is pushed ABOVE the tab pager (full-screen,
             its own root-stack route) instead of living inside the Workouts stack.
             Inside the pager a horizontal drag mid-set could swipe you off to a
@@ -415,13 +572,24 @@ function PlayerApp() {
           <RootStack.Screen name="Tabs"           component={PlayerTabs} />
           <RootStack.Screen name="WorkoutMode"    component={WorkoutModeScreen} />
           <RootStack.Screen name="WorkoutSummary" component={WorkoutSummaryScreen} />
+          {/* The how-to card rides along at root level too: tapping an exercise
+              inside a live session must open it, and that session is a ROOT
+              screen (above the tabs), so the Workouts-stack copy is out of
+              reach from there. */}
+          <RootStack.Screen name="ExerciseDetail" component={ExerciseDetailScreen} />
         </RootStack.Navigator>
+        {/* Sibling of the navigator, so no tab change can detach it. */}
+        <PlayerTour navRef={navRef} />
+      </TourProvider>
       </CheckupNotifyProvider>
     </CoachProvider>
   );
 }
 
 export default function App() {
+  // Handed to the hoisted guided tour so it can drive the tab pager from outside
+  // every navigator (see PlayerTour).
+  const navRef = useNavigationContainerRef();
   const [fontsLoaded, fontError] = useFonts({
     Exo2_400Regular,
     Exo2_600SemiBold,
@@ -432,6 +600,31 @@ export default function App() {
 
   // A slow or failed font load must never brick a cold start: proceed once the
   // fonts load, error out, or a short grace period elapses (text falls back).
+  // ── Self-refresh (native only) ──
+  // Every JS change is published to this build's EAS channel. By default
+  // expo-updates downloads a new bundle in the background and only APPLIES it on
+  // the NEXT cold start, which reads as 'the fix didn't land' and means opening
+  // the app twice. Pull it during the intro instead and reload once, so a launch
+  // always runs the newest code without a reinstall. Everything is inside a
+  // try/catch and no await gates the UI: an offline or failed check must never
+  // hold the splash (see the black-screen post-mortem).
+  useEffect(() => {
+    if (Platform.OS === 'web' || __DEV__ || !Updates.isEnabled) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const check = await Updates.checkForUpdateAsync();
+        if (cancelled || !check.isAvailable) return;
+        await Updates.fetchUpdateAsync();
+        if (cancelled) return;
+        await Updates.reloadAsync();
+      } catch {
+        // Offline, no channel, or a bad manifest — just run the bundled code.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   const [fontGrace, setFontGrace] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => setFontGrace(true), 4000);
@@ -441,6 +634,10 @@ export default function App() {
 
   const [session, setSession] = useState(undefined); // undefined = loading
   const [role, setRole]       = useState(null);
+  // Logged-out only: swaps the login card for the recruitment page. Plain state
+  // rather than a route because the logged-out tree has NO navigator (see the
+  // comment on the `!session` branch below).
+  const [joining, setJoining] = useState(false);
   // An invited player still holding the shared starter password — the app is
   // blocked behind SetPasswordScreen until they pick their own.
   const [mustChangePw, setMustChangePw] = useState(false);
@@ -557,16 +754,17 @@ export default function App() {
       return (
         <ScaledRoot>
           <NavigationContainer theme={NAV_THEME}>
-            <LoginScreen />
+            {joining
+              ? <JoinScreen onBack={() => setJoining(false)} />
+              : <LoginScreen onJoin={() => setJoining(true)} />}
           </NavigationContainer>
         </ScaledRoot>
       );
     }
 
-    // Logged in — route by role (wait for role to load)
-    if (!role) {
-      return <View style={{ flex: 1, backgroundColor: C.bg }} />;
-    }
+    // Logged in — route by role (wait for role to load). Framed, not blank:
+    // see FrameShell.
+    if (!role) return <FrameShell />;
 
     // A freshly invited player is still on the shared starter password — nothing
     // else mounts until they replace it. Rendered bare (no navigator) like
@@ -587,8 +785,10 @@ export default function App() {
     // Only two roles remain: admin and player. Everyone else is treated as a player.
     return (
       <ScaledRoot>
-        <NavigationContainer theme={NAV_THEME}>
-          {role === 'admin' ? <AdminNavigator /> : <PlayerApp />}
+        {/* The ref is how the hoisted guided tour drives the tabs — it renders
+            outside every navigator, so it has no `useNavigation()` of its own. */}
+        <NavigationContainer ref={navRef} theme={NAV_THEME}>
+          {role === 'admin' ? <AdminNavigator /> : <PlayerApp navRef={navRef} />}
         </NavigationContainer>
       </ScaledRoot>
     );
@@ -600,6 +800,7 @@ export default function App() {
   // font/session wait, which is why it renders while those are still pending.
   // Kept OUTSIDE ScaledRoot so the clip fills the real screen, not the zoomed canvas.
   return (
+    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       {renderContent()}
       {INTRO_ENABLED && !introDone && (
@@ -608,5 +809,6 @@ export default function App() {
         </IntroBoundary>
       )}
     </View>
+    </SafeAreaProvider>
   );
 }

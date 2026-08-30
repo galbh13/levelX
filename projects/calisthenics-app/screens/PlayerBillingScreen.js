@@ -10,7 +10,6 @@ import {
 } from '../lib/billing';
 import { fetchEngagement, riskScore, RISK_COLORS, RISK_LABELS } from '../lib/engagement';
 import { F } from '../constants/fonts';
-import { CARD_W } from '../constants/layout';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
@@ -177,7 +176,7 @@ export default function PlayerBillingScreen({ navigation, route }) {
   const churnedish = form?.status === 'churned' || !!form?.ended_at;
 
   return (
-    <ScreenFrame fill maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <View style={styles.card}>
         <ScreenHeader
           title="MONEY"

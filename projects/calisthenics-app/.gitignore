@@ -48,3 +48,7 @@ supabase/.temp/
 
 # local scratch
 scratch_icon_b64.txt
+
+# Welcome-email preview output (node preview.mjs) — regenerated, never committed
+supabase/functions/invite-player/preview.html
+supabase/functions/invite-player/preview.txt

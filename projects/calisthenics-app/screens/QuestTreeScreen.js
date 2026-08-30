@@ -21,6 +21,8 @@ import {
   upgradeFor, baseOf, chainCleared, fetchUpgrades, saveUpgrade, removeUpgrade,
 } from '../lib/questUpgrades';
 import { hapticSuccess, hapticTap } from '../lib/haptics';
+import { useAppInsets } from '../constants/layout';
+import { FRAME_PAD, FRAME_PAD_V } from '../components/ScreenFrame';
 import { noteQuestCompleted, noteQuestUncompleted, reconcileQuestProgress } from '../lib/questProgress';
 
 // An SVG path whose props (here strokeDashoffset) can be driven by an Animated
@@ -51,10 +53,10 @@ const NODE_W       = 380;
 // Wide node for single-column, info-dense quests (long names wrap to fewer lines).
 const WIDE_NODE_W  = 680;
 const NODE_H       = 76;
-const COL_GAP      = 60;
+const COL_GAP      = 40;   // narrower: every unit here is one the nodes lose
 const RANK_GAP     = 76;
 const TIER_GAP     = 120;     // extra vertical room reserved around a TIER divider
-const TREE_PAD_H   = 16;
+const TREE_PAD_H   = 6;
 const TREE_PAD_T   = 28;
 const LABEL_H      = 48;
 const LABEL_OFFSET = 58;
@@ -64,14 +66,41 @@ const TIER_LABEL_GAP  = 18;   // clear air between the TIER rule and a branch he
 // tap that earned it, so the gold completion burst on the node the player DID
 // tap gets its moment first, and the reveal reads as a consequence of it.
 const REVEAL_DELAY    = 620;
+// ─── The header HUD's entrance ───────────────────────────────────────────────
+// One beat, in order: the empty meter rail draws itself out from the left, the
+// fill chases it down the rail, and the two readouts widen into place off the
+// rail's ends as it lands. Nothing else on the screen moves — the tree and the
+// header pills are already where they belong, which is why this is the only
+// thing that stretches.
+const HUD_OPEN_DELAY  = 160;
+const HUD_OPEN_MS     = 520;
+const HUD_FILL_DELAY  = HUD_OPEN_DELAY + HUD_OPEN_MS - 140;  // overlaps the rail's landing
+const HUD_STATS_DELAY = HUD_OPEN_DELAY + HUD_OPEN_MS - 90;
+const HUD_TICK_DELAY  = HUD_STATS_DELAY + 60;                // the count-up starts once they're up
 const HIDDEN_GAP      = 196;  // extra air above a revealed HIDDEN CHALLENGE (2-line plaque)
 // The plaque rides well clear of the node so the gold connector elbow bending in
 // from the branch tips passes BELOW it, never alongside the type.
 const CHALLENGE_LABEL_OFFSET = 148;
+
+// ─── How BIG a node ends up on screen ────────────────────────────────────────
+// The tree is drawn at its natural size and then scaled to fit the card, so the
+// node size the player actually sees used to depend entirely on how WIDE the
+// quest is: a single-column quest rendered at 1:1 (huge cards) while a two-column
+// side quest was squeezed to ~55% (tiny ones). Same app, two different scales.
+// So the fit is CLAMPED into a band, expressed as the on-screen width a standard
+// node should land at — every tree now reads at roughly one size.
+// The band is a CAP only: a lone column can't blow up to fill the card. There is
+// deliberately no floor — the WHOLE tree must always be on screen at once, so a
+// tree that needs to shrink to fit does shrink. A wider tree buys its node size
+// back from the margins instead (TREE_PAD_H / COL_GAP), never from the player's
+// thumb.
+const NODE_ON_SCREEN_MAX = 250;
 const BEND_NEAR_CHILD = 12;   // horizontal jog sits this many px above child top
-// Shared height for the three header pills (BACK / version switch / DOWNGRADE)
-// so they sit exactly level regardless of what's inside them.
-const HEADER_PILL_H   = 58;
+// ONE size for all three header pills (BACK / version switch / DOWNGRADE) so
+// they sit level and, at this size, fit on a single line together. They were all
+// 58 high with 24pt type, which ate half the card and pushed the pair onto their
+// own row below BACK.
+const HEADER_PILL_H   = 44;
 
 // ─── Per-node height — long names grow taller instead of clipping ─────────────
 // Width is fixed by column geometry, so we can't widen a node without colliding
@@ -881,22 +910,36 @@ function computeLayout(quests, { applyTiers = false, chain = null } = {}) {
   });
   const rowH = (r) => rankHeight[Math.round(r)] ?? NODE_H;
 
-  let rankY;
-  if (isSingleColumn) {
-    const rankTop = {};
+  // ONE height-aware ladder for every tree. Each rank's top is the previous
+  // rank's top plus the TALLEST node that rank holds — so a row containing a
+  // two-line name (e.g. a coach node's "Coach certification needed") pushes the
+  // row below it down instead of growing into the gap and colliding with the
+  // next branch's label, which sits LABEL_OFFSET above its first node.
+  // A branch shifted by BRANCH_LAYOUT lands on a FRACTIONAL rank, so the ladder
+  // is interpolated between the two integer rungs it falls between (and
+  // extrapolated with the last step past the bottom). When every node is one
+  // line this reduces exactly to the old uniform NODE_H + RANK_GAP step, so
+  // existing trees are untouched.
+  const rankTop = {};
+  {
     let acc = TREE_PAD_T + LABEL_H;
     for (let r = 0; r <= maxRank; r++) {
       if (r === firstTier2Rank) acc += TIER_GAP;
       rankTop[r] = acc;
       acc += (rankHeight[r] ?? NODE_H) + RANK_GAP;
     }
-    rankY = (r) => rankTop[Math.round(r)]
-      ?? (TREE_PAD_T + LABEL_H + r * (NODE_H + RANK_GAP));
-  } else {
-    rankY = (r) =>
-      TREE_PAD_T + LABEL_H + r * (NODE_H + RANK_GAP) +
-      (r >= firstTier2Rank ? TIER_GAP : 0);
   }
+  const rungAt = (r) => {
+    if (r <= 0) return rankTop[0] ?? (TREE_PAD_T + LABEL_H);
+    if (r >= maxRank) {
+      const step = (rankHeight[maxRank] ?? NODE_H) + RANK_GAP;
+      return (rankTop[maxRank] ?? 0) + (r - maxRank) * step;
+    }
+    const lo = Math.floor(r);
+    const t  = r - lo;
+    return rankTop[lo] + t * (rankTop[lo + 1] - rankTop[lo]);
+  };
+  const rankY = (r) => rungAt(Number.isFinite(r) ? r : 0);
   const positions = {};
 
   for (let r = 0; r <= maxRank; r++) {
@@ -1078,18 +1121,44 @@ function QuestHUD({ done, total, earnedLvl }) {
   const pct      = total > 0 ? done / total : 0;
   const complete = total > 0 && done === total;
 
-  const grow    = useRef(new Animated.Value(0)).current;
+  const open    = useRef(new Animated.Value(0)).current;   // the track unfurling
+  const grow    = useRef(new Animated.Value(0)).current;   // the fill inside it
+  const stats   = useRef(new Animated.Value(0)).current;   // the two readouts
   const breathe = useRef(new Animated.Value(0)).current;
+
+  // The empty TRACK draws itself out from the left first — so the fill has a
+  // rail to run along instead of appearing inside a bar that was always there.
+  useEffect(() => {
+    open.setValue(0);
+    const anim = Animated.timing(open, {
+      toValue: 1, duration: HUD_OPEN_MS, delay: HUD_OPEN_DELAY,
+      easing: Easing.out(Easing.cubic), useNativeDriver: false,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [open]);
 
   useEffect(() => {
     grow.setValue(0);
     const anim = Animated.timing(grow, {
-      toValue: 1, duration: 1100, delay: 350,
+      toValue: 1, duration: 1100, delay: HUD_FILL_DELAY,
       easing: Easing.out(Easing.cubic), useNativeDriver: false,
     });
     anim.start();
     return () => anim.stop();
   }, [pct, grow]);
+
+  // …and the readouts arrive as the rail lands, widening into place with it
+  // (a touch of overshoot) rather than sitting there waiting for it.
+  useEffect(() => {
+    stats.setValue(0);
+    const anim = Animated.timing(stats, {
+      toValue: 1, duration: 460, delay: HUD_STATS_DELAY,
+      easing: Easing.out(Easing.back(1.7)), useNativeDriver: true,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [stats]);
 
   useEffect(() => {
     if (!complete) return;
@@ -1104,6 +1173,11 @@ function QuestHUD({ done, total, earnedLvl }) {
   // min 3% so even 0-progress shows a glint of fill at the left.
   const fillW       = grow.interpolate({ inputRange: [0, 1], outputRange: ['0%', `${Math.max(pct * 100, 3)}%`] });
   const glowOpacity = breathe.interpolate({ inputRange: [0, 1], outputRange: [0.2, 0.65] });
+  // The track's own width — this is the bar EXPANDING, drawn before any fill.
+  const trackW      = open.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
+  // The readouts widen out of the rail: squat and low, then full size.
+  const statsScaleX = stats.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] });
+  const statsLift   = stats.interpolate({ inputRange: [0, 1], outputRange: [-9, 0] });
 
   return (
     <View style={styles.hud}>
@@ -1113,24 +1187,39 @@ function QuestHUD({ done, total, earnedLvl }) {
         </View>
       )}
 
-      <View style={styles.meterTrack}>
+      <Animated.View style={[styles.meterTrack, { width: trackW }]}>
         <Animated.View style={[styles.meterFillWrap, { width: fillW }]}>
           <ShimmerFill style={styles.meterFill} colors={complete ? GOLD : BLUE} active />
         </Animated.View>
         {complete && (
           <Animated.View pointerEvents="none" style={[styles.meterGlow, { opacity: glowOpacity }]} />
         )}
-      </View>
+      </Animated.View>
 
+      {/* Each readout expands from its OWN end of the rail — the count out of
+          the left, the LVL out of the right — so the pair reads as the bar's
+          two ends resolving into numbers. */}
       <View style={styles.hudStats}>
-        <Text style={[styles.hudStatNum, complete && styles.hudStatNumGold]}>
-          <Ticker value={done} />/{total}{'  '}
-          <Text style={styles.hudStatTag}>COMPLETE</Text>
-        </Text>
-        <Text style={styles.hudStatNumGold}>
-          +<Ticker value={earnedLvl} />{'  '}
-          <Text style={styles.hudStatTagGold}>LVL EARNED</Text>
-        </Text>
+        <Animated.View style={{
+          opacity: stats,
+          transform: [{ translateY: statsLift }, { scaleX: statsScaleX }],
+          transformOrigin: 'left center',
+        }}>
+          <Text style={[styles.hudStatNum, complete && styles.hudStatNumGold]}>
+            <Ticker value={done} delay={HUD_TICK_DELAY} />/{total}{'  '}
+            <Text style={styles.hudStatTag}>COMPLETE</Text>
+          </Text>
+        </Animated.View>
+        <Animated.View style={{
+          opacity: stats,
+          transform: [{ translateY: statsLift }, { scaleX: statsScaleX }],
+          transformOrigin: 'right center',
+        }}>
+          <Text style={styles.hudStatNumGold}>
+            +<Ticker value={earnedLvl} delay={HUD_TICK_DELAY} />{'  '}
+            <Text style={styles.hudStatTagGold}>LVL EARNED</Text>
+          </Text>
+        </Animated.View>
       </View>
     </View>
   );
@@ -1617,8 +1706,10 @@ function DowngradeButton({ onPress, busy }) {
     return () => anim.stop();
   }, [fade]);
 
+  // The wrapper is shrinkable, or the button inside it can never give width
+  // back to the row and the three header pills run off the card.
   return (
-    <Animated.View style={{ opacity: fade }}>
+    <Animated.View style={{ opacity: fade, flexShrink: 1, minWidth: 0 }}>
       <TouchableOpacity
         style={styles.downBtn}
         onPress={onPress}
@@ -1630,7 +1721,12 @@ function DowngradeButton({ onPress, busy }) {
         ) : (
           <>
             <Text style={styles.downBtnChevron}>▼</Text>
-            <Text style={styles.downBtnText}>DOWNGRADE</Text>
+            <Text
+              style={styles.downBtnText}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.7}
+            >DOWNGRADE</Text>
           </>
         )}
       </TouchableOpacity>
@@ -1647,7 +1743,12 @@ function VersionSwitch({ toUpgrade, label, onPress }) {
   return (
     <TouchableOpacity style={styles.verSwitch} onPress={onPress} activeOpacity={0.85}>
       <Text style={styles.verSwitchArrow}>{toUpgrade ? '▲' : '▼'}</Text>
-      <Text style={styles.verSwitchText}>{label.replace(/_/g, ' ').toUpperCase()}</Text>
+      <Text
+        style={styles.verSwitchText}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontScale={0.7}
+      >{label.replace(/_/g, ' ').toUpperCase()}</Text>
     </TouchableOpacity>
   );
 }
@@ -1732,6 +1833,8 @@ export default function QuestTreeScreen({ route, navigation }) {
   // node joins the tree — two gold-lit lines pointing at empty space, spoiling
   // the beat. Held back until the node itself lands.
   const [linksArmed,   setLinksArmed]   = useState(true);
+  // Safe-area padding for the full-page card (canvas units — see constants/layout).
+  const insets = useAppInsets();
   // Available width inside the frame → used to fit the whole tree to the phone.
   const [availW,       setAvailW]       = useState(0);
   // COMBOES-only "SHAPES" glossary popup — explains the shapes sequence the combo
@@ -1908,7 +2011,14 @@ export default function QuestTreeScreen({ route, navigation }) {
 
   // Fit-to-width: scale the whole tree down so its full width fits the phone.
   // (≤1 only — never blow a small tree up past its natural size.)
-  const treeScale = availW > 0 && width > 0 ? Math.min(1, availW / width) : 1;
+  const treeScale = useMemo(() => {
+    if (!(availW > 0 && width > 0)) return 1;
+    // The cap is expressed against the STANDARD node so a deliberately wide node
+    // (WIDE_NODE_W, used for long single-column names) scales like everything
+    // else instead of being shrunk to unreadable type.
+    const cap = Math.min(1, NODE_ON_SCREEN_MAX / NODE_W);
+    return Math.min(cap, availW / width);
+  }, [availW, width]);
 
   // Shared "energy flow" clock — a single looping value that marches the dashed
   // overlay along every COMPLETED connector (parent → child), so mastery visibly
@@ -2281,10 +2391,15 @@ export default function QuestTreeScreen({ route, navigation }) {
       {/* One page-sized ice-glow frame (matches SkillsScreen's body width) wraps
           EVERYTHING — header + the tree. The tree scrolls horizontally INSIDE
           the frame instead of stretching it. */}
+      {/* The frame is ALWAYS the full page (top inset → bottom), exactly like
+          ScreenFrame's card: its size never depends on how many nodes the quest
+          has, so a 3-node side quest draws the same box as a 40-node main quest.
+          The content scrolls INSIDE it. */}
       {/* While the MULTI-SIGN bar is docked it covers the foot of the tree, so
           the scroll grows by its height and the last nodes stay reachable. */}
-      <ScrollView contentContainerStyle={styles.scrollBody}>
+      <View style={[styles.frameOuter, { paddingTop: FRAME_PAD_V + insets.top }]}>
         <View style={styles.treeFrame}>
+        <ScrollView style={styles.frameScroll} contentContainerStyle={styles.scrollBody}>
 
         {/* Header */}
         <View style={styles.header}>
@@ -2300,7 +2415,8 @@ export default function QuestTreeScreen({ route, navigation }) {
               style={styles.headerBackPill}
               textStyle={styles.headerBackText}
             />
-            <View style={{ flex: 1 }} />
+            {/* Yields its width first, so the three pills keep their row. */}
+            <View style={styles.headerSpacer} />
 
             {/* The pair's two controls, together on the right: move BETWEEN the
                 versions, or give the upgrade back entirely. */}
@@ -2411,8 +2527,9 @@ export default function QuestTreeScreen({ route, navigation }) {
           <View style={styles.headerDivider} />
         </View>
 
-        {/* Tree — auto fit-to-width: the whole tree scales down so its full
-            width fits the phone; only vertical scrolling remains. */}
+        {/* Tree — scaled into the node-size band (see NODE_ON_SCREEN_MAX). It
+            still fits the card in almost every case; a tree that lands a little
+            over pans sideways inside the card rather than shrinking further. */}
         <View
           style={styles.treeFitArea}
           onLayout={e => setAvailW(e.nativeEvent.layout.width - TREE_PAD_H * 2)}
@@ -2543,8 +2660,9 @@ export default function QuestTreeScreen({ route, navigation }) {
         {upgradeReady && (
           <UpgradeGate onPress={takeUpgrade} busy={upgrading} />
         )}
+        </ScrollView>
         </View>
-      </ScrollView>
+      </View>
 
       {/* ── Confirmation popup — system-notification style card ── */}
       <Modal
@@ -2703,23 +2821,17 @@ export default function QuestTreeScreen({ route, navigation }) {
               even while hidden — so never reach into it unguarded. */}
           {confirmDowngrade && base && (
           <View style={styles.confirmCard}>
-            <Text style={styles.confirmCardTitle}>GIVE BACK UPGRADE</Text>
-            <Text style={styles.confirmCardName}>
-              {chain.replace(/_/g, ' ').toUpperCase()}
+            <Text style={styles.confirmCardTitle}>CONFIRM DOWNGRADE</Text>
+            {/* Name the destination, not the quest being given up — the player
+                is choosing where they land, which is the original chain. */}
+            <Text style={styles.confirmCardName} numberOfLines={2} adjustsFontSizeToFit minimumFontScale={0.7}>
+              {`RETURN TO ${base.chain.replace(/_/g, ' ').toUpperCase()}`}
             </Text>
             {doneCount > 0 && (
               <Text style={[styles.confirmCardDelta, styles.confirmCardDeltaDown]}>
                 −{earnedLvl} LVL
               </Text>
             )}
-            <Text style={styles.mirrorNote}>
-              {doneCount > 0
-                ? `This quest resets to nothing — all ${doneCount} completed ${doneCount === 1 ? 'node' : 'nodes'} are cleared. `
-                : ''}
-              {base.chain.replace(/_/g, ' ').toUpperCase()} keeps everything it has earned,
-              and the UPGRADE will be waiting at the bottom of it again.
-            </Text>
-
             <View style={styles.confirmButtons}>
               <TouchableOpacity
                 style={styles.confirmCancel}
@@ -2737,7 +2849,7 @@ export default function QuestTreeScreen({ route, navigation }) {
               >
                 {upgrading
                   ? <ActivityIndicator color={SL.bg} size="small" />
-                  : <Text style={styles.confirmOkText}>DOWNGRADE</Text>}
+                  : <Text style={[styles.confirmOkText, styles.confirmOkTextLong]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>DOWNGRADE</Text>}
               </TouchableOpacity>
             </View>
           </View>
@@ -2784,71 +2896,81 @@ const styles = StyleSheet.create({
 
   // Header
   header: {
-    paddingHorizontal: 24,
+    // Narrow: on a phone this row carries THREE pills (BACK + the upgrade pair)
+    // and every unit of side padding is one they have to give up.
+    paddingHorizontal: 14,
     paddingTop: 8,
     paddingBottom: 20,
     alignItems: 'center',
     borderBottomWidth: 1,
     borderBottomColor: SL.border,
   },
+  headerSpacer: { flexGrow: 1, flexShrink: 1, minWidth: 8 },
   headerTopRow: {
     alignSelf: 'stretch',
     flexDirection: 'row',
     alignItems: 'center',
+    flexWrap: 'nowrap',
     marginBottom: 10,
   },
   // BACK, matched to the pair controls: same height, padding, border weight and
   // type size, so all three header pills sit on one line as equals. (Overrides
   // PillButton's `lg` — the shared component tops out smaller than this row.)
   headerBackPill: {
+    flexShrink: 0,
     minHeight: HEADER_PILL_H,
-    paddingVertical: 15,
-    paddingHorizontal: 26,
-    borderWidth: 2.5,
+    paddingVertical: 9,
+    paddingHorizontal: 16,
+    borderWidth: 2,
   },
   headerBackText: {
-    fontSize: 24,
-    letterSpacing: 1.8,
+    fontSize: 17,
+    letterSpacing: 1.1,
   },
 
-  // The pair controls, right-aligned. They're big, and one of them carries a
-  // full quest name — on a narrow phone that can't share a line with BACK, so
-  // the group wraps below instead of squashing.
+  // The pair controls, right-aligned. NEVER wraps: BACK, the version switch and
+  // DOWNGRADE are one row, full stop. If a long chain name runs the row out of
+  // width, the two pills shrink (and their labels scale down inside them) rather
+  // than one of them dropping to a second line.
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
-    flexWrap: 'wrap',
+    flexWrap: 'nowrap',
     flexShrink: 1,
-    gap: 10,
+    minWidth: 0,
+    gap: 8,
   },
 
   // ── Version switch (header) ────────────────────────────────────────────────
-  // Gold-tinted so it reads as part of the upgrade language. Deliberately much
-  // larger than the BACK pill: on an upgraded quest, knowing which of the two
-  // versions you're on — and getting to the other — is the header's real job.
+  // Gold-tinted so it reads as part of the upgrade language, and sized one step
+  // below BACK — it still says which of the two versions you're on without
+  // dominating the screen.
   verSwitch: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    flexShrink: 1,
+    minWidth: 0,
+    gap: 7,
     minHeight: HEADER_PILL_H,
-    paddingVertical: 15,
-    paddingHorizontal: 26,
+    paddingVertical: 9,
+    paddingHorizontal: 16,
     borderRadius: 999,
-    borderWidth: 2.5,
+    borderWidth: 2,
     borderColor: 'rgba(255,215,0,0.45)',
     backgroundColor: 'rgba(255,215,0,0.08)',
   },
   verSwitchArrow: {
     fontFamily: F.body,
-    fontSize: 18,
-    lineHeight: 24,
+    fontSize: 13,
+    lineHeight: 17,
     color: SL.gold,
   },
   verSwitchText: {
+    flexShrink: 1,
     fontFamily: F.heading,
-    fontSize: 24,
-    letterSpacing: 1.8,
+    fontSize: 17,
+    letterSpacing: 1.1,
     color: SL.gold,
   },
 
@@ -2886,25 +3008,28 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 12,
+    flexShrink: 1,
+    minWidth: 0,
+    gap: 7,
     minHeight: HEADER_PILL_H,
-    paddingVertical: 15,
-    paddingHorizontal: 26,
+    paddingVertical: 9,
+    paddingHorizontal: 16,
     borderRadius: 999,
-    borderWidth: 2.5,
+    borderWidth: 2,
     borderColor: 'rgba(74,106,138,0.55)',
     backgroundColor: 'rgba(74,106,138,0.10)',
   },
   downBtnChevron: {
     fontFamily: F.body,
-    fontSize: 18,
-    lineHeight: 24,
+    fontSize: 13,
+    lineHeight: 17,
     color: SL.muted,
   },
   downBtnText: {
+    flexShrink: 1,
     fontFamily: F.heading,
-    fontSize: 24,
-    letterSpacing: 1.8,
+    fontSize: 17,
+    letterSpacing: 1.1,
     color: SL.muted,
   },
   gateHalo: {
@@ -3205,24 +3330,46 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
 
+  // The page behind the card: full bleed, constant margin — mirrors
+  // ScreenFrame's `outer`, so the quest card sits exactly where every other
+  // screen's card sits.
+  frameOuter: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: FRAME_PAD,
+    paddingVertical: FRAME_PAD_V,
+  },
+
+  // The card's inner scroll: fills the card and scrolls only when the content
+  // outgrows it — so the CARD never changes size, only the content does.
+  frameScroll: { flex: 1, width: '100%' },
+
   // Tree
   scrollBody: {
     flexGrow: 1,
-    alignItems: 'center',
-    paddingTop: 44,
-    paddingHorizontal: 12,
+    // STRETCH, not center: the header sizes itself from the card, and its own
+    // children (the pill row, the HUD meter) stretch to it. Centering here
+    // makes the header shrink-wrap its content instead, so those stretched
+    // children run off the edge of the card.
+    alignItems: 'stretch',
+    paddingTop: 12,
+    // No side padding: the header brings its own, and the tree wants every unit
+    // of width it can get (it is scaled to fit, so padding here comes straight
+    // out of the node size).
+    paddingHorizontal: 0,
     paddingBottom: 60,
   },
 
   // One page-sized ice-glow frame wrapping the whole skill tree — same width as
   // SkillsScreen's body so the quest tree matches the skills page. The tree
   // itself scrolls horizontally inside it (overflow clips to the frame).
+  // flex: 1 → always exactly as tall as the page allows, content-independent.
   treeFrame: {
+    flex: 1,
     width: '100%',
     maxWidth: 1440,
     alignSelf: 'center',
     padding: 16,
-    marginVertical: 18,
     borderWidth: 1.5,
     borderColor: SL.accent,
     borderRadius: 18,
@@ -3234,7 +3381,7 @@ const styles = StyleSheet.create({
     shadowRadius: 20,
   },
 
-  // Fit-to-width area — measures the usable width; the scaled tree centers in it.
+  // Fit area — measures the usable width; the scaled tree centers in it.
   treeFitArea: {
     width: '100%',
     alignItems: 'center',
@@ -3741,6 +3888,12 @@ const styles = StyleSheet.create({
     fontSize: 20,
     color: SL.bg,
     letterSpacing: 2,
+  },
+  // A long word ("DOWNGRADE") blows past the half-width button at the base
+  // size, so it drops the tracking and shrinks to fit on one line.
+  confirmOkTextLong: {
+    fontSize: 17,
+    letterSpacing: 0.5,
   },
 
   // COMBOES "SHAPES ?" glossary button + its popup card.

@@ -1156,25 +1156,17 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   `lib/forgeSwipe.js` (`forgeP`, `SWIPE_MS`) and the ghost-swipe machinery in
   StudentDetailScreen are dormant. Don't reintroduce the forge swipe unless the hub
   is brought back.
-- **ALL CLEAR — a finished panel goes GOLD (2026-08-30).** When every row of
-  HomeScreen's TODAY'S MISSIONS (or DAILY QUESTS) is done, the panel answers as a
-  whole: header bar, title (`ShimmerText`, `sweep={false}`), divider, count chip
-  and panel border all turn gold, a gold `ClearSweep` scans the panel 300ms behind
-  the row's own sweep, and `hapticSuccess()` thumps once. **Gold is the app's word
-  for "nothing left to earn here"** (MAXED chains, class gates, hidden challenges)
-  — ice is progress, gold is completion; the panel says it so the rows don't have
-  to. Two traps, both already handled: the panel sweep must be the **LAST child**
-  (mission cards are opaque and would hide it), and `allDone` **also flips
-  false→true when the first fetch lands** — the `clearFx.armed` ref plus not
-  mounting the sweeps until `!loading` is what stops every visit to a finished
-  board from replaying the celebration. Use `sweep={false}` on a ShimmerText that
-  needs its layout: the per-glyph wave drops `style` off its row container and
-  loses `flex: 1`.
+- **The PANEL headers stay plain — motion belongs to the ROW (2026-08-30).** An
+  all-clear state was built on the TODAY'S MISSIONS / DAILY QUESTS panels (gold
+  header, gold scan across the panel, success haptic when the last row landed) and
+  **rejected by the coach and reverted**. The panel is a label; the thing the
+  player did is the row. Put reward motion on the card, not on the heading above
+  it — and don't rebuild the gold panel state.
 - **A mission card wears its TYPE color in EVERY state (2026-08-30).** On
   HomeScreen's TODAY'S MISSIONS, the type glow (`accentFor`) is no longer just the
   idle card's left rail: the **in-progress** `LiveMissionCard` derives its whole
   palette from it (breathing border, sweep, rail, beacon, title, TAP TO RESUME —
-  the bright half via the local `lighten()`/`rgba()` helpers), and a **completed**
+  the bright half via [lib/colorMix.js](lib/colorMix.js)'s `lighten()`/`rgba()`), and a **completed**
   card keeps its type border + checkbox instead of flipping to the ice-blue "done"
   theme. Same rule as the quest-node palettes: a card that owns a color owns it in
   every state — starting or finishing a HANDSTAND mission must never repaint it
@@ -1518,13 +1510,16 @@ title sequence plays on every cold start.
   floating "✦ CLASS GATE ✦" gold crown ribbon above them + a breathing gold halo
   (the `gate` clock in QuestNode), so they read as prestige milestones rather than
   ordinary nodes. One shared refcounted clock.)
-  Also `DonePulse` — the idle life of a row that's already cleared: one slow edge
-  glow (3.4s, low amplitude) in the row's own colour, no travel. It is the COLD
-  end of `LiveMissionCard`'s hot pulse (1.05s + a 1.9s sweep) on purpose —
-  **speed is how the board says live vs. done**, read before any word is. Never
-  make it faster or brighter than the live card. One shared refcounted clock (the
-  `Shimmer.js` pattern) drives every instance, so a board of cleared rows is one
-  native loop, all breathing in unison.
+  Also `DoneAura` — the living border of a row that's already cleared (HomeScreen's
+  missions + daily quests): a light travelling around its frame, continuously, in
+  the row's OWN colour. It wraps `ShimmerFrame` (the same live frame a CLASS GATE
+  node wears) with a palette built by `glowRamp()` from that one hex, which is what
+  keeps a cleared handstand mission rose instead of a fixed GOLD/BLUE. **Continuous
+  is the requirement, not decoration:** a one-shot celebration leaves the board dead
+  half a second later, so a finished row keeps moving. The travel is a native-thread
+  transform over a static SVG gradient (no per-frame JS), and it renders nothing
+  while the row is unfinished. Ancestor needs `overflow: 'hidden'` for the corners.
+  (Was `DonePulse`, a slow breathing edge glow — too quiet to be worth looking at.)
   Also `ClearSweep` — the "cleared" beat on a tickable row (HomeScreen's missions
   + daily quests): a bright bar in the row's own colour scanning across it, plus a
   brief wash. It plays ONLY on the false→true flip (a `prev` ref), so a board that

@@ -657,11 +657,20 @@ The player's uploaded clips for a check-up (in the `checkup-videos` bucket).
 > **Retention — ONE check-up per player, ever (space policy, 2026-08-24).** The
 > rule is **replace-on-submit**: when a player SUBMITS a new check-up,
 > `purgePreviousCheckups(studentId, keepId)` in [lib/checkups.js](lib/checkups.js)
-> deletes every EARLIER check-up of theirs — rows, video FILES, answers and the
-> coach's feedback. Called from `CheckupScreen`'s `handleSubmit` right after
+> deletes every EARLIER check-up of theirs — rows, video FILES and answers.
+> Called from `CheckupScreen`'s `handleSubmit` right after
 > `submitted_at` is stamped. Re-submitting an edited check-up reuses the same row,
 > so nothing is lost there. There is intentionally **no** history: the current
 > check-up lives exactly until the next one replaces it.
+> **One exception — the feedback keepsake (2026-08-29).** The most recent check-up
+> the coach actually ANSWERED (`feedback_at` not null) is *emptied* instead of
+> deleted: `stripCheckupContent()` removes its clips (files + rows) and its
+> `checkup_answers`, leaving a row that holds only `feedback_url` /
+> `feedback_note` / `feedback_at`. `fetchLatestFeedback(studentId)` reads it, so a
+> player ALWAYS sees their coach's last note + video link — including while a
+> newly sent check-up is still awaiting its own reply. It costs no storage, is
+> exempt from the 14-day purge, and is invisible to the admin (the inbox filters
+> `feedback_at is null`; `AdminCheckupScreen` opens the newest submission).
 > The **14-day `purgeExpiredCheckups()`** (on load of `CheckupScreen` /
 > `AdminCheckupScreen`) is now only a **BACKSTOP** for what replace-on-submit can't
 > reach — an abandoned draft that already has clips in it, or the last check-up of a
@@ -733,6 +742,16 @@ if the template item is later edited/deleted. Added in
 | `answer_text` | text | The player's written answer. NULL = left blank |
 | `order_index` | int | Mirrors the question item order |
 | `created_at` | timestamptz | Auto |
+
+**Part-2 notes also live here (2026-08-28).** A player's per-exercise note used
+to be stored ONLY mirrored onto that exercise's `checkup_videos.answer_text`, so a
+note written for an exercise with **no clip** was silently lost at submit. Notes are
+now written as `checkup_answers` rows too. There is no `part` column, so a Part-2
+note is marked by `order_index >= 1000` (`EXERCISE_NOTE_BASE` in
+[lib/checkups.js](lib/checkups.js)); Part-1 answers keep the question's position,
+always far below that. `item_id`/`prompt` point at the **exercise**. Read them apart
+with `splitCheckupAnswers()`, and build the review cards with
+`buildExerciseCards()`.
 
 **Index:** `(checkup_id)`, `(student_id)`.
 **RLS:** owner-only (`auth.uid() = student_id`) + additive `admin all checkup answers`.
@@ -1090,7 +1109,13 @@ the bar's last-message preview.
 
 ---
 
-### Coach ⇄ player DIRECT chat — `coach_messages`
+### Coach ⇄ player DIRECT chat — `coach_messages` (ORPHANED 2026-08-26)
+> **The app no longer reads or writes this table.** The in-app 1-on-1 chat was
+> removed on 2026-08-26 — coach and player talk on WhatsApp now. The table, its
+> rows, its indexes and its RLS policies were **left in place on purpose**; the
+> schema below is kept for reference and in case the data is ever wanted back.
+> Drop it only on an explicit call.
+
 Added in `migrations/20260722_coach_chat.sql`. A **private 1-on-1** text chat
 between ONE player and the coach (admin) — distinct from the per-group
 `community_messages`. The conversation is keyed to the player (`player_id` = the
@@ -1115,14 +1140,13 @@ delete own** (`auth.uid() = sender_id` — unsend) + **player purge expired**
 (delete when `auth.uid() = player_id AND created_at < now() - interval '7 days'`).
 The purge policy lets the **client-side** sweep run with no cron/service role.
 
-**Used by:** `CoachChatScreen` — the shared full-screen 1-on-1 chat (`isAdmin`
-param + optional `player`). The **player** opens it from the gold **COACH card
-pinned at the top of the Community tab** (`CommunityScreen`); the **coach** opens
-it from the **COACH CHAT tile on `PlayerAdminScreen`**. Helpers in
-[lib/community.js](lib/community.js): `fetchCoachMessages` / `latestCoachMessage`
-(card preview) / `sendCoachMessage` / `deleteCoachMessage` /
-`purgeExpiredCoachMessages`. Freshness via the same 3s mounted-life poll as the
-group chat (not focus-gated).
+**Used by:** nothing, as of 2026-08-26. It was read/written by `CoachChatScreen`
+(deleted) through the `fetchCoachMessages` / `latestCoachMessage` /
+`sendCoachMessage` / `deleteCoachMessage` / `purgeExpiredCoachMessages` helpers in
+`lib/community.js` (also deleted), plus the CHAT NOTES thread list and unread
+count in `lib/adminInbox.js` (deleted). Nothing purges it any more either — the
+7-day sweep ran client-side on chat load, so whatever rows exist now will simply
+sit there until the table is dropped.
 
 ---
 

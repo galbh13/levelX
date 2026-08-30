@@ -7,7 +7,7 @@ import Svg, { Path } from 'react-native-svg';
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
-import ScreenFrame, { FRAME_PAD } from '../components/ScreenFrame';
+import ScreenFrame, { FRAME_PAD, FRAME_MAX_W } from '../components/ScreenFrame';
 
 // Video-game "upgrade" arrow (double chevron pointing up) — the placeholder icon
 // for exercises with no thumbnail.
@@ -29,25 +29,16 @@ function UpgradeArrow({ size = 30, color = '#4A9EBF' }) {
 // Fixed-width cards (no flex:1) so a lone card never stretches full-width, and the
 // column count adapts to the viewport (2 on phones, more on wide web layouts).
 const WIN_W     = Dimensions.get('window').width;
-const WIN_H     = Dimensions.get('window').height;
 const GRID_PAD  = 20;
 const GRID_GAP  = 18;
-// Fixed height for the grid/list scroll region in browse (hug) mode. The card's
-// height is then constant — header + tabs + filters + this region — so it never
-// jumps when data loads in (same idea as AdminDashboard's fixed listArea).
-// Adaptive so it never overflows shorter windows; the region scrolls internally.
-const GRID_AREA_H = Math.max(300, Math.min(460, WIN_H - 460));
-// Both browse tabs share ONE fixed body height so the frame never resizes when
-// switching. The Exercises tab carries the most controls above its grid (CLASS +
-// TYPE chips + search ≈ 300px); we reserve that on top of the grid region, and
-// let each tab's grid FLEX to fill whatever its own controls leave — so the
-// shorter Workouts tab simply gets a taller grid, keeping the outer height equal.
-const TAB_BODY_H = GRID_AREA_H + 320;
+// No fixed body height: the gallery FILLS the frame (ScreenFrame is always in
+// `fill` mode here) and the grid/list region flexes to the bottom of the card.
+// A fixed height used to cut the grid mid-card and leave a dead black band under
+// it — the card is already full height, so let the grid own what's left.
 // The screen is wrapped in a centered ScreenFrame (max-width), so the grid sizes
 // off the FRAMED width, not the raw window — otherwise columns overflow the frame
 // on wide screens. ~210px target → compact cards, more per row.
-const FRAME_MAX = 1200;
-const FRAME_W   = Math.min(WIN_W - FRAME_PAD * 2, FRAME_MAX);
+const FRAME_W   = Math.min(WIN_W - FRAME_PAD * 2, FRAME_MAX_W);
 // Exactly 2 nodes per row, always.
 const GRID_COLS = 2;
 const CARD_W    = Math.floor((FRAME_W - GRID_PAD * 2 - GRID_GAP * (GRID_COLS - 1)) / GRID_COLS);
@@ -386,8 +377,8 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
-    <ScreenFrame maxWidth={FRAME_MAX} fill={selectionMode}>
-    <View style={[styles.container, !selectionMode && styles.containerHug]}>
+    <ScreenFrame fill>
+    <View style={styles.container}>
 
       {/* Header */}
       <View style={styles.header}>
@@ -498,8 +489,8 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
       ) : activeTab === 'exercises' ? (
 
         /* ─────────── EXERCISES TAB ─────────── */
-        /* Fixed body height (shared with the workouts tab) so the frame never
-           resizes on switch; the grid flexes to fill below the filters. */
+        /* Flexible body: fills the card below the tab bar, so the grid runs all
+           the way to the bottom edge instead of stopping short. */
         <View style={styles.tabBody}>
           <Text style={styles.sectionLabel}>CLASS</Text>
           <ClassChips classes={classes} selectedId={exClassId} onSelect={setExClassId} showAll />
@@ -658,9 +649,6 @@ function getYouTubeId(url) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: SL.bg },
-  // Browse mode hugs its content (no flex:1) so the frame shrinks to fit and
-  // centers, instead of stretching to the full viewport height like fill mode.
-  containerHug: { flex: 0 },
 
   // ── Header ───────────────────────────────────────────────────────────────────
 
@@ -738,8 +726,12 @@ const styles = StyleSheet.create({
     borderColor: SL.accent, backgroundColor: 'rgba(74,158,191,0.16)',
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.5, shadowRadius: 10,
   },
-  chipText: { fontFamily: F.bodyMed, fontSize: 19, color: SL.muted, letterSpacing: 1.5 },
-  chipTextActive: { color: SL.accent, fontFamily: F.heading },
+  // The label keeps the SAME (bold) face whether or not the chip is selected —
+  // only the color changes. Swapping Regular→Bold on select changed the label's
+  // width, which re-flowed the whole wrapping row (picking FLEXIBILITY pushed
+  // ISOLATED onto a second line). Constant metrics = chips never move.
+  chipText: { fontFamily: F.heading, fontSize: 19, color: SL.muted, letterSpacing: 1.5 },
+  chipTextActive: { color: SL.accent },
 
   // ── Search ───────────────────────────────────────────────────────────────────
 
@@ -791,12 +783,12 @@ const styles = StyleSheet.create({
 
   // ── Browse grid ───────────────────────────────────────────────────────────────
 
-  // Shared fixed-height body for the two browse tabs → the frame stays the exact
-  // same size when switching tabs, regardless of how many filter rows each shows.
-  tabBody: { height: TAB_BODY_H },
-  // Scroll region fills whatever space the tab's controls leave inside tabBody, so
-  // both tabs end up the same outer height (shorter controls → taller grid).
-  gridArea: { flex: 1 },
+  // Both browse tabs fill the rest of the card below the header/tab bar, so the
+  // frame is always exactly viewport-tall and neither tab leaves dead space.
+  tabBody: { flex: 1, minHeight: 0 },
+  // Scroll region takes everything the tab's controls leave — it grows with the
+  // window instead of stopping at a constant height.
+  gridArea: { flex: 1, minHeight: 0 },
   gridScroll: { flex: 1 },
   gridCenter: { flex: 1, justifyContent: 'center', alignItems: 'center' },
 

@@ -20,12 +20,6 @@ import { F } from '../constants/fonts';
 import { ShimmerText, ShimmerFill, ShimmerFrame, BLUE, GOLD } from '../components/Shimmer';
 import ScreenFrame from '../components/ScreenFrame';
 import { useTourTarget, useTourScroller } from '../lib/tourTargets';
-import { CARD_W } from '../constants/layout';
-
-// Skills runs WIDER than the shared player-card width: the quest rows are long
-// horizontal bars (title + progress + arrow) and read better with room to breathe.
-// Height is untouched - the frame still fills the screen.
-const SKILLS_CARD_W = Math.round(CARD_W * 1.5);   // 1200 -> 1800
 
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
@@ -201,6 +195,11 @@ function LevelGauge({ lvlPct, prestigePct, prestigeAt, prestigeReady, play = 1 }
   const grow   = useRef(new Animated.Value(0)).current;   // entrance fill grow
   const pulse  = useRef(new Animated.Value(0)).current;   // breathing node + gem
   const played = useRef(0);
+  // Track width in px. The grow-in is a TRANSFORM, not an animated width — a
+  // transform runs on the native thread, while animating a width (or a left %)
+  // re-runs layout on the JS thread every single frame. Transforms need pixels,
+  // so the track measures itself once.
+  const [trackW, setTrackW] = useState(0);
 
   // Breathing node/gem loop — always running, independent of the entrance.
   useEffect(() => {
@@ -212,24 +211,29 @@ function LevelGauge({ lvlPct, prestigePct, prestigeAt, prestigeReady, play = 1 }
     return () => loop.stop();
   }, [pulse]);
 
-  // Entrance grow: sits at 0 until the first focus (play → 1), then grows once.
-  // A later data refetch (same play token) snaps to the new pct without replaying.
+  // Entrance grow: sits at 0 until the first focus (play → 1) AND the track has
+  // been measured, then grows once. A later data refetch (same play token) snaps
+  // to the new pct without replaying.
   useEffect(() => {
-    if (play <= 0) { grow.setValue(0); return; }
+    if (play <= 0 || trackW <= 0) { grow.setValue(0); return; }
     if (played.current === play) { grow.setValue(1); return; }
     played.current = play;
     grow.setValue(0);
     const enter = Animated.timing(grow, {
       toValue: 1, duration: 1100, delay: 150,
-      easing: Easing.out(Easing.cubic), useNativeDriver: false,
+      easing: Easing.out(Easing.cubic), useNativeDriver: true,
     });
     enter.start();
     return () => enter.stop();
-  }, [grow, play]);
+  }, [grow, play, trackW]);
 
-  const pct      = Math.max(0, Math.min(1, lvlPct)) * 100;
-  const fillW    = grow.interpolate({ inputRange: [0, 1], outputRange: ['0%', `${pct}%`] });
-  const headLeft = grow.interpolate({ inputRange: [0, 1], outputRange: ['0%', `${pct}%`] });
+  const pct   = Math.max(0, Math.min(1, lvlPct)) * 100;
+  // The fill is laid out at its FINAL width and slid in from the left; the track
+  // clips the overhang, so it reads exactly like a bar growing — but the whole
+  // motion is one native transform.
+  const fillPx    = (trackW * pct) / 100;
+  const fillSlide = grow.interpolate({ inputRange: [0, 1], outputRange: [-fillPx, 0] });
+  const headSlide = grow.interpolate({ inputRange: [0, 1], outputRange: [0, fillPx] });
   const haloScale   = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 2.4] });
   const haloOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.7, 0] });
   const coreScale   = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.25] });
@@ -239,14 +243,20 @@ function LevelGauge({ lvlPct, prestigePct, prestigeAt, prestigeReady, play = 1 }
 
   return (
     <View style={styles.progressBarContainer}>
-      <View style={styles.progressBarBg}>
-        <Animated.View style={[styles.progressFillWrap, { width: fillW }]}>
+      <View
+        style={styles.progressBarBg}
+        onLayout={(e) => {
+          const w = Math.round(e.nativeEvent.layout.width);
+          setTrackW(prev => (prev === w ? prev : w));
+        }}
+      >
+        <Animated.View style={[styles.progressFillWrap, { width: fillPx, transform: [{ translateX: fillSlide }] }]}>
           <ShimmerFill style={styles.progressBarFill} colors={prestigeReady ? GOLD : BLUE} active />
         </Animated.View>
       </View>
 
       {/* Current-level energy node riding the fill head. */}
-      <Animated.View style={[styles.gaugeHead, { left: headLeft }]}>
+      <Animated.View style={[styles.gaugeHead, { left: 0, transform: [{ translateX: headSlide }] }]}>
         <View style={styles.gaugeHeadInner}>
           <Animated.View style={[styles.gaugeHeadHalo, { backgroundColor: main, transform: [{ scale: haloScale }], opacity: haloOpacity }]} />
           <Animated.View style={[styles.gaugeHeadCore, { backgroundColor: main, shadowColor: main, transform: [{ scale: coreScale }] }]} />
@@ -258,7 +268,7 @@ function LevelGauge({ lvlPct, prestigePct, prestigeAt, prestigeReady, play = 1 }
         <Animated.View style={[styles.prestigeMarkerGem, { transform: [{ rotate: '45deg' }, { scale: gemScale }] }]} />
         <View style={styles.prestigeMarkerStem} />
         <View style={styles.prestigeMarkerBadge}>
-          <Text style={styles.prestigeMarkerLabel}>{prestigeAt}</Text>
+          <Text style={styles.prestigeMarkerLabel} numberOfLines={1}>{prestigeAt}</Text>
         </View>
       </View>
     </View>
@@ -991,7 +1001,7 @@ export default function SkillsScreen({ navigation, route }) {
   // focus refetches are silent so this never shows again).
   if (loading) {
     return (
-      <ScreenFrame fill holoEntry={false} maxWidth={SKILLS_CARD_W}>
+      <ScreenFrame fill holoEntry={false}>
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
           <ActivityIndicator size="large" color={SL.accent} />
         </View>
@@ -1151,8 +1161,6 @@ export default function SkillsScreen({ navigation, route }) {
             <ArrowKey gold={complete} />
           ) : (
             <View style={[styles.chainArrow, complete && styles.chainArrowComplete]}>
-              <View pointerEvents="none" style={[styles.chainArrowBezel, complete && styles.chainArrowBezelComplete]} />
-              <View pointerEvents="none" style={styles.chainArrowGloss} />
               <View style={[styles.chainArrowHead, complete && styles.chainArrowHeadComplete]} />
             </View>
           )}
@@ -1203,7 +1211,7 @@ export default function SkillsScreen({ navigation, route }) {
       <View style={[styles.questSection, tier && styles.tierSection]} key={label}>
         <View style={tier ? styles.tierHeaderRow : styles.sectionHeaderRow}>
           {/* Wrap the label so the tour highlight hugs JUST the text (not the row). */}
-          <View ref={headerRef}>
+          <View ref={headerRef} collapsable={false}>
             <Text style={[
               tier ? styles.tierHeader : styles.sectionHeader,
               locked && (tier ? styles.tierHeaderLocked : styles.sectionHeaderLocked),
@@ -1221,7 +1229,7 @@ export default function SkillsScreen({ navigation, route }) {
 
   return (
     <ScrollVizContext.Provider value={scrollViz}>
-    <ScreenFrame fill holoEntry={false} maxWidth={SKILLS_CARD_W}>
+    <ScreenFrame fill holoEntry={false}>
     <View ref={tourBoxRef} collapsable={false} style={styles.scrollBox}>
     <ScrollView
       ref={tourScrollRef}
@@ -1248,7 +1256,12 @@ export default function SkillsScreen({ navigation, route }) {
 
       {/* ── Header ── */}
       <View style={styles.header}>
-        <Text style={styles.playerName}>{profile?.full_name?.toUpperCase() ?? '—'}</Text>
+        <Text
+          style={styles.playerName}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.5}
+        >{profile?.full_name?.toUpperCase() ?? '—'}</Text>
 
         {/* Class crest — the same gold gem-medallion language as the Home hero,
             with the prestige stars perched on top of the gem (no separate line).
@@ -1268,7 +1281,14 @@ export default function SkillsScreen({ navigation, route }) {
                 <View style={styles.medallionInner} />
                 <Text style={styles.medallionRank}>{toRoman(rank).toUpperCase()}</Text>
               </View>
-              {kicker && <Text style={styles.crestKicker}>{kicker.toUpperCase()}</Text>}
+              {kicker && (
+                <Text
+                  style={styles.crestKicker}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.6}
+                >{kicker.toUpperCase()}</Text>
+              )}
             </View>
           );
         })()}
@@ -1298,7 +1318,7 @@ export default function SkillsScreen({ navigation, route }) {
       <View style={styles.classRow}>
         {classData && (
         prestigeReady.ok ? (
-          <View ref={tourPrestigeRef} style={styles.prestigeBanner}>
+          <View ref={tourPrestigeRef} collapsable={false} style={styles.prestigeBanner}>
             <View style={styles.prestigeBannerTitleWrap}>
               <ShimmerText
                 text="PRESTIGE AVAILABLE"
@@ -1310,7 +1330,7 @@ export default function SkillsScreen({ navigation, route }) {
             </View>
           </View>
         ) : (
-          <View ref={tourPrestigeRef} style={styles.reqCard}>
+          <View ref={tourPrestigeRef} collapsable={false} style={styles.reqCard}>
             {/* Trial header: gold seal + cleared-count + overall track */}
             <View style={styles.reqHeader}>
               <View style={styles.reqSeal}>
@@ -1464,7 +1484,7 @@ export default function SkillsScreen({ navigation, route }) {
       )}
 
       {/* ── No class ── */}
-      <View ref={tourQuestsRef}>
+      <View ref={tourQuestsRef} collapsable={false}>
         {!classData ? (
           <View style={styles.noClass}>
             <Text style={styles.noClassText}>NO CLASS ASSIGNED YET</Text>
@@ -1482,7 +1502,7 @@ export default function SkillsScreen({ navigation, route }) {
                 {/* Top-level SIDE QUESTS label (same style as MAIN QUESTS) with the
                     tiers nested beneath it in a subordinate style. */}
                 <View style={styles.sectionHeaderRow}>
-                  <View ref={tourSideLabelRef}>
+                  <View ref={tourSideLabelRef} collapsable={false}>
                     <Text style={styles.sectionHeader}>SIDE QUESTS</Text>
                   </View>
                   <View style={styles.sectionHeaderLine} />
@@ -1572,9 +1592,12 @@ const styles = StyleSheet.create({
   },
   playerName: {
     fontFamily: F.heading,
-    fontSize: 56,
+    // Smaller than it was, and held to ONE line (see numberOfLines above) — a
+    // two-line name pushed the crest down and read as a different screen than
+    // the Home hero it is meant to echo.
+    fontSize: 40,
     color: '#FFFFFF',
-    letterSpacing: 4,
+    letterSpacing: 3,
     textAlign: 'center',
     // Bright white glow halo — shining, like the Home screen.
     textShadowColor: 'rgba(255,255,255,0.75)',
@@ -1595,18 +1618,18 @@ const styles = StyleSheet.create({
     marginBottom: 6,
   },
   medallionWrap: {
-    width: 72,
-    height: 72,
+    width: 104,
+    height: 104,
     alignItems: 'center',
     justifyContent: 'center',
   },
   // The gem — a rotated rounded square, gold border + gold glow, faint gold fill.
   medallion: {
     position: 'absolute',
-    width: 58,
-    height: 58,
-    borderRadius: 11,
-    borderWidth: 2.5,
+    width: 84,
+    height: 84,
+    borderRadius: 13,
+    borderWidth: 3,
     borderColor: SL.gold,
     backgroundColor: 'rgba(255,215,0,0.06)',
     transform: [{ rotate: '45deg' }],
@@ -1617,9 +1640,9 @@ const styles = StyleSheet.create({
   },
   medallionInner: {
     position: 'absolute',
-    width: 42,
-    height: 42,
-    borderRadius: 8,
+    width: 60,
+    height: 60,
+    borderRadius: 10,
     borderWidth: 1.5,
     borderColor: SL.gold,
     opacity: 0.4,
@@ -1627,22 +1650,28 @@ const styles = StyleSheet.create({
   },
   medallionRank: {
     fontFamily: F.displayHeavy,
-    fontSize: 30,
+    fontSize: 40,
     color: SL.gold,
     letterSpacing: 1,
     textShadowColor: 'rgba(255,215,0,0.9)',
     textShadowOffset: { width: 0, height: 0 },
     textShadowRadius: 16,
   },
+  // The JOB name — same cut, weight, tracking and glow as the Home hero, so the
+  // two screens read as one identity instead of two different treatments.
   crestKicker: {
     fontFamily: F.displayHeavy,
-    fontSize: 18,
+    fontWeight: '900',        // web fallback keeps the weight if Cinzel Black is late
+    fontSize: 34,
     color: SL.gold,
     letterSpacing: 9,
     // Cinzel is all-caps; pad left so the wide tracking stays visually centered.
     paddingLeft: 9,
-    marginTop: 8,
-    opacity: 0.95,
+    marginTop: 12,
+    textAlign: 'center',
+    textShadowColor: 'rgba(255,215,0,0.55)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 18,
   },
   lvlNumber: {
     fontFamily: F.heading,
@@ -1718,7 +1747,11 @@ const styles = StyleSheet.create({
   prestigeMarker: {
     position: 'absolute',
     top: 4,
-    width: 0,
+    // A real width (not 0) so the badge's Text can lay out on native — a
+    // zero-width parent squeezes the label down to nothing. The negative
+    // margin keeps the marker centered on the threshold point.
+    width: 48,
+    marginLeft: -24,
     alignItems: 'center',
   },
   prestigeMarkerGem: {
@@ -2353,8 +2386,9 @@ const styles = StyleSheet.create({
     textShadowRadius: 16,
   },
   // Enter-tree affordance — a glowing ice "node" with a chevron drawn from two
-  // borders, replacing the bare ›. Ice-blue on incomplete chains; turns all gold
-  // on maxed chains to match the gold treatment.
+  // borders, replacing the bare ›. ONE ring, no inner bezel and no gloss: extra
+  // concentric strokes read as two mismatched circles at this size. Ice-blue on
+  // incomplete chains; turns all gold on maxed chains.
   chainArrow: {
     width: 34,
     height: 34,
@@ -2384,28 +2418,6 @@ const styles = StyleSheet.create({
     borderColor: SL.accent,
     transform: [{ rotate: '45deg' }],
     marginLeft: -3,
-  },
-  // ── Base node hardware detail ─────────────────────────────────────────────
-  // A second, tighter outline inside the frame: two concentric lines read as a
-  // machined bezel instead of a single flat stroke.
-  chainArrowBezel: {
-    position: 'absolute',
-    top: 3, left: 3, right: 3, bottom: 3,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(74,158,191,0.30)',
-  },
-  chainArrowBezelComplete: {
-    borderColor: 'rgba(255,215,0,0.35)',
-  },
-  // Light catching the top of the cap. Same trick, same offsets, on every node.
-  chainArrowGloss: {
-    position: 'absolute',
-    top: 4,
-    width: 13,
-    height: 1,
-    borderRadius: 1,
-    backgroundColor: 'rgba(255,255,255,0.28)',
   },
 
   // Sits over the card's whole border box (negative insets set inline from the

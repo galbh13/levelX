@@ -4,7 +4,6 @@ import {
 } from 'react-native';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
-import { CARD_H, CARD_W } from '../constants/layout';
 import { supabase } from '../lib/supabase';
 import ScreenFrame from '../components/ScreenFrame';
 import PillButton from '../components/PillButton';
@@ -164,7 +163,7 @@ export default function CommunityGroupScreen({ navigation, route }) {
     : '';
 
   return (
-    <ScreenFrame maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <View style={styles.card} {...swipe.panHandlers}>
         {/* Header — BACK on its own row so the group name gets the full width and
             never gets truncated by the pill. Title + description sit below it. */}
@@ -409,7 +408,7 @@ const RANK = [
 ];
 
 const styles = StyleSheet.create({
-  card: { height: CARD_H },
+  card: { flex: 1 },
 
   // ── Header ──
   header: { paddingHorizontal: 22, paddingTop: 22 },

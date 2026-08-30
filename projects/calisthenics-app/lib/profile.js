@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import { supabase } from './supabase';
+import { uploadAssetToBucket } from './storageUpload';
 import { computeLvl, computeClassMax } from './computeLvl';
 import { evaluatePrestige, prestigeStars } from './prestige';
 import { DEFAULT_JOB } from './jobs';
@@ -92,21 +93,15 @@ export async function fetchHunterProfile(userId) {
 // instead of accumulate). `kind` = 'avatar' | 'signature'; `urlCol`/`pathCol` are
 // the profile columns to write. Shared by the two public helpers below.
 async function replaceProfileFile(userId, asset, { kind, urlCol, pathCol, maxBytes, defaultExt, contentPrefix, sizeLabel }) {
-  const response = await fetch(asset.uri);
-  const blob = await response.blob();
-  if (blob.size > maxBytes) {
-    throw new Error(`That ${sizeLabel} is ${(blob.size / 1024 / 1024).toFixed(0)} MB. Max is ${maxBytes / 1024 / 1024} MB.`);
-  }
-
   const ext  = (asset.uri.split('.').pop() ?? defaultExt).toLowerCase().split('?')[0];
   const path = `${userId}/${kind}-${Date.now()}.${ext}`;
 
-  const { error: upErr } = await supabase.storage
-    .from(PROFILE_BUCKET)
-    .upload(path, blob, { contentType: blob.type || `${contentPrefix}/${ext}`, upsert: true });
-  if (upErr) throw upErr;
-
-  const { data: { publicUrl } } = supabase.storage.from(PROFILE_BUCKET).getPublicUrl(path);
+  // Goes through the shared uploader: on the APK a fetched Blob has no bytes in
+  // JS, so uploading one fails with a bare "Network request failed".
+  const publicUrl = await uploadAssetToBucket(PROFILE_BUCKET, path, asset, {
+    contentType: `${contentPrefix}/${ext === 'jpg' ? 'jpeg' : ext}`,
+    upsert: true, maxBytes, sizeLabel,
+  });
 
   // Read the old path BEFORE overwriting so we can drop the stale file after.
   const { data: prev } = await supabase.from('profiles').select(pathCol).eq('id', userId).single();

@@ -1,6 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing, StyleSheet, View, Text } from 'react-native';
-import Svg, { Circle, Defs, LinearGradient, Stop } from 'react-native-svg';
+import Svg, { Circle, Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 
 // ─── Live shimmer ───────────────────────────────────────────────────────────
 // A looping color cycle through a palette, used to make UI come alive:
@@ -77,6 +77,117 @@ function shimmerColorPhase(colors, offset) {
   return Animated.modulo(Animated.add(clock, offset), 1).interpolate({ inputRange, outputRange });
 }
 
+// ─── Sweeping gradient strip (the engine behind the bars and frames) ────────
+// A travelling palette gradient, done the cheap way: ONE static SVG gradient
+// (the palette laid out twice, end to end) slid by exactly one cycle on a loop.
+// The slide is a transform, so it runs on the NATIVE thread — the JS thread does
+// no per-frame work at all.
+//
+// This replaces the old approach: a row of 24–30 <Animated.View>s each
+// interpolating its own backgroundColor off the shared JS clock. That cost ~30
+// color computations + bridge writes PER STRIP PER FRAME, and a screen carries
+// many strips at once (a card frame is four; the Skills screen adds a fill per
+// chain; all four tabs stay mounted). Hundreds of JS-driven color nodes on one
+// clock is exactly what made the level bars stutter.
+//
+// The visible span always carries EXACTLY ONE full palette cycle, so the phase
+// at the end of a strip equals the phase at its start — which is what lets the
+// four edges of a frame meet seamlessly at the corners.
+function GradientStrip({ w, h, colors, vertical }) {
+  // Palette twice, plus a closing copy of the first color: sliding by one cycle
+  // lands on an identical pattern, so the loop has no visible seam.
+  const stops = useMemo(() => {
+    const ramp = [...colors, ...colors, colors[0]];
+    return ramp.map((col, i) => ({ col, offset: `${(i / (ramp.length - 1)) * 100}%` }));
+  }, [colors]);
+  const id = useRef(`sweep_${Math.random().toString(36).slice(2)}`).current;
+
+  return (
+    <Svg width={w} height={h}>
+      <Defs>
+        <LinearGradient
+          id={id}
+          x1="0%" y1="0%"
+          x2={vertical ? '0%' : '100%'}
+          y2={vertical ? '100%' : '0%'}
+        >
+          {stops.map((s, i) => <Stop key={i} offset={s.offset} stopColor={s.col} />)}
+        </LinearGradient>
+      </Defs>
+      <Rect x="0" y="0" width={w} height={h} fill={`url(#${id})`} />
+    </Svg>
+  );
+}
+
+// `vertical` flows top→bottom instead of left→right; `reverse` flips the travel
+// direction (used by a frame's bottom and left edges, so the sweep runs
+// clockwise all the way around).
+function SweepStrip({ style, colors, duration, vertical = false, reverse = false }) {
+  const t = useRef(new Animated.Value(0)).current;
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const settle = useRef(null);
+
+  useEffect(() => {
+    t.setValue(0);
+    const loop = Animated.loop(Animated.timing(t, {
+      toValue: 1, duration, easing: Easing.linear, useNativeDriver: true,
+    }));
+    loop.start();
+    return () => loop.stop();
+  }, [duration, t]);
+
+  useEffect(() => () => clearTimeout(settle.current), []);
+
+  // Layout is taken only once it SETTLES. A level bar grows in over ~1.1s, which
+  // fires a layout event every frame; rebuilding the gradient on each one would
+  // re-introduce exactly the per-frame JS work this component exists to avoid.
+  // We wait for the size to hold still, then measure once.
+  const onLayout = (e) => {
+    const { width, height } = e.nativeEvent.layout;
+    const w = Math.round(width);
+    const h = Math.round(height);
+    clearTimeout(settle.current);
+    settle.current = setTimeout(() => {
+      setBox(prev => (prev.w === w && prev.h === h ? prev : { w, h }));
+    }, 120);
+  };
+
+  // One cycle spans the strip; the sheet holds two, and slides by one.
+  const span = vertical ? box.h : box.w;
+  const shift = t.interpolate({
+    inputRange: [0, 1],
+    outputRange: reverse ? [0, -span] : [-span, 0],
+  });
+
+  return (
+    <View style={[style, { overflow: 'hidden' }]} onLayout={onLayout}>
+      {span > 0 && box.w > 0 && box.h > 0 && (
+        <Animated.View
+          pointerEvents="none"
+          // The strip never changes, only its position — so hand it to the GPU
+          // as a texture once and let the compositor move it. Without this the
+          // gradient is re-rasterized on every frame of the sweep.
+          renderToHardwareTextureAndroid
+          shouldRasterizeIOS
+          style={[
+            { position: 'absolute' },
+            vertical
+              ? { top: 0, left: 0, width: box.w, height: span * 2, transform: [{ translateY: shift }] }
+              : { left: 0, top: 0, width: span * 2, height: box.h, transform: [{ translateX: shift }] },
+          ]}
+        >
+          <GradientStrip
+            w={vertical ? box.w : span * 2}
+            h={vertical ? span * 2 : box.h}
+            colors={colors}
+            vertical={vertical}
+          />
+        </Animated.View>
+      )}
+    </View>
+  );
+}
+
 export function ShimmerText({
   text, style, active, colors = GOLD, sweep = true, direction = 'rtl',
   numberOfLines, duration = 1600,
@@ -148,22 +259,17 @@ export function ShimmerText({
 // Each edge maps exactly one full palette cycle along its flow direction, so the
 // phase reaches the first color again at every corner (offset 0 ↔ 1) — making
 // all four corners line up seamlessly with no global indexing needed.
-const FRAME_SEG = 24;   // segments per edge — higher = smoother gradient
 export function ShimmerFrame({ style, colors = GOLD, active, radius = 5, thickness = 3.5, duration = 1600 }) {
+  // Only the thin uniform under-border still rides the shared JS clock — one
+  // color node per frame instead of the 96 the segmented edges used to cost.
   useShimmer(active, duration);
   if (!active) return null;
 
-  // One edge: `FRAME_SEG` flex segments flowing in `dir`, each at a fractional
-  // phase across the cycle so adjacent segments differ only slightly (smooth).
-  const edge = (key, pos, dir) => (
-    <View key={key} style={[pos, { flexDirection: dir, overflow: 'hidden' }]}>
-      {Array.from({ length: FRAME_SEG }).map((_, i) => (
-        <Animated.View
-          key={i}
-          style={{ flex: 1, backgroundColor: shimmerColorPhase(colors, (i + 0.5) / FRAME_SEG) }}
-        />
-      ))}
-    </View>
+  // One edge: a single sweeping gradient strip, slid on the native thread.
+  // `vertical`/`reverse` are chosen so the sweep runs CLOCKWISE: right along the
+  // top, down the right, left along the bottom, up the left.
+  const edge = (key, pos, vertical, reverse) => (
+    <SweepStrip key={key} style={pos} colors={colors} duration={duration} vertical={vertical} reverse={reverse} />
   );
 
   const t = thickness;
@@ -190,10 +296,10 @@ export function ShimmerFrame({ style, colors = GOLD, active, radius = 5, thickne
         style={{ ...StyleSheet.absoluteFillObject, borderRadius: r, borderWidth: t, borderColor: cornerColor }}
       />
       <View pointerEvents="none" style={{ ...StyleSheet.absoluteFillObject, borderRadius: r, overflow: 'hidden' }}>
-        {edge('top',    { position: 'absolute', top: 0,    left: 0,   right: 0,  height: t }, 'row')}
-        {edge('right',  { position: 'absolute', top: 0,    bottom: 0, right: 0,  width: t  }, 'column')}
-        {edge('bottom', { position: 'absolute', bottom: 0, left: 0,   right: 0,  height: t }, 'row-reverse')}
-        {edge('left',   { position: 'absolute', top: 0,    bottom: 0, left: 0,   width: t  }, 'column-reverse')}
+        {edge('top',    { position: 'absolute', top: 0,    left: 0,   right: 0,  height: t }, false, false)}
+        {edge('right',  { position: 'absolute', top: 0,    bottom: 0, right: 0,  width: t  }, true,  false)}
+        {edge('bottom', { position: 'absolute', bottom: 0, left: 0,   right: 0,  height: t }, false, true)}
+        {edge('left',   { position: 'absolute', top: 0,    bottom: 0, left: 0,   width: t  }, true,  true)}
       </View>
     </Animated.View>
   );
@@ -237,25 +343,11 @@ export function ShimmerRing({ size, thickness = 5, colors = BLUE, active, durati
   );
 }
 
-// Progress-bar fill that sweeps the palette across its width while active —
-// built from many thin segments, each at a CONTINUOUS fractional phase (same
-// technique as ShimmerFrame) so adjacent segments differ only slightly and blend
-// into one smooth travelling gradient instead of hard color bands. The strip maps
-// exactly one full palette cycle across its width. Falls back to a plain <View>
-// when inactive.
-const FILL_SEGMENTS = 30;
+// Progress-bar fill that sweeps the palette across its width while active — one
+// SweepStrip, so the travel costs the JS thread nothing per frame. The visible
+// width carries exactly one palette cycle, travelling left → right. Falls back
+// to a plain <View> when inactive.
 export function ShimmerFill({ style, active, colors = GOLD, duration = 1600 }) {
-  useShimmer(active, duration);
   if (!active) return <View style={style} />;
-  return (
-    <Animated.View style={[style, { flexDirection: 'row', overflow: 'hidden' }]}>
-      {Array.from({ length: FILL_SEGMENTS }).map((_, i) => {
-        // Reversed offset keeps the previous travel direction.
-        const offset = (FILL_SEGMENTS - 1 - i + 0.5) / FILL_SEGMENTS;
-        return (
-          <Animated.View key={i} style={{ flex: 1, backgroundColor: shimmerColorPhase(colors, offset) }} />
-        );
-      })}
-    </Animated.View>
-  );
+  return <SweepStrip style={style} colors={colors} duration={duration} />;
 }

@@ -13,7 +13,6 @@ import {
 } from '../lib/invites';
 import { DEFAULT_JOB } from '../lib/jobs';
 import { F } from '../constants/fonts';
-import { CARD_H, CARD_W } from '../constants/layout';
 import ScreenFrame from '../components/ScreenFrame';
 
 const SL = {
@@ -28,6 +27,13 @@ const SL = {
   alert:     '#E11D48',   // "you owe someone a reply" red
   jade:      '#1FD79A',   // "unread — just look at it" green
 };
+
+// Admin nav bar geometry. The six actions sit in ONE row; each tile's width is
+// measured from the bar (see `barW` below), never expressed as a percentage —
+// percentage widths do not resolve inside this wrapped/stretched row on Yoga
+// (they collapsed the tiles to icon-sized squares on the APK).
+const NAV_COLS = 6;
+const NAV_GAP = 5;
 
 const STAGGER = 70;   // ms between consecutive row entrances
 const MAX_STAGGER_ROWS = 9; // cap cumulative delay so long rosters don't crawl in
@@ -82,9 +88,9 @@ function TapScale({ children, onPress, style, down = 0.97, disabled = false }) {
 
 // ─── Notification button ───────────────────────────────────────────────────────
 // A top-bar pill that carries a pulsing dot + count while its queue is non-empty
-// (check-ups awaiting a reply, unread chat messages). At zero it reads exactly
+// (check-ups awaiting a reply). At zero it reads exactly
 // like the plain pills beside it, so the dot is the whole signal.
-function NotifyBtn({ label, count, tone = 'alert', onPress }) {
+function NotifyBtn({ label, count, tone = 'alert', onPress, width }) {
   const color = tone === 'jade' ? SL.jade : SL.alert;
   const live = count > 0;
 
@@ -105,10 +111,14 @@ function NotifyBtn({ label, count, tone = 'alert', onPress }) {
 
   return (
     <TapScale
-      style={[styles.topBarBtn, live && { borderColor: color, shadowColor: color, backgroundColor: 'rgba(255,255,255,0.03)' }]}
+      style={[
+        styles.topBarBtn,
+        width ? { width } : null,
+        live && { borderColor: color, shadowColor: color, backgroundColor: 'rgba(255,255,255,0.03)' },
+      ]}
       onPress={onPress}
     >
-      <Text style={[styles.topBarBtnText, live && { color }]} numberOfLines={1}>{label}</Text>
+      <Text style={[styles.topBarBtnText, live && { color }]} numberOfLines={2}>{label}</Text>
       {live ? (
         <Animated.View
           style={[
@@ -195,15 +205,18 @@ function InviteModal({ visible, onClose, onInvited }) {
               <View style={styles.credBox}>
                 <Text style={styles.credLabel}>PASSWORD</Text>
                 <Text style={styles.credValue}>{STARTER_PASSWORD}</Text>
-                {/* Repeated back for the other half of onboarding: adding them
-                    to the WhatsApp community. */}
-                <Text style={[styles.credLabel, styles.credLabelSpaced]}>PHONE · ADD TO WHATSAPP</Text>
+                {/* Repeated back so the coach has it to hand — a contact, a call, a
+                    nudge. Joining the WhatsApp groups is NOT manual any more: the welcome
+                    email carries both invite links (see
+                    supabase/functions/invite-player), and they are in the app
+                    too, behind SOCIALIZE on THE SYSTEM tab. */}
+                <Text style={[styles.credLabel, styles.credLabelSpaced]}>PHONE</Text>
                 <Text style={styles.credPhone}>{done.phone}</Text>
               </View>
 
               <Text style={[styles.modalNote, done.emailed ? styles.noteOk : styles.noteWarn]}>
                 {done.emailed
-                  ? '✓ Welcome email sent.'
+                  ? '✓ Welcome email sent — access + the two WhatsApp invites.'
                   : (done.warning || 'The welcome email did not send — pass the details on yourself.')}
               </Text>
 
@@ -353,13 +366,23 @@ function PlayerRow({ player, index, rankLabel, className, stars, onPress }) {
 
 export default function AdminDashboard({ navigation }) {
   const { setSelectedStudent } = useCoach();
-  const { checkups, unreadChats, refresh: refreshNotify } = useAdminNotify();
+  const { checkups, refresh: refreshNotify } = useAdminNotify();
   const [players,    setPlayers]    = useState([]);
   const [classNames, setClassNames] = useState({}); // class_id → name
   const [classOrder, setClassOrder] = useState({}); // class_id → order_index
   const [jobCounts,  setJobCounts]  = useState({}); // job → class count
   const [loading,    setLoading]    = useState(true);
   const [inviteOpen, setInviteOpen] = useState(false);
+
+  // Measured width of the nav bar → the exact pixel width of one action tile.
+  // Measuring is the only reliable way to fit six tiles across: a percentage
+  // `width` (and a percentage `flexBasis` before it) does not resolve for the
+  // children of this stretched row on Yoga, which is what collapsed the bar
+  // twice already. Tiles stay hidden for the one frame before the measurement
+  // lands so they never pop from an auto width to the real one.
+  const [barW, setBarW] = useState(0);
+  const tileW = barW > 0 ? (barW - NAV_GAP * (NAV_COLS - 1)) / NAV_COLS : 0;
+  const onBarLayout = useCallback((e) => setBarW(e.nativeEvent.layout.width), []);
 
   const count = useCountUp(players.length, !loading);
 
@@ -425,82 +448,75 @@ export default function AdminDashboard({ navigation }) {
     fetchData().finally(() => setLoading(false));
   }, [fetchData]);
 
-  // Returning to the dashboard re-checks both queues so a just-answered check-up
-  // or a just-read chat drops its dot immediately.
+  // Returning to the dashboard re-checks the queue so a just-answered check-up
+  // drops its dot immediately.
   // Returning also re-reads the roster itself — a player deleted from
   // PlayerAdminScreen must not linger on the list behind it.
   useFocusEffect(useCallback(() => { refreshNotify(); fetchData(); }, [refreshNotify, fetchData]));
 
   return (
-    <ScreenFrame maxWidth={CARD_W} duration={5200} ready={!loading}>
+    <ScreenFrame fill duration={5200} ready={!loading}>
       <View style={styles.card}>
-      {/* Top bar — title on its own row, the actions share the row below
-          (each flex:1 so they always fit one line on any phone width). */}
+      {/* Top bar — title on its own row, the six actions in ONE measured row
+          below it (see `topBarButtons` for why the sizing is explicit). */}
       <Animated.View style={[styles.topBar, { opacity: head, transform: [{ translateY: headTranslate }] }]}>
         <View style={styles.titleWrap}>
           <Text style={styles.pageTitle}>ADMIN</Text>
           <Animated.View style={[styles.titleUnderline, { transform: [{ scaleX: underline }] }]} />
         </View>
 
-        <View style={styles.topBarButtons}>
+        <View style={[styles.topBarButtons, { opacity: tileW ? 1 : 0 }]} onLayout={onBarLayout}>
           {/* The whole onboarding flow: email + name → account created + welcome
               email sent from the business Gmail. See lib/invites.js. */}
           <TapScale
-            style={[styles.topBarBtn, styles.inviteBtn]}
+            style={[styles.topBarBtn, { width: tileW }, styles.inviteBtn]}
             onPress={() => setInviteOpen(true)}
           >
-            <Text style={[styles.topBarBtnText, styles.inviteBtnText]} numberOfLines={1}>＋ NEW PLAYER</Text>
+            <Text style={[styles.topBarBtnText, styles.inviteBtnText]} numberOfLines={2}>{'NEW\nPLAYER'}</Text>
           </TapScale>
 
           <TapScale
-            style={styles.topBarBtn}
+            style={[styles.topBarBtn, { width: tileW }]}
             onPress={() => navigation.navigate('ExerciseGallery')}
           >
-            <Text style={styles.topBarBtnText} numberOfLines={1}>GALLERY</Text>
+            <Text style={styles.topBarBtnText} numberOfLines={2}>{'GALLERY'}</Text>
           </TapScale>
 
           <TapScale
-            style={styles.topBarBtn}
+            style={[styles.topBarBtn, { width: tileW }]}
             onPress={() => navigation.navigate('CheckupTemplates')}
           >
-            <Text style={styles.topBarBtnText} numberOfLines={1}>CHECKUP EDITOR</Text>
+            <Text style={styles.topBarBtnText} numberOfLines={2}>{'CHECKUP\nEDITOR'}</Text>
           </TapScale>
 
           {/* The money view of the same roster — MRR, what came in this month,
               who owes, who's about to quit. Admin-only end to end. */}
           <TapScale
-            style={[styles.topBarBtn, styles.businessBtn]}
+            style={[styles.topBarBtn, { width: tileW }, styles.businessBtn]}
             onPress={() => navigation.navigate('Business')}
           >
-            <Text style={[styles.topBarBtnText, styles.businessBtnText]} numberOfLines={1}>BUSINESS</Text>
+            <Text style={[styles.topBarBtnText, styles.businessBtnText]} numberOfLines={2}>{'BUSINESS'}</Text>
           </TapScale>
 
           {/* The two "someone is waiting on you" buttons. Each wears a dot while
-              its queue isn't empty — red for check-ups you owe a reply to, jade
-              for chat messages you haven't read yet. */}
+              its queue isn't empty — red for check-ups you owe a reply to. */}
           <NotifyBtn
-            label="CHECK-UP INBOX"
+            label={'CHECK-UP\nINBOX'}
             count={checkups}
             tone="alert"
+            width={tileW}
             onPress={() => navigation.navigate('CheckupInbox')}
           />
 
-          <NotifyBtn
-            label="CHAT NOTES"
-            count={unreadChats}
-            tone="jade"
-            onPress={() => navigation.navigate('ChatNotes')}
-          />
-
           <TapScale
-            style={[styles.topBarBtn, styles.signOutBtn]}
+            style={[styles.topBarBtn, { width: tileW }, styles.signOutBtn]}
             onPress={() => supabase.auth.signOut()}
           >
             <View style={styles.powerIcon}>
               <View style={styles.powerRing} />
               <View style={styles.powerStem} />
             </View>
-            <Text style={styles.topBarBtnText} numberOfLines={1}>SIGN OUT</Text>
+            <Text style={styles.topBarBtnText} numberOfLines={1}>{'SIGN OUT'}</Text>
           </TapScale>
         </View>
       </Animated.View>
@@ -565,59 +581,67 @@ const styles = StyleSheet.create({
   // Top bar — vertical stack: ADMIN title on top, the actions in a row below.
   topBar: {
     alignItems: 'center',
-    gap: 18,
-    paddingHorizontal: 16,
-    paddingTop: 30,
-    paddingBottom: 22,
-    borderBottomWidth: 2,
+    gap: 10,
+    paddingHorizontal: 8,
+    paddingTop: 14,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
     borderBottomColor: SL.border,
   },
-  titleWrap: { alignItems: 'center', gap: 10 },
+  titleWrap: { alignItems: 'center', gap: 6 },
   pageTitle: {
     fontFamily: F.heading,
-    fontSize: 56,
+    fontSize: 34,
     color: SL.accent,
-    letterSpacing: 10,
+    letterSpacing: 7,
     textTransform: 'uppercase',
     textAlign: 'center',
   },
   // Accent bar under the title that sweeps open on entrance (scaleX 0→1).
   titleUnderline: {
-    width: 160,
-    height: 3,
+    width: 104,
+    height: 2,
     borderRadius: 2,
     backgroundColor: SL.accent,
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.8, shadowRadius: 8,
   },
-  // Five actions wrap into a 2-per-row grid so they never crowd a phone width
-  // (GALLERY · CHECKUP EDITOR / CHECK-UP INBOX · CHAT NOTES / SIGN OUT).
+  // Six actions across ONE row.
+  //
+  // NOTHING here may be sized with a percentage or a flex ratio. Two rounds of
+  // this bug: `flexGrow: 1` + `flexBasis: '46%'` in a wrapping row blew every
+  // tile up to ~40% of the SCREEN (children stretched to the flex line's cross
+  // size), and the follow-up `width: '32%'` collapsed them to icon-sized squares
+  // (the percentage resolved against an indefinite width). Both looked correct
+  // on web and wrong only in the APK. So: the bar MEASURES itself (`onLayout`)
+  // and hands each tile an absolute pixel width, and the tile height is a fixed
+  // number. Keep it that way.
   topBarButtons: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     alignSelf: 'stretch',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 8,
   },
   topBarBtn: {
-    flexGrow: 1,
-    flexBasis: '46%',
-    minWidth: 0,
-    flexDirection: 'row',
+    height: 58,
+    flexGrow: 0,
+    flexShrink: 0,
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    borderWidth: 1.5,
+    gap: 2,
+    paddingHorizontal: 4,
+    borderWidth: 1.2,
     borderColor: SL.accent,
-    borderRadius: 24,
+    borderRadius: 12,
     backgroundColor: 'rgba(74,158,191,0.10)',
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.45, shadowRadius: 10,
   },
   topBarBtnText: {
     fontFamily: F.heading,
-    fontSize: 14,
+    fontSize: 12,
+    lineHeight: 15,
     color: SL.accent,
-    letterSpacing: 1.5,
+    letterSpacing: 0.2,
     textTransform: 'uppercase',
     textAlign: 'center',
   },
@@ -625,12 +649,12 @@ const styles = StyleSheet.create({
   // marker. Sits half-outside the pill so it reads as an alert, not a label.
   notifyDot: {
     position: 'absolute',
-    top: -7,
-    right: -6,
-    minWidth: 22,
-    height: 22,
-    borderRadius: 11,
-    paddingHorizontal: 6,
+    top: -6,
+    right: -5,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 5,
     alignItems: 'center',
     justifyContent: 'center',
     shadowOffset: { width: 0, height: 0 },
@@ -640,12 +664,12 @@ const styles = StyleSheet.create({
   },
   notifyDotText: {
     fontFamily: F.heading,
-    fontSize: 12,
+    fontSize: 10,
     color: '#050912',
     letterSpacing: 0.5,
   },
 
-  // ＋ NEW PLAYER — the one CREATE action on the bar, so it wears the gold
+  // NEW PLAYER — the one CREATE action on the bar, so it wears the gold
   // treasure accent to sit apart from the navigation pills beside it.
   inviteBtn: {
     borderColor: SL.gold,
@@ -810,30 +834,30 @@ const styles = StyleSheet.create({
   // Power symbol drawn from primitives (no icon font): a ring with a vertical
   // stem through its top center — the universal power/exit glyph.
   powerIcon: {
-    width: 16,
-    height: 16,
+    width: 13,
+    height: 13,
     alignItems: 'center',
     justifyContent: 'center',
   },
   powerRing: {
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    borderWidth: 2,
+    width: 11,
+    height: 11,
+    borderRadius: 5.5,
+    borderWidth: 1.6,
     borderColor: SL.accent,
   },
   powerStem: {
     position: 'absolute',
     top: -1,
-    width: 2.5,
-    height: 8,
-    borderRadius: 1.5,
+    width: 2,
+    height: 6.5,
+    borderRadius: 1,
     backgroundColor: SL.accent,
   },
 
   // Fixed card height so the frame matches the other cards (Gallery/Weekly Plan).
-  card: { height: CARD_H },
-  body: { flex: 1, paddingHorizontal: 28, paddingTop: 30, paddingBottom: 30 },
+  card: { flex: 1 },
+  body: { flex: 1, paddingHorizontal: 18, paddingTop: 16, paddingBottom: 16 },
 
   // Fills the remaining card height → the card is always the same size regardless
   // of how many players load (spinner / empty / roster all occupy this same box;
@@ -845,30 +869,30 @@ const styles = StyleSheet.create({
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 16,
-    marginBottom: 22,
+    gap: 10,
+    marginBottom: 12,
   },
   sectionTitle: {
     fontFamily: F.heading,
-    fontSize: 30,
+    fontSize: 21,
     color: SL.text,
-    letterSpacing: 5,
+    letterSpacing: 3,
     textTransform: 'uppercase',
   },
   sectionPill: {
     backgroundColor: 'rgba(74,158,191,0.12)',
     borderWidth: 1.5,
     borderColor: SL.accent,
-    borderRadius: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 4,
-    minWidth: 50,
+    borderRadius: 8,
+    paddingHorizontal: 11,
+    paddingVertical: 3,
+    minWidth: 38,
     alignItems: 'center',
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.4, shadowRadius: 8,
   },
   sectionPillText: {
     fontFamily: F.heading,
-    fontSize: 22,
+    fontSize: 15,
     color: SL.accent,
     letterSpacing: 1,
   },
@@ -878,14 +902,14 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: SL.border,
     borderRadius: 4,
-    paddingVertical: 32,
+    paddingVertical: 22,
     alignItems: 'center',
   },
   emptyText: {
     fontFamily: F.bodyMed,
-    fontSize: 20,
+    fontSize: 14,
     color: SL.muted,
-    letterSpacing: 2,
+    letterSpacing: 1.4,
     textAlign: 'center',
   },
 
@@ -897,89 +921,90 @@ const styles = StyleSheet.create({
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 12,
-    padding: 22,
-    marginBottom: 14,
+    borderRadius: 10,
+    padding: 13,
+    marginBottom: 9,
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.18, shadowRadius: 12,
   },
   // HUD rank index — a glowing ice token at the head of each row.
   rankChip: {
-    width: 44,
-    height: 44,
-    borderRadius: 10,
+    width: 34,
+    height: 34,
+    borderRadius: 8,
     borderWidth: 1.5,
     borderColor: SL.accent,
     backgroundColor: 'rgba(74,158,191,0.08)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 18,
+    marginRight: 12,
+    flexShrink: 0,
   },
   rankText: {
     fontFamily: F.heading,
-    fontSize: 18,
+    fontSize: 14,
     color: SL.accent,
     letterSpacing: 1,
   },
-  cardLeft: { flex: 1, gap: 6 },
+  cardLeft: { flex: 1, gap: 3, minWidth: 0 },
   nameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   nameFlex: { flexShrink: 1 },
   playerName: {
     fontFamily: F.heading,
-    fontSize: 26,
+    fontSize: 18,
     color: SL.text,
-    letterSpacing: 2,
+    letterSpacing: 1.2,
     textTransform: 'uppercase',
   },
   // Prestige medallion (roster) — a gold gem holding the count as a roman numeral,
   // matching the Player Card's prestige crest. Sized to sit beside the 26px name.
-  prestigeMini: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginLeft: 4 },
+  prestigeMini: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginLeft: 4 },
   prestigeMiniGem: {
-    position: 'absolute', width: 32, height: 32, borderRadius: 7,
+    position: 'absolute', width: 24, height: 24, borderRadius: 6,
     borderWidth: 2, borderColor: SL.gold, backgroundColor: 'rgba(255,215,0,0.06)',
     transform: [{ rotate: '45deg' }],
     shadowColor: SL.gold, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.85, shadowRadius: 14, elevation: 5,
   },
   prestigeMiniInner: {
-    position: 'absolute', width: 22, height: 22, borderRadius: 5,
+    position: 'absolute', width: 17, height: 17, borderRadius: 4,
     borderWidth: 1.2, borderColor: SL.gold, opacity: 0.4, transform: [{ rotate: '45deg' }],
   },
   prestigeMiniNum: {
-    fontFamily: F.displayHeavy, fontSize: 15, color: SL.gold, letterSpacing: 0.5,
+    fontFamily: F.displayHeavy, fontSize: 11, color: SL.gold, letterSpacing: 0.5,
     textShadowColor: 'rgba(255,215,0,0.85)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 8,
   },
   playerEmail: {
     fontFamily: F.bodyMed,
-    fontSize: 14,
+    fontSize: 11,
     color: SL.accent,
     letterSpacing: 0.5,
     opacity: 0.85,
   },
   joinDate: {
     fontFamily: F.bodyMed,
-    fontSize: 16,
+    fontSize: 12,
     color: SL.muted,
-    letterSpacing: 1.5,
+    letterSpacing: 1,
   },
   classBadge: {
     backgroundColor: 'rgba(255,215,0,0.08)',
     borderWidth: 1.5,
     borderColor: SL.gold,
     borderRadius: 999,
-    paddingHorizontal: 16,
-    paddingVertical: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 4,
     shadowColor: SL.gold, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.35, shadowRadius: 8,
   },
   classBadgeText: {
     fontFamily: F.heading,
-    fontSize: 17,
+    fontSize: 12,
     color: SL.gold,
-    letterSpacing: 2,
+    letterSpacing: 1.2,
   },
   cardChevron: {
     fontFamily: F.heading,
-    fontSize: 30,
+    fontSize: 21,
     color: SL.accent,
-    marginLeft: 14,
+    marginLeft: 9,
     marginTop: -2,
   },
 });

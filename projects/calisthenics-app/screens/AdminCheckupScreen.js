@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, StyleSheet, TextInput, ScrollView, ActivityIndicator, TouchableOpacity, Linking,
+  Platform,
 } from 'react-native';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
@@ -10,9 +11,10 @@ import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
 import VideoPlayer from '../components/VideoPlayer';
 import CheckupTemplateEditor from '../components/CheckupTemplateEditor';
+import SystemConfirm from '../components/SystemConfirm';
 import {
-  purgeExpiredCheckups, WEEKDAYS_SHORT, groupCheckupVideos,
-  fetchPlayerTemplateItems, materializePlayerTemplate, resetPlayerTemplate,
+  purgeExpiredCheckups, WEEKDAYS_SHORT, resetPlayerTemplate,
+  splitCheckupAnswers, buildExerciseCards,
 } from '../lib/checkups';
 
 const FB_NOTE_MAX = 500;
@@ -27,8 +29,10 @@ function formatDate(ts) {
 //   1. Set the player's recurring check-up DAY.
 //   2. Review their latest SUBMITTED check-up (Part-1 answers + Part-2 exercise
 //      clips/notes) and reply with a feedback video URL + note.
-//   3. CUSTOMIZE this player's template — override the class standard (materialize
-//      the class items onto the player, then trim/edit) or reset back to standard.
+//   3. THIS PLAYER'S CHECK-UP — the one list they actually fill in, edited in
+//      place. It shows the class standard until something is changed here; the
+//      first change forks it onto the player (see CheckupTemplateEditor), so a
+//      personal tweak is just an edit + save, never a second structure on the page.
 // Writes here need the admin-override RLS in migrations/20260714_checkups.sql +
 // 20260722_checkup_templates.sql.
 export default function AdminCheckupScreen({ navigation, route }) {
@@ -37,7 +41,12 @@ export default function AdminCheckupScreen({ navigation, route }) {
   const [loading, setLoading]   = useState(true);
   const [checkup, setCheckup]   = useState(null);   // latest SUBMITTED check-up
   const [answers, setAnswers]   = useState([]);
+  const [exNotes, setExNotes]   = useState([]);   // Part-2 notes, clip or no clip
   const [videos,  setVideos]    = useState([]);
+  // One card per exercise: the clips grouped, plus any exercise that only carries
+  // a note (the player couldn't film it but explained why).
+  const exerciseCards = useMemo(() => buildExerciseCards(videos, exNotes), [videos, exNotes]);
+
   const [fbUrl,   setFbUrl]     = useState('');
   const [fbNote,  setFbNote]    = useState('');
   const [saving,  setSaving]    = useState(false);
@@ -46,23 +55,33 @@ export default function AdminCheckupScreen({ navigation, route }) {
   const [checkupDay, setCheckupDay] = useState(null);
   const [savingDay,  setSavingDay]  = useState(false);
 
-  // Per-player template override
-  const [hasOverride, setHasOverride] = useState(false);
-  const [editorKey,   setEditorKey]   = useState(0);
-  const [busyTpl,     setBusyTpl]     = useState(false);
+  // This player's check-up list: 'class' = still the inherited standard,
+  // 'player' = personalised for them, 'none' = nothing authored anywhere yet.
+  const [tplSource, setTplSource] = useState('class');
+  const [classId,   setClassId]   = useState(player?.class_id ?? null);
+  const [editorKey, setEditorKey] = useState(0);
+  const [busyTpl,   setBusyTpl]   = useState(false);
+  const [confirm,   setConfirm]   = useState(null);
+  // The template section is READ-ONLY until the coach asks to edit it: he screen-
+  // records himself going over a player's check-up, and admin controls in that
+  // recording look unprofessional to the player watching it.
+  const [tplEditing, setTplEditing] = useState(false);
+  const [fbFocus,    setFbFocus]    = useState(null);   // 'url' | 'note' | null
+  const onSourceChange = useCallback(src => setTplSource(src), []);
+  const hasOverride = tplSource === 'player';
 
   const load = useCallback(async () => {
     if (!player?.id) { setLoading(false); return; }
     try {
       const { data: prof } = await supabase
         .from('profiles')
-        .select('checkup_day')
+        .select('checkup_day, class_id')
         .eq('id', player.id)
         .maybeSingle();
       setCheckupDay(prof?.checkup_day ?? null);
-
-      const own = await fetchPlayerTemplateItems(player.id);
-      setHasOverride(own.length > 0);
+      // The profile is the authority on the class (the roster row can be stale) —
+      // the editor needs it to know which standard this player inherits.
+      setClassId(prof?.class_id ?? player.class_id ?? null);
 
       await purgeExpiredCheckups(player.id);
 
@@ -81,7 +100,14 @@ export default function AdminCheckupScreen({ navigation, route }) {
           supabase.from('checkup_videos').select('*').eq('checkup_id', latest.id).order('order_index', { ascending: true }),
         ]);
         setCheckup(latest);
-        setAnswers(ans ?? []);
+        {
+          // Part-2 notes are stored as answer rows too (see splitCheckupAnswers),
+          // so an exercise the player wrote about but couldn't film still reaches
+          // the coach.
+          const split = splitCheckupAnswers(ans ?? []);
+          setAnswers(split.questionRows);
+          setExNotes(split.exerciseNotes);
+        }
         setVideos(vids ?? []);
         setFbUrl(latest.feedback_url ?? '');
         setFbNote(latest.feedback_note ?? '');
@@ -138,17 +164,17 @@ export default function AdminCheckupScreen({ navigation, route }) {
     setSavingDay(false);
   }
 
-  async function customize() {
+  // Drop this player's personal list → they inherit their class standard again.
+  // Destructive (their tailored questions/exercises are deleted), so it asks first.
+  function askReset() {
     if (busyTpl || !player?.id) return;
-    setBusyTpl(true);
-    try {
-      await materializePlayerTemplate(player.id, player.class_id ?? null);
-      setHasOverride(true);
-      setEditorKey(k => k + 1);
-    } catch (e) {
-      console.error('[AdminCheckupScreen] customize:', e);
-    }
-    setBusyTpl(false);
+    setConfirm({
+      title: 'BACK TO CLASS STANDARD',
+      message: "This player's personal questions and exercises will be deleted and they'll fill in their class standard again.",
+      confirmLabel: '↺  BACK TO STANDARD',
+      tone: 'danger',
+      onConfirm: resetToStandard,
+    });
   }
 
   async function resetToStandard() {
@@ -156,7 +182,7 @@ export default function AdminCheckupScreen({ navigation, route }) {
     setBusyTpl(true);
     try {
       await resetPlayerTemplate(player.id);
-      setHasOverride(false);
+      setTplSource('class');
       setEditorKey(k => k + 1);
     } catch (e) {
       console.error('[AdminCheckupScreen] resetToStandard:', e);
@@ -167,7 +193,7 @@ export default function AdminCheckupScreen({ navigation, route }) {
   const hasFeedback = !!checkup?.feedback_at;
 
   return (
-    <ScreenFrame fill maxWidth={640} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <View style={styles.card}>
         <ScreenHeader
           title="CHECK-UP"
@@ -228,18 +254,28 @@ export default function AdminCheckupScreen({ navigation, route }) {
                 </>
               )}
 
-              {videos.length > 0 && (
+              {exerciseCards.length > 0 && (
                 <>
                   <SectionTitle>THEIR EXERCISES</SectionTitle>
-                  {groupCheckupVideos(videos).map(g => (
+                  {exerciseCards.map((g, gi, all) => (
                     <View key={g.key} style={styles.clipCard}>
-                      {!!g.prompt && (
-                        <Text style={styles.clipName}>
-                          {g.prompt}{g.videos.length > 1 ? `  ·  ${g.videos.length} CLIPS` : ''}
-                        </Text>
-                      )}
+                      {/* One exercise = one hard-edged card: numbered, accent-railed
+                          and spaced, so a wall of clips reads as N exercises. */}
+                      <View style={styles.clipHead}>
+                        <Text style={styles.clipIndex}>EXERCISE {gi + 1} / {all.length}</Text>
+                        {g.videos.length > 1 && (
+                          <Text style={styles.clipCount}>{g.videos.length} CLIPS</Text>
+                        )}
+                        {g.videos.length === 0 && (
+                          <Text style={styles.clipNoClip}>NO CLIP · NOTE ONLY</Text>
+                        )}
+                      </View>
+                      {!!g.prompt && <Text style={styles.clipName}>{g.prompt}</Text>}
                       {g.videos.map((v, i) => (
-                        <View key={v.id} style={i > 0 ? { marginTop: 16 } : undefined}>
+                        <View key={v.id} style={i > 0 ? styles.clipSplit : undefined}>
+                          {g.videos.length > 1 && (
+                            <Text style={styles.clipTag}>CLIP {i + 1} OF {g.videos.length}</Text>
+                          )}
                           <VideoPlayer url={v.video_url} height={220} style={{ marginTop: 10 }} />
                           <TouchableOpacity onPress={() => Linking.openURL(v.video_url)}>
                             <Text style={styles.openLink}>⤓  OPEN / DOWNLOAD CLIP</Text>
@@ -255,7 +291,7 @@ export default function AdminCheckupScreen({ navigation, route }) {
                   ))}
                 </>
               )}
-              {answers.length === 0 && videos.length === 0 && (
+              {answers.length === 0 && exerciseCards.length === 0 && (
                 <Text style={styles.hint}>This check-up has no answers or clips.</Text>
               )}
 
@@ -265,7 +301,9 @@ export default function AdminCheckupScreen({ navigation, route }) {
 
                 <Text style={styles.fieldLabel}>FEEDBACK VIDEO URL</Text>
                 <TextInput
-                  style={styles.input}
+                  style={[styles.input, fbFocus === 'url' && styles.inputFocus]}
+                  onFocus={() => setFbFocus('url')}
+                  onBlur={() => setFbFocus(null)}
                   placeholder="Paste a link to the feedback clip you recorded…"
                   placeholderTextColor={C.textMuted}
                   value={fbUrl}
@@ -279,7 +317,9 @@ export default function AdminCheckupScreen({ navigation, route }) {
                   <Text style={styles.counter}>{fbNote.length}/{FB_NOTE_MAX}</Text>
                 </View>
                 <TextInput
-                  style={[styles.input, styles.multiline]}
+                  style={[styles.input, styles.multiline, fbFocus === 'note' && styles.inputFocus]}
+                  onFocus={() => setFbFocus('note')}
+                  onBlur={() => setFbFocus(null)}
                   placeholder="A few words alongside the video…"
                   placeholderTextColor={C.textMuted}
                   value={fbNote}
@@ -309,54 +349,68 @@ export default function AdminCheckupScreen({ navigation, route }) {
             </>
           )}
 
-          {/* ── Customize this player's template ── */}
+          {/* ── This player's check-up — ONE list, edited in place ── */}
           <View style={styles.customizeBlock}>
             <View style={styles.customizeHead}>
               <SectionTitle>THIS PLAYER'S CHECK-UP</SectionTitle>
-              <View style={[styles.scopeChip, hasOverride ? styles.scopeChipCustom : styles.scopeChipStd]}>
-                <Text style={[styles.scopeChipText, hasOverride ? styles.scopeChipTextCustom : styles.scopeChipTextStd]}>
-                  {hasOverride ? 'CUSTOM' : 'CLASS STANDARD'}
-                </Text>
+              <View style={styles.headRight}>
+                <View style={[styles.scopeChip, hasOverride ? styles.scopeChipCustom : styles.scopeChipStd]}>
+                  <Text style={[styles.scopeChipText, hasOverride ? styles.scopeChipTextCustom : styles.scopeChipTextStd]}>
+                    {hasOverride ? 'PERSONAL' : 'CLASS STANDARD'}
+                  </Text>
+                </View>
+                <PillButton
+                  label={tplEditing ? 'DONE' : 'EDIT'}
+                  onPress={() => setTplEditing(v => !v)}
+                  variant={tplEditing ? 'solid' : 'outline'}
+                  tone={tplEditing ? 'green' : 'accent'}
+                  size="sm"
+                />
               </View>
             </View>
 
-            {hasOverride ? (
-              <>
-                <Text style={styles.customizeHint}>
-                  This player has a custom check-up. Edit it below, or reset to use their class
-                  standard again.
-                </Text>
-                <CheckupTemplateEditor key={editorKey} scope={{ playerId: player.id }} />
-                <PillButton
-                  label={busyTpl ? 'RESETTING…' : '↺  RESET TO CLASS STANDARD'}
-                  onPress={resetToStandard}
-                  loading={busyTpl}
-                  tone="danger"
-                  size="sm"
-                  style={{ alignSelf: 'flex-start', marginTop: 20 }}
-                />
-              </>
-            ) : (
-              <>
-                <Text style={styles.customizeHint}>
-                  This player uses their class-standard check-up. Customize to add or remove
-                  questions/exercises just for them (e.g. skip a movement they've already mastered).
-                </Text>
-                <PillButton
-                  label={busyTpl ? 'PREPARING…' : '✎  CUSTOMIZE FOR THIS PLAYER'}
-                  onPress={customize}
-                  loading={busyTpl}
-                  variant="solid"
-                  tone="accent"
-                  size="md"
-                  style={{ alignSelf: 'flex-start', marginTop: 4 }}
-                />
-              </>
+            {/* The explainer belongs to the editing state — the clean view stays
+                clean, so it can be on screen while the coach is recording. */}
+            {tplEditing && (
+              <Text style={styles.customizeHint}>
+                {hasOverride
+                  ? 'Tailored to this player. Every change saves to them only — their class standard is untouched.'
+                  : "What this player fills in, inherited from their class. Change anything here and it becomes theirs alone — the class standard stays as it is."}
+              </Text>
+            )}
+
+            <CheckupTemplateEditor
+              key={editorKey}
+              scope={{ playerId: player.id, classId }}
+              onSourceChange={onSourceChange}
+              editable={tplEditing}
+            />
+
+            {tplEditing && hasOverride && (
+              <PillButton
+                label={busyTpl ? 'RESETTING…' : '↺  BACK TO CLASS STANDARD'}
+                onPress={askReset}
+                loading={busyTpl}
+                tone="danger"
+                size="sm"
+                style={{ alignSelf: 'flex-start', marginTop: 20 }}
+              />
             )}
           </View>
+
         </ScrollView>
         )}
       </View>
+
+      <SystemConfirm
+        visible={!!confirm}
+        title={confirm?.title}
+        message={confirm?.message}
+        confirmLabel={confirm?.confirmLabel}
+        tone={confirm?.tone ?? 'accent'}
+        onConfirm={() => { const fn = confirm?.onConfirm; setConfirm(null); fn?.(); }}
+        onCancel={() => setConfirm(null)}
+      />
     </ScreenFrame>
   );
 }
@@ -423,9 +477,25 @@ const styles = StyleSheet.create({
   clipCard: {
     backgroundColor: C.surface,
     borderWidth: 1.5, borderColor: C.lockedBorder, borderRadius: 14,
-    padding: 12, marginBottom: 14,
+    borderLeftWidth: 5, borderLeftColor: C.iceGlow,
+    padding: 14, paddingLeft: 16, marginBottom: 28,
   },
-  clipName: { fontFamily: F.heading, fontSize: 16, color: C.text, letterSpacing: 1 },
+  clipHead: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    borderBottomWidth: 1, borderBottomColor: C.lockedBorder,
+    paddingBottom: 8, marginBottom: 10,
+  },
+  clipIndex: { fontFamily: F.heading, fontSize: 12, color: C.iceGlow, letterSpacing: 2.5 },
+  clipCount: { fontFamily: F.heading, fontSize: 12, color: C.textMuted, letterSpacing: 2 },
+  clipNoClip: { fontFamily: F.heading, fontSize: 12, color: '#B4884A', letterSpacing: 2 },
+  clipName: { fontFamily: F.heading, fontSize: 22, color: C.iceGlow, letterSpacing: 1.2, lineHeight: 28 },
+  // Second and later clips of the SAME exercise: a soft rule, not a card edge —
+  // it must never read as loudly as the gap between two exercises.
+  clipSplit: {
+    marginTop: 18, paddingTop: 14,
+    borderTopWidth: 1, borderTopColor: C.cardBorder,
+  },
+  clipTag: { fontFamily: F.heading, fontSize: 11, color: C.textMuted, letterSpacing: 2, marginTop: 4 },
   hint: { fontFamily: F.bodyMed, fontSize: 14, color: C.textMuted, letterSpacing: 0.5, marginBottom: 6 },
   openLink: {
     fontFamily: F.heading, fontSize: 13, color: C.iceGlow, letterSpacing: 2,
@@ -451,7 +521,10 @@ const styles = StyleSheet.create({
   input: {
     backgroundColor: C.bg, borderWidth: 1.5, borderColor: C.cardBorder, borderRadius: 12,
     paddingHorizontal: 16, paddingVertical: 15, fontFamily: F.body, fontSize: 16, color: C.text,
+    // No browser focus ring on web — see CheckupTemplateEditor.
+    ...Platform.select({ web: { outlineStyle: 'none', outlineWidth: 0 }, default: {} }),
   },
+  inputFocus: { borderColor: C.iceGlow },
   multiline: { minHeight: 110, paddingTop: 14, lineHeight: 24 },
 
   errorBox: {
@@ -471,6 +544,9 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: C.cardBorder,
   },
   customizeHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  // Chip + the EDIT/DONE button, right-aligned against the section title.
+  headRight: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+
   scopeChip: { borderWidth: 1.5, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
   scopeChipStd: { borderColor: C.lockedBorder, backgroundColor: C.surface },
   scopeChipCustom: { borderColor: '#C79A3A', backgroundColor: 'rgba(199,154,58,0.12)' },

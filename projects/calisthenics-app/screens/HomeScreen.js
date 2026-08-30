@@ -16,13 +16,14 @@ import { ShimmerText, ShimmerFill, GOLD } from '../components/Shimmer';
 import ScreenFrame, { FRAME_PAD } from '../components/ScreenFrame';
 import PopCheck from '../components/PopCheck';
 import ClearSweep from '../components/ClearSweep';
-import DonePulse from '../components/DonePulse';
+import DoneAura from '../components/DoneAura';
 import QuestGate from '../components/QuestGate';
-import { hapticTap, hapticSuccess } from '../lib/haptics';
+import { hapticTap } from '../lib/haptics';
 import { CARD_W } from '../constants/layout';
 import { sessionKey, activeSessionKeys } from '../lib/workoutSession';
 import { useTourTarget } from '../lib/tourTargets';
 import { useTour } from '../context/TourContext';
+import { lighten, rgba } from '../lib/colorMix';
 
 // EVERY typed mission glows in its own type color — the same hex the launcher
 // window wears, so the row you tap and the window that opens are one thing.
@@ -31,26 +32,9 @@ import { useTour } from '../context/TourContext';
 const accentFor = (category) =>
   categoryLabel(category) ? categoryMeta(category).color : null;
 
-// A brighter sibling of a type color — mixed toward white. The live card's glow,
-// rail and beacon used to be hard-coded ice blue (#8CE0FF); now every one of them
-// is derived from the mission's OWN type color so an in-progress HANDSTAND stays
-// rose instead of turning blue mid-session.
-const lighten = (hex, amt = 0.45) => {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
-  if (!m) return hex;
-  const n = parseInt(m[1], 16);
-  const mix = (c) => Math.round(c + (255 - c) * amt);
-  const r = mix((n >> 16) & 255), g = mix((n >> 8) & 255), b = mix(n & 255);
-  return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
-};
-
-// Same color as an `rgba()` string, for translucent fills/shadows.
-const rgba = (hex, a) => {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
-  if (!m) return hex;
-  const n = parseInt(m[1], 16);
-  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
-};
+// The live card's glow, rail and beacon used to be hard-coded ice blue (#8CE0FF);
+// every one of them is now derived from the mission's OWN type color (via the
+// shared shade helpers) so an in-progress HANDSTAND stays rose mid-session.
 
 const SL = {
   bg:     '#050912',
@@ -518,25 +502,7 @@ export default function HomeScreen({ navigation }) {
   const toNext       = Math.max(0, maxLvl - lvl);
   const missionsDone = workouts.filter(w => w.completed).length;
   const dqDone       = dailyQuests.filter(q => doneTodayIds.has(q.id)).length;
-  const dqAllDone    = dailyQuests.length > 0 && dqDone === dailyQuests.length;
 
-  // ── ALL CLEAR ──────────────────────────────────────────────────────────────
-  // Clearing the LAST row of a panel is the moment worth marking — finishing your
-  // third mission should not feel like finishing your first. The panel itself
-  // answers (gold header + a gold scan), and the phone thumps once.
-  // The `armed` gate is the whole trick: `allDone` also goes false → true when the
-  // first fetch lands, so without it every visit to an already-finished board
-  // would replay the celebration. It arms only after the initial load, and the
-  // panel sweeps are likewise not mounted until then.
-  const clearFx = useRef({ armed: false, m: false, q: false });
-  useEffect(() => {
-    if (loading) return;
-    const c = clearFx.current;
-    if (c.armed && ((allDone && !c.m) || (dqAllDone && !c.q))) hapticSuccess();
-    c.armed = true;
-    c.m = allDone;
-    c.q = dqAllDone;
-  }, [allDone, dqAllDone, loading]);
 
   // Split the class name ("CLASS II") into a kicker + the rank token, so the rank
   // can sit big inside the crest medallion and "CLASS" reads as a spaced kicker
@@ -688,21 +654,13 @@ export default function HomeScreen({ navigation }) {
             <View
               ref={tourMissionsRef}
               collapsable={false}
-              style={[styles.sectionPanel, d.sectionPanel, allDone && styles.sectionPanelClear]}
+              style={[styles.sectionPanel, d.sectionPanel]}
             >
               <View style={styles.panelHeader}>
-                <View style={[styles.panelHeaderBar, allDone && styles.panelHeaderBarClear]} />
-                {/* sweep={false}: the per-glyph wave drops the style off its row
-                    container, losing the title's flex:1 and shoving the chip out.
-                    A single-colour cycle keeps the layout byte-identical. */}
-                <ShimmerText
-                  text="TODAY'S MISSIONS"
-                  active={allDone}
-                  colors={GOLD}
-                  sweep={false}
-                  numberOfLines={2}
-                  style={[styles.panelHeaderText, d.panelHeaderText, allDone && styles.panelHeaderTextClear]}
-                />
+                <View style={styles.panelHeaderBar} />
+                <Text style={[styles.panelHeaderText, d.panelHeaderText]} numberOfLines={2} ellipsizeMode="tail">
+                  TODAY'S MISSIONS
+                </Text>
                 {workouts.length > 0 && (
                   <View style={[styles.countChip, allDone && styles.countChipDone]}>
                     <Text style={[styles.countChipText, allDone && styles.countChipTextDone]}>
@@ -711,7 +669,7 @@ export default function HomeScreen({ navigation }) {
                   </View>
                 )}
               </View>
-              <View style={[styles.panelDivider, allDone && styles.panelDividerClear]} />
+              <View style={styles.panelDivider} />
 
               {workouts.length === 0 ? (
                 showOnboarding ? (
@@ -809,8 +767,8 @@ export default function HomeScreen({ navigation }) {
                           <PopCheck><Text style={styles.missionCheckMark}>✓</Text></PopCheck>
                         )}
                       </TouchableOpacity>
-                      {/* Cleared: a slow cold breath (vs. the live card's hot pulse). */}
-                      <DonePulse active={workout.completed} color={tc || SL.accent} />
+                      {/* Cleared: a light travelling the frame, on forever. */}
+                      <DoneAura active={workout.completed} color={tc || SL.accent} />
                       {/* The scan that confirms it — plays on the tick, then unmounts. */}
                       <ClearSweep done={workout.completed} color={tc || SL.accent} />
                     </TouchableOpacity>
@@ -819,39 +777,24 @@ export default function HomeScreen({ navigation }) {
                 </>
               )}
 
-              {/* The all-clear scan. LAST child so it paints over the rows (the
-                  cards are opaque), held back 300ms so it follows the row's own
-                  sweep instead of racing it, and not mounted until the first load
-                  has landed — see the `armed` note above. */}
-              {!loading && (
-                <ClearSweep done={allDone} color={SL.gold} duration={700} delay={300} radius={12} />
-              )}
             </View>
 
             {/* Daily Quests */}
-            <View style={[styles.sectionPanel, d.sectionPanel, dqAllDone && styles.sectionPanelClear]}>
+            <View style={[styles.sectionPanel, d.sectionPanel]}>
               <View style={styles.panelHeader}>
-                <View style={[styles.panelHeaderBar, dqAllDone && styles.panelHeaderBarClear]} />
-                {/* sweep={false}: the per-glyph wave drops the style off its row
-                    container, losing the title's flex:1 and shoving the chip out.
-                    A single-colour cycle keeps the layout byte-identical. */}
-                <ShimmerText
-                  text="DAILY QUESTS"
-                  active={dqAllDone}
-                  colors={GOLD}
-                  sweep={false}
-                  numberOfLines={2}
-                  style={[styles.panelHeaderText, d.panelHeaderText, dqAllDone && styles.panelHeaderTextClear]}
-                />
+                <View style={styles.panelHeaderBar} />
+                <Text style={[styles.panelHeaderText, d.panelHeaderText]} numberOfLines={2} ellipsizeMode="tail">
+                  DAILY QUESTS
+                </Text>
                 {dailyQuests.length > 0 && (
-                  <View style={[styles.countChip, dqAllDone && styles.countChipDone]}>
-                    <Text style={[styles.countChipText, dqAllDone && styles.countChipTextDone]}>
+                  <View style={[styles.countChip, dqDone === dailyQuests.length && styles.countChipDone]}>
+                    <Text style={[styles.countChipText, dqDone === dailyQuests.length && styles.countChipTextDone]}>
                       {dqDone}/{dailyQuests.length}
                     </Text>
                   </View>
                 )}
               </View>
-              <View style={[styles.panelDivider, dqAllDone && styles.panelDividerClear]} />
+              <View style={styles.panelDivider} />
 
               {dailyQuests.length > 0 ? (
                 dailyQuests.map(q => {
@@ -869,7 +812,7 @@ export default function HomeScreen({ navigation }) {
                       <Text style={[styles.dqTitle, done && styles.dqTitleDone]} numberOfLines={2}>
                         {q.title}
                       </Text>
-                      <DonePulse active={done} color={SL.accent} />
+                      <DoneAura active={done} color={SL.accent} />
                       <ClearSweep done={done} color={SL.accent} />
                     </TouchableOpacity>
                   );
@@ -878,9 +821,6 @@ export default function HomeScreen({ navigation }) {
                 <Text style={styles.emptyHint}>No daily quests yet.</Text>
               )}
 
-              {!loading && (
-                <ClearSweep done={dqAllDone} color={SL.gold} duration={700} delay={300} radius={12} />
-              )}
             </View>
           </Animated.View>
       </>
@@ -1310,34 +1250,9 @@ const styles = StyleSheet.create({
     borderColor: SL.border,
     backgroundColor: 'rgba(74,158,191,0.08)',
   },
-  // ── ALL CLEAR ──────────────────────────────────────────────────────────────
-  // A fully cleared panel goes GOLD — the app's existing word for "nothing left
-  // to earn here" (MAXED chains, class gates, hidden challenges). Ice is progress;
-  // gold is completion. The whole panel says it at once, so the individual rows
-  // don't have to shout.
-  sectionPanelClear: {
-    borderColor: 'rgba(255,215,0,0.45)',
-    shadowColor: SL.gold,
-    shadowOpacity: 0.3,
-  },
-  panelHeaderBarClear: {
-    backgroundColor: SL.gold,
-    shadowColor: SL.gold,
-  },
-  panelHeaderTextClear: {
-    color: SL.gold,
-  },
-  panelDividerClear: {
-    backgroundColor: SL.gold,
-    opacity: 0.35,
-  },
   countChipDone: {
-    borderColor: SL.gold,
-    backgroundColor: 'rgba(255,215,0,0.16)',
-    shadowColor: SL.gold,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.7,
-    shadowRadius: 8,
+    borderColor: SL.accent,
+    backgroundColor: 'rgba(74,158,191,0.18)',
   },
   countChipText: {
     fontFamily: F.heading,
@@ -1346,7 +1261,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   countChipTextDone: {
-    color: SL.gold,
+    color: SL.accent,
   },
   panelDivider: {
     height: 1,

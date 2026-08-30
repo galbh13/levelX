@@ -352,7 +352,7 @@ export default function WorkoutEditScreen({ route, navigation }) {
   ));
 
   return (
-    <ScreenFrame maxWidth={920}>
+    <ScreenFrame>
       <ScreenHeader title="EDIT WORKOUT" onBack={() => navigation.goBack()} />
 
       <View style={styles.form}>

@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Switch } from 'react-native';
 import {
   fetchPlans, savePlan, deletePlan, fetchSettings, saveSettings,
   money, CURRENCIES,
 } from '../lib/billing';
 import { F } from '../constants/fonts';
-import { CARD_W } from '../constants/layout';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
@@ -27,6 +26,15 @@ export default function AdminPlansScreen({ navigation }) {
   const [editing, setEditing] = useState(null);     // plan draft being edited/created
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  // SAVE SETTINGS state, kept separate from `busy` (which belongs to the plan
+  // modal) and from the top-of-page `error` banner: the button lives at the very
+  // bottom of a long scroll, so a failure reported 1500px above it is invisible
+  // and the button just looks dead. Both the outcome AND the reason now render
+  // next to the button itself.
+  const [saveState, setSaveState] = useState('idle');   // idle | saving | saved
+  const [saveError, setSaveError] = useState(null);
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
 
   const load = useCallback(async () => {
     try {
@@ -80,20 +88,51 @@ export default function AdminPlansScreen({ navigation }) {
     }
   }
 
+  // The row carries server-managed columns; never send them back.
+  async function persistSettings(next) {
+    const { id, updated_at, created_at, ...rest } = next;
+    await saveSettings(rest);
+  }
+
+  // Used by the controls that save the instant you touch them (currency, the
+  // overdue switch). The typed fields — business name, grace days — stay local
+  // until SAVE SETTINGS is pressed.
   async function patchSettings(patch) {
     const next = { ...settings, ...patch };
     setSettings(next);
+    setSaveError(null);
     try {
-      const { id, updated_at, ...rest } = next;
-      await saveSettings(rest);
+      await persistSettings(next);
     } catch (e) {
       console.error('[AdminPlans] saveSettings:', e);
-      setError(e?.message ?? 'Could not save settings.');
+      setSaveError(e?.message ?? 'Could not save settings.');
+    }
+  }
+
+  // The explicit SAVE SETTINGS press. Writes, then READS BACK from the server so
+  // what the screen shows is what was actually stored — a save that silently did
+  // nothing can't masquerade as a success.
+  async function commitSettings() {
+    if (!settings || saveState === 'saving') return;
+    setSaveState('saving');
+    setSaveError(null);
+    try {
+      await persistSettings(settings);
+      const fresh = await fetchSettings();
+      if (!alive.current) return;
+      setSettings(fresh);
+      setSaveState('saved');
+      setTimeout(() => { if (alive.current) setSaveState('idle'); }, 1800);
+    } catch (e) {
+      console.error('[AdminPlans] commitSettings:', e);
+      if (!alive.current) return;
+      setSaveError(e?.message ?? 'Could not save settings.');
+      setSaveState('idle');
     }
   }
 
   return (
-    <ScreenFrame fill maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <View style={styles.card}>
         <ScreenHeader
           title="PLANS"
@@ -229,10 +268,16 @@ export default function AdminPlansScreen({ navigation }) {
 
             <View style={styles.saveBar}>
               <PillButton
-                label="SAVE SETTINGS"
-                tone="gold"
-                onPress={() => patchSettings({})}
+                label={saveState === 'saved' ? 'SAVED' : 'SAVE SETTINGS'}
+                tone={saveState === 'saved' ? 'jade' : 'gold'}
+                loading={saveState === 'saving'}
+                onPress={commitSettings}
               />
+              {saveError ? (
+                <Text style={styles.saveError}>{saveError}</Text>
+              ) : saveState === 'saved' ? (
+                <Text style={styles.saveOk}>Billing settings stored.</Text>
+              ) : null}
             </View>
           </ScrollView>
         )}
@@ -281,5 +326,13 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: 'rgba(225,29,72,0.4)', borderRadius: 10,
     padding: 12, marginBottom: 12, backgroundColor: 'rgba(225,29,72,0.08)',
   },
-  saveBar: { marginTop: 20, alignItems: 'center' },
+  saveBar: { marginTop: 20, alignItems: 'center', gap: 10 },
+  saveError: {
+    fontFamily: F.body, fontSize: 12, color: '#FF6B85',
+    letterSpacing: 0.5, textAlign: 'center',
+  },
+  saveOk: {
+    fontFamily: F.body, fontSize: 12, color: '#1FD79A',
+    letterSpacing: 0.5, textAlign: 'center',
+  },
 });

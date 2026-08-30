@@ -5,7 +5,6 @@ import {
 } from 'react-native';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
-import { CARD_H, CARD_W } from '../constants/layout';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import { useCoach } from '../context/CoachContext';
@@ -38,7 +37,7 @@ export default function AdminCheckupInboxScreen({ navigation }) {
   useFocusEffect(useCallback(() => { load(); refresh(); }, [load, refresh]));
 
   return (
-    <ScreenFrame maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <View style={styles.card}>
         <ScreenHeader
           title="CHECK-UP INBOX"
@@ -70,6 +69,9 @@ export default function AdminCheckupInboxScreen({ navigation }) {
                   <View style={styles.rankChip}>
                     <Text style={styles.rankText}>{String(i + 1).padStart(2, '0')}</Text>
                   </View>
+                  {/* Two stacked lines so the NEEDS REPLY badge can never eat
+                      into the player's name: name across the full row width on
+                      top, the timestamp + badge on the line below it. */}
                   <View style={styles.rowMain}>
                     <View style={styles.nameRow}>
                       <Text style={styles.name} numberOfLines={1}>
@@ -77,10 +79,12 @@ export default function AdminCheckupInboxScreen({ navigation }) {
                       </Text>
                       <View style={styles.dot} />
                     </View>
-                    <Text style={styles.meta}>Submitted {ago(row.submittedAt)}</Text>
-                  </View>
-                  <View style={styles.badge}>
-                    <Text style={styles.badgeText}>NEEDS REPLY</Text>
+                    <View style={styles.metaRow}>
+                      <Text style={styles.meta} numberOfLines={1}>Submitted {ago(row.submittedAt)}</Text>
+                      <View style={styles.badge}>
+                        <Text style={styles.badgeText}>NEEDS REPLY</Text>
+                      </View>
+                    </View>
                   </View>
                   <Text style={styles.chevron}>›</Text>
                 </Pressable>
@@ -111,13 +115,13 @@ const ACCENT = '#4A9EBF';
 const ALERT  = '#E11D48';
 
 const styles = StyleSheet.create({
-  card: { height: CARD_H },
-  body: { flex: 1, paddingHorizontal: 26, paddingTop: 18, paddingBottom: 26 },
+  card: { flex: 1 },
+  body: { flex: 1, paddingHorizontal: 18, paddingTop: 14, paddingBottom: 16 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10 },
   emptyTitle: {
-    fontFamily: F.heading, fontSize: 26, color: ACCENT, letterSpacing: 4,
+    fontFamily: F.heading, fontSize: 20, color: ACCENT, letterSpacing: 3,
   },
-  muted: { fontFamily: F.bodyMed, fontSize: 17, color: '#4a6a8a', letterSpacing: 1.5 },
+  muted: { fontFamily: F.bodyMed, fontSize: 13, color: '#4a6a8a', letterSpacing: 1 },
 
   row: {
     flexDirection: 'row',
@@ -125,36 +129,44 @@ const styles = StyleSheet.create({
     backgroundColor: '#070d1a',
     borderWidth: 1.5,
     borderColor: '#1a3a5c',
-    borderRadius: 12,
-    padding: 20,
-    marginBottom: 14,
+    borderRadius: 10,
+    padding: 13,
+    marginBottom: 9,
     shadowColor: ACCENT, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.18, shadowRadius: 12,
   },
   rankChip: {
-    width: 42, height: 42, borderRadius: 10,
+    width: 34, height: 34, borderRadius: 8,
     borderWidth: 1.5, borderColor: ACCENT,
     backgroundColor: 'rgba(74,158,191,0.08)',
-    alignItems: 'center', justifyContent: 'center', marginRight: 16,
+    alignItems: 'center', justifyContent: 'center', marginRight: 12,
+    flexShrink: 0,
   },
-  rankText: { fontFamily: F.heading, fontSize: 17, color: ACCENT, letterSpacing: 1 },
-  rowMain: { flex: 1, gap: 6 },
-  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  rankText: { fontFamily: F.heading, fontSize: 14, color: ACCENT, letterSpacing: 1 },
+  rowMain: { flex: 1, minWidth: 0, gap: 6 },
+  nameRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   name: {
     flexShrink: 1,
-    fontFamily: F.heading, fontSize: 24, color: '#E8F4FF',
-    letterSpacing: 2, textTransform: 'uppercase',
+    fontFamily: F.heading, fontSize: 18, color: '#E8F4FF',
+    letterSpacing: 1.2, textTransform: 'uppercase',
+  },
+  // Line two: timestamp on the left, badge pinned to the right. The timestamp
+  // shrinks, the badge never does.
+  metaRow: {
+    flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between', gap: 8,
   },
   // The same red "you owe this" marker used on the dashboard bell.
   dot: {
-    width: 9, height: 9, borderRadius: 5, backgroundColor: ALERT,
+    width: 7, height: 7, borderRadius: 3.5, flexShrink: 0, backgroundColor: ALERT,
     shadowColor: ALERT, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.9, shadowRadius: 6,
   },
-  meta: { fontFamily: F.bodyMed, fontSize: 15, color: '#4a6a8a', letterSpacing: 1.5 },
+  meta: { flexShrink: 1, fontFamily: F.bodyMed, fontSize: 12, color: '#4a6a8a', letterSpacing: 1 },
   badge: {
-    borderWidth: 1.5, borderColor: ALERT, borderRadius: 999,
+    flexShrink: 0,
+    borderWidth: 1.2, borderColor: ALERT, borderRadius: 999,
     backgroundColor: 'rgba(225,29,72,0.10)',
-    paddingHorizontal: 14, paddingVertical: 6,
+    paddingHorizontal: 10, paddingVertical: 3,
   },
-  badgeText: { fontFamily: F.heading, fontSize: 13, color: ALERT, letterSpacing: 1.5 },
-  chevron: { fontFamily: F.heading, fontSize: 28, color: ACCENT, marginLeft: 12, marginTop: -2 },
+  badgeText: { fontFamily: F.heading, fontSize: 10, color: ALERT, letterSpacing: 1 },
+  chevron: { fontFamily: F.heading, fontSize: 21, color: ACCENT, marginLeft: 9, marginTop: -2 },
 });

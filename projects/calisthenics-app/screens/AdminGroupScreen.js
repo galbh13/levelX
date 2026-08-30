@@ -4,7 +4,6 @@ import {
 } from 'react-native';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
-import { CARD_H, CARD_W } from '../constants/layout';
 import { supabase } from '../lib/supabase';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
@@ -221,7 +220,7 @@ export default function AdminGroupScreen({ navigation, route }) {
   }
 
   return (
-    <ScreenFrame maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <View style={styles.card} {...swipe.panHandlers}>
         <ScreenHeader
           title={group?.name ?? 'GROUP'}
@@ -530,7 +529,7 @@ export default function AdminGroupScreen({ navigation, route }) {
 }
 
 const styles = StyleSheet.create({
-  card: { height: CARD_H },
+  card: { flex: 1 },
   body: { flex: 1, paddingHorizontal: 24, paddingTop: 18, paddingBottom: 26 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   muted: { fontFamily: F.bodyMed, fontSize: 15, color: '#5a7a9a', letterSpacing: 0.6 },

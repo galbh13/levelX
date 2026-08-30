@@ -1,6 +1,5 @@
 import { View, Text, StyleSheet } from 'react-native';
 import { F } from '../constants/fonts';
-import { CARD_H, CARD_W } from '../constants/layout';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 
@@ -11,7 +10,7 @@ const PURPLE = '#A66BFF';
 
 export default function SystemScreen({ navigation }) {
   return (
-    <ScreenFrame maxWidth={CARD_W} ready>
+    <ScreenFrame ready>
       <View style={styles.card}>
         <ScreenHeader title="THE SYSTEM" onBack={() => navigation.goBack()} />
         <View style={styles.body}>
@@ -26,7 +25,7 @@ export default function SystemScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  card: { height: CARD_H },
+  card: { flexGrow: 1 },
   body: { flex: 1, paddingHorizontal: 24, paddingTop: 18, paddingBottom: 26 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 14 },
   title: {

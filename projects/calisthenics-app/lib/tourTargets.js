@@ -1,4 +1,24 @@
 import { useCallback, useEffect, useRef } from 'react';
+import { Platform } from 'react-native';
+import { NATIVE_SCALE } from '../constants/layout';
+
+// ── ANDROID measureInWindow LIES ABOUT SIZE — CRITICAL ───────────────────────
+// Android's implementation (NativeViewHierarchyManager.measureInWindow) reports
+// POSITION through the ancestor transform — `view.getLocationInWindow()`, which
+// honours ScaledRoot's 0.72 scale — but SIZE as the RAW layout box,
+// `view.getWidth()` / `getHeight()`, with no transform applied at all.
+// Every element the tour points at lives inside ScaledRoot, so its measurement
+// comes back with a CORRECT top-left and a size 1/0.72 ≈ 39% too big. Anchored
+// at that correct corner, the highlight then spilled right off the card and down
+// over the panel BELOW the one it meant to box (TODAY'S MISSIONS swallowing
+// DAILY QUESTS; YOUR CLASS swallowing the LVL line).
+// So every size that comes out of measureInWindow for an in-app element is
+// converted to visual px here, at the source — that way the highlight AND the
+// scroll-into-view math below both work in ONE coordinate space.
+// iOS is untouched: its measureInWindow goes through `convertRect:toView:`,
+// which transforms the size correctly. Web goes through getBoundingClientRect,
+// which already reflects the zoom.
+const M_SCALE = Platform.OS === 'android' ? NATIVE_SCALE : 1;
 
 // ── Tour target registry ─────────────────────────────────────────────────────
 // Screens tag the real elements the guided tour points at (e.g. the LEVEL card,
@@ -34,7 +54,9 @@ export function measureTourTarget(name) {
     try {
       node.measureInWindow((x, y, w, h) => {
         if ((w || 0) <= 0 && (h || 0) <= 0) { resolve(null); return; }
-        resolve({ x, y, w, h });
+        // Size → visual px (see the M_SCALE note at the top). x/y are already
+        // correct; only w/h come back untransformed on Android.
+        resolve({ x, y, w: w * M_SCALE, h: h * M_SCALE });
       });
     } catch {
       resolve(null);
@@ -42,7 +64,19 @@ export function measureTourTarget(name) {
   });
 }
 
-// Callback ref for a screen element: `ref={useTourTarget('home.level')}`.
+// Callback ref for a screen element:
+//   `ref={useTourTarget('home.level')} collapsable={false}`
+//
+// **ALWAYS pass `collapsable={false}`.** Android's view flattening removes any
+// `<View>` that only carries layout props — a ref does NOT keep it alive. The
+// ref then resolves to the nearest surviving ancestor, so the element measures
+// as its PARENT (or not at all) and the tour highlights the wrong box. A tagged
+// element must be a real native view. ScrollViews and Touchables are already
+// native and don't need it.
+//
+// The second rule: tag EVERY branch that can render the thing. A row with a
+// "live" variant (HomeScreen's in-progress mission) needs the tag on both, or
+// the step silently falls back to a circle in empty space.
 export function useTourTarget(name) {
   const mine = useRef(null);
   useEffect(() => () => unregisterTourTarget(name, mine.current), [name]);
@@ -93,7 +127,9 @@ export function useTourScroller(key, api) {
 function measureWindow(node) {
   return new Promise((resolve) => {
     if (!node || typeof node.measureInWindow !== 'function') { resolve(null); return; }
-    try { node.measureInWindow((x, y, w, h) => resolve({ x, y, w, h })); }
+    // Same size correction as measureTourTarget — this box IS the scroll
+    // container inside ScaledRoot, and `revealTourTarget` divides by its height.
+    try { node.measureInWindow((x, y, w, h) => resolve({ x, y, w: w * M_SCALE, h: h * M_SCALE })); }
     catch { resolve(null); }
   });
 }

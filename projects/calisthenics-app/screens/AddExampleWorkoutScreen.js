@@ -374,7 +374,7 @@ export default function AddExampleWorkoutScreen({ route, navigation }) {
   ));
 
   return (
-    <ScreenFrame maxWidth={920}>
+    <ScreenFrame>
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}>

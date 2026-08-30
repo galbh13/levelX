@@ -5,7 +5,6 @@ import {
 } from 'react-native';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
-import { CARD_W } from '../constants/layout';
 import { supabase } from '../lib/supabase';
 import ScreenFrame from '../components/ScreenFrame';
 import PillButton from '../components/PillButton';
@@ -146,7 +145,7 @@ export default function CommunityChatScreen({ navigation, route }) {
   }
 
   return (
-    <ScreenFrame fill maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <KeyboardAvoidingView
         style={styles.card}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}

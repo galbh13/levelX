@@ -1,178 +1,107 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { useFocusEffect } from '@react-navigation/native';
 import {
-  View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator,
+  View, Text, StyleSheet, ScrollView,
 } from 'react-native';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
-import { CARD_H, CARD_W } from '../constants/layout';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
-import { supabase } from '../lib/supabase';
-import { latestCoachMessage } from '../lib/community';
 import { useTourTarget } from '../lib/tourTargets';
 
-// The System accent — purple.
-const SYSTEM_PURPLE = '#A66BFF';
-// Coach accent — emerald jade. A cool 'guide/mentor' green.
-const COACH_JADE = '#1FD79A';
+// ─── THE SYSTEM (player tab) ────────────────────────────────────────────────
+// Everything OUTSIDE the training itself — the coaching that runs alongside the
+// programme. Five pillars, one node each. The tab was PERSONAL until 2026-08-26;
+// the route is still named `Personal` internally (the tab bar, the guided tour
+// and every `navigate('Personal')` call key off that name), only the label the
+// player reads changed. Its old single "THE SYSTEM" card became the screen.
+//
+// The nodes are DELIBERATELY inert for now — there is nothing behind them yet.
+// They are plain Views, not Pressables, so a tap doesn't promise a page that
+// isn't there. Give one a screen and it becomes a Pressable with an onPress.
 
-// ─── Personal tab (player) ──────────────────────────────────────────────────
-// The player's private space: a direct line to the coach, and The System
-// (placeholder until that feature lands). The community/groups idea was dropped
-// (2026-08-23) — that conversation happens outside the app.
-export default function PersonalScreen({ navigation }) {
-  const [meId, setMeId] = useState(null);
-  const [coachPreview, setCoachPreview] = useState(null); // newest coach-chat message (or null)
-  const [loading, setLoading] = useState(true);
-  const loadedRef = useRef(false);
-  // Elements the guided tour measures + points its arrow at.
-  const tourCoachRef  = useTourTarget('personal.coach');
+// One accent per pillar. Spread across the system palette so the five read as
+// distinct at a glance, staying inside the neon-on-near-black language: indigo
+// and cyan for the physical pillars, jade for fuel, amber for the human one,
+// and the house purple for the mind.
+const PILLARS = [
+  { key: 'sleep',     name: 'SLEEP',     color: '#6C7BFF' },  // indigo
+  { key: 'nutrition', name: 'NUTRITION', color: '#1FD79A' },  // jade
+  { key: 'recovery',  name: 'RECOVERY',  color: '#35D6E8' },  // cyan
+  { key: 'socialize', name: 'SOCIALIZE', color: '#FFA94D' },  // amber
+  { key: 'mentality', name: 'MENTALITY', color: '#A66BFF' },  // purple
+];
+
+export default function PersonalScreen() {
+  // Element the guided tour measures + points its arrow at. It sits on the first
+  // pillar now that the old single card is gone.
   const tourSystemRef = useTourTarget('personal.system');
 
-  const load = useCallback(async () => {
-    if (!loadedRef.current) setLoading(true);
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      const me = user?.id ?? null;
-      setMeId(me);
-      setCoachPreview(me ? await latestCoachMessage(me) : null);
-    } catch (e) {
-      console.error('[PersonalScreen] load:', e);
-    }
-    loadedRef.current = true;
-    setLoading(false);
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
-  useFocusEffect(useCallback(() => {
-    if (loadedRef.current) load();
-  }, [load]));
-
   return (
-    <ScreenFrame maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill>
       <View style={styles.card}>
-        <ScreenHeader title="PERSONAL" subtitle="YOUR SPACE" />
+        <ScreenHeader title="THE SYSTEM" />
 
         <View style={styles.body}>
-          {loading ? (
-            <View style={styles.center}>
-              <ActivityIndicator size="large" color={C.deepBlue} />
-            </View>
-          ) : (
-            <ScrollView showsVerticalScrollIndicator={false}>
-              {/* The coach is pinned at the top — the direct line, always there. */}
-              <View ref={tourCoachRef}>
-                <CoachCard
-                  preview={coachPreview}
-                  meId={meId}
-                  onPress={() => navigation.navigate('CoachChat')}
-                />
-              </View>
-
-              {/* The System — purple accent. Placeholder page for now. */}
-              <Pressable
-                ref={tourSystemRef}
-                style={styles.systemCard}
-                onPress={() => navigation.navigate('System')}
+          <ScrollView showsVerticalScrollIndicator={false}>
+            {PILLARS.map((p, i) => (
+              <View
+                key={p.key}
+                ref={i === 0 ? tourSystemRef : undefined}
+                style={[styles.pillarCard, { borderColor: tint(p.color, 0.45), shadowColor: p.color }]}
               >
-                <View style={styles.systemHandle} />
+                <View style={[styles.pillarHandle, { backgroundColor: p.color, shadowColor: p.color }]} />
                 <View style={styles.cardText}>
-                  <Text style={styles.systemName}>THE SYSTEM</Text>
-                  <Text style={styles.systemHint} numberOfLines={1}>Coming soon</Text>
+                  <Text style={[styles.pillarName, { color: p.color, textShadowColor: tint(p.color, 0.4) }]}>
+                    {p.name}
+                  </Text>
                 </View>
-                <Text style={styles.systemChevron}>›</Text>
-              </Pressable>
-            </ScrollView>
-          )}
+                <Text style={[styles.pillarChevron, { color: p.color }]}>›</Text>
+              </View>
+            ))}
+          </ScrollView>
         </View>
       </View>
     </ScreenFrame>
   );
 }
 
-// ─── Coach card ─────────────────────────────────────────────────────────────
-// Shows a preview of the newest message (or a prompt when the chat is empty).
-function CoachCard({ preview, meId, onPress }) {
-  const previewText = preview
-    ? `${preview.sender_id === meId ? 'You' : 'COACH'}: ${preview.body}`
-    : 'Message your coach directly.';
-  return (
-    <Pressable onPress={onPress} style={styles.coachCard}>
-      <View style={styles.coachHandle} />
-      <View style={styles.cardText}>
-        <Text style={styles.coachName}>COACH</Text>
-        <Text style={styles.coachPreview} numberOfLines={1}>{previewText}</Text>
-      </View>
-      <Text style={styles.coachChevron}>›</Text>
-    </Pressable>
-  );
+// #RRGGBB → rgba() at the given alpha, so each pillar's border and text glow are
+// derived from its ONE accent instead of hand-written twice.
+function tint(hex, alpha) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
 }
 
 const styles = StyleSheet.create({
-  card: { height: CARD_H },
+  card: { flex: 1 },
   body: { flex: 1, paddingHorizontal: 24, paddingTop: 18, paddingBottom: 26 },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 14 },
 
-  // Coach card — emerald-jade accent, pinned at the top of the list.
-  coachCard: {
+  // One pillar node. Colour comes from PILLARS at render time; everything that
+  // is the same for all five lives here.
+  pillarCard: {
     flexDirection: 'row',
     alignItems: 'center',
     borderRadius: 14,
     borderWidth: 1,
-    borderColor: 'rgba(31,215,154,0.45)',
     backgroundColor: C.surface,
     paddingVertical: 20,
     paddingLeft: 20,
     paddingRight: 18,
     gap: 18,
     marginBottom: 14,
-    shadowColor: COACH_JADE, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.22, shadowRadius: 12,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
   },
-  coachHandle: {
+  pillarHandle: {
     width: 4, height: 40, borderRadius: 2,
-    backgroundColor: COACH_JADE,
-    shadowColor: COACH_JADE, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.8, shadowRadius: 8,
+    shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.75, shadowRadius: 8,
   },
-  coachName: {
-    fontFamily: F.heading, fontSize: 22, color: COACH_JADE,
+  pillarName: {
+    fontFamily: F.heading, fontSize: 22,
     letterSpacing: 2, textTransform: 'uppercase',
-    textShadowColor: 'rgba(31,215,154,0.45)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
+    textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
   },
-  coachPreview: {
-    fontFamily: F.bodyMed, fontSize: 14, color: '#5a7a9a', letterSpacing: 0.4,
-  },
-  coachChevron: { fontFamily: F.heading, fontSize: 28, color: COACH_JADE, marginLeft: 2 },
+  pillarChevron: { fontFamily: F.heading, fontSize: 28, marginLeft: 2 },
 
-  // The System card — purple accent. Placeholder for now.
-  systemCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: 'rgba(166,107,255,0.45)',
-    backgroundColor: C.surface,
-    paddingVertical: 20,
-    paddingLeft: 20,
-    paddingRight: 18,
-    gap: 18,
-    marginBottom: 14,
-    shadowColor: SYSTEM_PURPLE, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.2, shadowRadius: 12,
-  },
-  systemHandle: {
-    width: 4, height: 40, borderRadius: 2,
-    backgroundColor: SYSTEM_PURPLE,
-    shadowColor: SYSTEM_PURPLE, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.75, shadowRadius: 8,
-  },
-  systemName: {
-    fontFamily: F.heading, fontSize: 22, color: SYSTEM_PURPLE,
-    letterSpacing: 2, textTransform: 'uppercase',
-    textShadowColor: 'rgba(166,107,255,0.4)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
-  },
-  systemHint: {
-    fontFamily: F.bodyMed, fontSize: 14, color: '#8a7ab0', letterSpacing: 0.4,
-  },
-  systemChevron: { fontFamily: F.heading, fontSize: 28, color: SYSTEM_PURPLE, marginLeft: 2 },
-
-  cardText: { flex: 1, gap: 6 },
+  cardText: { flex: 1 },
 });

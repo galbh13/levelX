@@ -60,6 +60,44 @@ npx supabase secrets set \
 
 (Or set the same four in the dashboard: Project → Edge Functions → Secrets.)
 
+### The optional links — set each when the thing behind it exists
+
+The welcome email has three buttons that are **deliberately dead** until you set
+their secret. While unset, each renders as a dashed `· SOON` chip rather than a
+link that 404s. Setting the secret turns it into a live button — no code change.
+
+| Secret | Button | What it points at |
+|---|---|---|
+| `PLAY_URL` | ANDROID | The Google Play listing |
+| `IOS_URL` | IPHONE | The App Store listing |
+| `AGREEMENT_URL` | DOWNLOAD THE AGREEMENT | The coaching agreement / terms of service (host the PDF anywhere public) |
+| `ONBOARDING_URL` | SCHEDULE AN ONBOARDING CALL | A booking page. **Already works unset** — it falls back to the coach's WhatsApp with the message pre-typed |
+
+```bash
+npx supabase secrets set \
+  PLAY_URL="https://play.google.com/store/apps/details?id=com.levelx.app" \
+  IOS_URL="https://apps.apple.com/app/id0000000000" \
+  AGREEMENT_URL="https://.../the-system-agreement.pdf"
+
+npx supabase functions deploy invite-player   # secrets are read at boot
+```
+
+The two WhatsApp community invite links are NOT secrets — they are constants at
+the top of `invite-player/index.ts` (`WHATSAPP_GROUPS`), rendered as the two
+join buttons near the bottom of the welcome email. Reset a link in WhatsApp
+(Group info → Invite via link → Reset) and you edit that constant and redeploy.
+
+### Previewing the email
+
+The mail itself is `invite-player/welcome-email.ts`, a pure builder with no env
+and no network, so it renders locally with nothing configured:
+
+```bash
+cd supabase/functions/invite-player
+node preview.mjs            # → preview.html + preview.txt (gitignored)
+node preview.mjs --stores    # with both store links live
+```
+
 ## 4. Deploy
 
 ```bash

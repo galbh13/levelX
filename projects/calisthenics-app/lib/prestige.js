@@ -16,6 +16,9 @@
 //                        completed. For a class whose side quests carry no
 //                        cross-chain gate, so there is no Tier 2 to ask for.
 //                        Upgrade chains never count (see lib/questUpgrades.js).
+//   5. sideQuests       — SPECIFIC side-quest nodes, named the same way main
+//                        nodes are ({ chain, name }). For a class that gates on
+//                        one particular side quest rather than "any one".
 //
 // Config is keyed FIRST by `job` (a job is a self-contained class ladder — see
 // migration 20260714_jobs.sql), THEN by class `order_index` (0 = Class I, …).
@@ -126,9 +129,13 @@ export const PRESTIGE_REQUIREMENTS = {
     // branch converges on it, so clearing it means the whole quest is cleared —
     // one line in the checklist instead of eight.
     //
-    // The side rule here is ANY side quest, not a Tier-2 one: Class III's side
-    // quests (SEVEN / MEXICAN HANDSTAND / TIGERBAND) sit side by side with no
-    // cross-chain gate between them, so there is no Tier 2 to ask for.
+    // The side rule here is not "any one side quest" but SEVEN specifically —
+    // it is a must for the class. SEVEN runs as two parallel branches (FULL
+    // HOLD / ONE LEG) that never converge, so clearing it means clearing the
+    // LAST node of each branch: 'Full 7 hold — 15 sec' and 'One leg 7 — 7 rep
+    // each'. Each branch tip is gated by every node beneath it, so those two
+    // stand for the whole quest — and they are counted, not listed: the panel
+    // shows one clean line, "Complete the SEVEN side quest · 1 / 2".
     2: {
       mainQuests: {
         nodes: [
@@ -137,7 +144,13 @@ export const PRESTIGE_REQUIREMENTS = {
           { chain: 'shapes',        name: '6 Tuck + 6 Straddle' },
         ],
       },
-      requireAnySide: true,
+      sideQuests: {
+        label: 'Complete the SEVEN side quest',
+        nodes: [
+          { chain: 'seven', name: 'Full 7 hold — 15 sec' },
+          { chain: 'seven', name: 'One leg 7 — 7 rep each' },
+        ],
+      },
     },
   },
 };
@@ -172,6 +185,25 @@ function findNode(quests, chain, name) {
   const n = norm(name);
   return quests.find(
     q => isMainFacing(q) && norm(q.chain) === c && norm(q.name) === n,
+  );
+}
+
+/**
+ * The SIDE quest matching a { chain, name } requirement, or undefined.
+ *
+ * Side chains are seeded live and their slugs drift more than their names do
+ * (the DB has diverged from the migrations), so the chain is a HINT: an exact
+ * (chain, name) match wins, and a name-only match among side quests is the
+ * fallback. Node names inside a class are unique enough for that to be safe,
+ * and it keeps the requirement working if the chain is slugged differently.
+ */
+function findSideNode(quests, chain, name) {
+  const c = norm(chain);
+  const n = norm(name);
+  const sides = quests.filter(q => q.quest_type === 'side' && !isUpgradeChain(q.chain));
+  return (
+    sides.find(q => norm(q.chain) === c && norm(q.name) === n) ??
+    sides.find(q => norm(q.name) === n)
   );
 }
 
@@ -334,6 +366,24 @@ function checkAnySide(quests, completedIds) {
   return { ok: completedChains > 0, completedChains, totalChains: chains.length };
 }
 
+// Returns { ok, done, total } for a `sideQuests` spec: specific side nodes,
+// counted but NOT listed. The nodes here are branch TIPS — reaching one means
+// the whole branch beneath it is done — so naming them adds nothing the single
+// line "Complete the SEVEN side quest · 1 / 2" doesn't already say, and the
+// requirement reads cleaner as one line. A node the class doesn't carry counts
+// as unmet rather than being silently dropped: an unmatched requirement must
+// never read as satisfied.
+function checkSideNodes(spec, quests, completedIds) {
+  const nodes = spec.nodes ?? [];
+  const done  = nodes.filter(({ chain, name }) => {
+    const match = findSideNode(quests, chain, name);
+    return !!match && completedIds.has(match.id);
+  }).length;
+
+  const total = nodes.length;
+  return { ok: total > 0 && done === total, done, total };
+}
+
 // ─── Evaluator ──────────────────────────────────────────────────────────────
 //
 // Pure: takes everything it needs, returns { ok, checks }. `checks` is an
@@ -395,6 +445,17 @@ export function evaluatePrestige({ job = 'static', orderIndex, quests, completed
       label:  'Complete 1 side quest',
       ok,
       detail: totalChains > 0 ? `${completedChains} / 1` : '—',
+    });
+  }
+
+  // 5. Specific side-quest nodes (e.g. handstand Class III must clear SEVEN).
+  if (req.sideQuests) {
+    const { ok, done, total } = checkSideNodes(req.sideQuests, quests, completedIds);
+    checks.push({
+      key:    'sideNodes',
+      label:  req.sideQuests.label ?? 'Complete the required side quest',
+      ok,
+      detail: `${done} / ${total}`,
     });
   }
 

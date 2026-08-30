@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../lib/supabase';
+import { uploadAssetToBucket, videoMeta } from '../lib/storageUpload';
 import { F } from '../constants/fonts';
 import ScreenFrame from '../components/ScreenFrame';
 
@@ -82,26 +83,15 @@ export default function AddExerciseScreen({ navigation, route }) {
     setUploading(true);
 
     try {
-      // Fetch the file as a blob (works on web and native)
-      const response = await fetch(asset.uri);
-      const blob = await response.blob();
-
-      const ext = (asset.uri.split('.').pop() ?? 'mp4').toLowerCase().split('?')[0];
+      // Streams the file off the device — a fetched Blob carries no bytes in JS
+      // on native, so the old blob upload failed on the APK.
+      const { ext, contentType } = videoMeta(asset.uri);
       const filename = `${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
       const path = `exercises/${filename}`;
 
-      const { error: uploadError } = await supabase.storage
-        .from('exercise-videos')
-        .upload(path, blob, {
-          contentType: blob.type || `video/${ext}`,
-          upsert: false,
-        });
-
-      if (uploadError) throw uploadError;
-
-      const { data: { publicUrl } } = supabase.storage
-        .from('exercise-videos')
-        .getPublicUrl(path);
+      const publicUrl = await uploadAssetToBucket('exercise-videos', path, asset, {
+        contentType, upsert: false, sizeLabel: 'clip',
+      });
 
       setVideoUrl(publicUrl);
     } catch (e) {
@@ -159,7 +149,7 @@ export default function AddExerciseScreen({ navigation, route }) {
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
-    <ScreenFrame maxWidth={920}>
+    <ScreenFrame>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.back}>
           <Text style={styles.backText}>← BACK</Text>

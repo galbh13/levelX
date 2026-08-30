@@ -88,7 +88,7 @@ export async function invitePlayer({ email, fullName, phone, birthday }) {
  * the edge function re-checks the caller's role and refuses to touch the caller
  * or any other admin.
  *
- * This wipes EVERYTHING that hangs off the player (check-ups, chat, workouts,
+ * This wipes EVERYTHING that hangs off the player (check-ups, workouts,
  * community rows, billing and payments) via the `on delete cascade` chain from
  * auth.users → profiles → every player-scoped table. That is the point for a
  * tester or a blow-in — they stop counting in the BUSINESS screen — and the

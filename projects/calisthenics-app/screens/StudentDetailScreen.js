@@ -12,7 +12,6 @@ import { computeLvl } from '../lib/computeLvl';
 import { categoryMeta } from '../lib/workouts';
 import ScreenFrame from '../components/ScreenFrame';
 import PillButton from '../components/PillButton';
-import { CARD_H, CARD_W } from '../constants/layout';
 import { forgeP, SWIPE_MS } from '../lib/forgeSwipe';
 
 // Off-program ACCESSORIES / LEGS workouts glow in their type color; the dated
@@ -213,7 +212,7 @@ export default function StudentDetailScreen({ navigation, route }) {
 
   if (!student) {
     return (
-      <ScreenFrame maxWidth={CARD_W} holoEntry={false}>
+      <ScreenFrame holoEntry={false}>
         <View style={{ paddingVertical: 120, alignItems: 'center', gap: 16 }}>
           <Text style={{ fontFamily: F.body, color: SL.text, fontSize: 14, letterSpacing: 1 }}>
             No student selected.
@@ -225,7 +224,7 @@ export default function StudentDetailScreen({ navigation, route }) {
   }
 
   return (
-    <ScreenFrame maxWidth={CARD_W} ready={!loading} holoEntry={false} ghost={cameFromForge}>
+    <ScreenFrame fill ready={!loading} holoEntry={false} ghost={cameFromForge}>
       <View style={styles.card}>
       {/* Hero header — matches the Workouts screen: white shining name + LVL · CLASS.
           In the forge flow the hero TEXT is hidden (opacity 0, layout preserved):
@@ -385,7 +384,7 @@ export default function StudentDetailScreen({ navigation, route }) {
 
 const styles = StyleSheet.create({
   // Fixed card height so the frame is the same size regardless of data/loading.
-  card: { height: CARD_H },
+  card: { flex: 1 },
   // Hero text wrapper — keeps the header's centering; in the forge flow it's
   // invisible (opacity 0, layout preserved) so the identical Workouts hero
   // underneath shows through and reads as one unmoving element.

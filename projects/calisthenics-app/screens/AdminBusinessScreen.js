@@ -11,7 +11,6 @@ import {
 import { fetchEngagement, riskScore, RISK_COLORS, RISK_LABELS } from '../lib/engagement';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
-import { CARD_W } from '../constants/layout';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
@@ -145,7 +144,7 @@ export default function AdminBusinessScreen({ navigation }) {
   }
 
   return (
-    <ScreenFrame fill maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <View style={styles.card}>
         <ScreenHeader
           title="BUSINESS"
@@ -153,7 +152,7 @@ export default function AdminBusinessScreen({ navigation }) {
           onBack={() => navigation.goBack()}
           right={
             <PillButton
-              label="PLANS · SETTINGS"
+              label="PLANS"
               size="sm"
               onPress={() => navigation.navigate('BillingPlans')}
             />
@@ -288,23 +287,26 @@ function CustomerRow({ row, onPress }) {
 
   return (
     <Pressable onPress={onPress} style={[styles.row, churned && styles.rowDim]}>
-      <View style={styles.rowMain}>
-        <Text style={styles.rowName} numberOfLines={1}>{player.full_name || player.email || '(no name)'}</Text>
-        <View style={styles.rowChips}>
-          {billing ? (
-            <Chip
-              label={labelOf(STATUSES, billing.status, billing.status)}
-              color={STATUS_COLOR[billing.status] ?? BIZ.muted}
-            />
-          ) : (
-            <Chip label="NOT SET UP" color={BIZ.muted} />
-          )}
-          {plan ? <Chip label={plan.name} color={m.free ? BIZ.muted : BIZ.accent} /> : null}
-          {billing && !churned ? (
-            <Chip label={RISK_LABELS[risk.band]} color={RISK_COLORS[risk.band]} />
-          ) : null}
-          {owes ? <Chip label={`OWES ${bagText(m.outstanding)}`} color={BIZ.alert} solid /> : null}
+      <View style={styles.rowTop}>
+        <View style={styles.rowMain}>
+          <Text style={styles.rowName} numberOfLines={1}>{player.full_name || player.email || '(no name)'}</Text>
+          <View style={styles.rowChips}>
+            {billing ? (
+              <Chip
+                label={labelOf(STATUSES, billing.status, billing.status)}
+                color={STATUS_COLOR[billing.status] ?? BIZ.muted}
+              />
+            ) : (
+              <Chip label="NOT SET UP" color={BIZ.muted} />
+            )}
+            {plan ? <Chip label={plan.name} color={m.free ? BIZ.muted : BIZ.accent} /> : null}
+            {billing && !churned ? (
+              <Chip label={RISK_LABELS[risk.band]} color={RISK_COLORS[risk.band]} />
+            ) : null}
+            {owes ? <Chip label={`OWES ${bagText(m.outstanding)}`} color={BIZ.alert} solid /> : null}
+          </View>
         </View>
+        <Text style={styles.chevron}>›</Text>
       </View>
 
       <View style={styles.rowStats}>
@@ -313,7 +315,6 @@ function CustomerRow({ row, onPress }) {
         <RowStat label="DAYS" value={billing?.started_at ? String(m.days) : '—'} />
         <RowStat label="AVG/MO" value={bagText(m.avgPerMonth)} />
       </View>
-      <Text style={styles.chevron}>›</Text>
     </Pressable>
   );
 }
@@ -376,22 +377,29 @@ const styles = StyleSheet.create({
   filterText: { fontFamily: F.heading, fontSize: 12, letterSpacing: 1.6, color: BIZ.muted },
   filterTextOn: { color: BIZ.text },
 
+  // The card stacks: identity + chevron on top, the four stats on their own
+  // full-width line beneath. Side by side never fit on a phone — four stats each
+  // with a minWidth pushed AVG/MO past the card edge and under the chevron.
   row: {
-    flexDirection: 'row', alignItems: 'center', gap: 14,
     borderWidth: 1, borderColor: BIZ.border, borderRadius: 14,
     backgroundColor: BIZ.panel,
     paddingVertical: 14, paddingHorizontal: 16, marginBottom: 10,
   },
   rowDim: { opacity: 0.55 },
-  rowMain: { flex: 1.6, minWidth: 0, gap: 8 },
+  rowTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  rowMain: { flex: 1, minWidth: 0, gap: 8 },
   rowName: {
     fontFamily: F.heading, fontSize: 17, color: BIZ.text,
     letterSpacing: 1.2, textTransform: 'uppercase',
   },
   rowChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
 
-  rowStats: { flexDirection: 'row', flex: 2, gap: 10 },
-  rowStat: { flex: 1, minWidth: 62 },
+  rowStats: {
+    flexDirection: 'row', gap: 8, marginTop: 12,
+    paddingTop: 12, borderTopWidth: 1, borderTopColor: BIZ.border,
+  },
+  // minWidth:0 + flexShrink lets a long value squeeze instead of overflowing.
+  rowStat: { flex: 1, minWidth: 0, flexShrink: 1 },
   rowStatLabel: { fontFamily: F.heading, fontSize: 10, letterSpacing: 1.4, color: BIZ.muted },
   rowStatValue: { fontFamily: F.body, fontSize: 15, color: BIZ.text, marginTop: 3 },
 

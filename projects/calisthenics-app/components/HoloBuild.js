@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, Fragment } from 'react';
 import { View, StyleSheet, Animated } from 'react-native';
 import { C } from '../constants/colors';
-import { playHologram } from '../lib/glitchSound';
+import { playHologram } from '../lib/uiSound';
+import { notifyHoloStart } from '../lib/holoEntry';
 
 // The "hologram build" entrance, sized in PERCENTAGES so it fills exactly the
 // box it's dropped into (the card). Horizontal slices cover the card with the
@@ -36,6 +37,8 @@ export default function HoloBuild({ ready = true }) {
     const t = setTimeout(() => {
       started.current = true;
       playHologram();
+      // Companions outside the card (the player tab bar) rise on this beat.
+      notifyHoloStart();
       Animated.parallel(
         strips.map((s) => Animated.sequence([Animated.delay(s.delay), seg(s.v, 1, 150)]))
       ).start();
