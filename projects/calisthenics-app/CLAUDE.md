@@ -1499,6 +1499,13 @@ title sequence plays on every cold start.
   floating "✦ CLASS GATE ✦" gold crown ribbon above them + a breathing gold halo
   (the `gate` clock in QuestNode), so they read as prestige milestones rather than
   ordinary nodes. One shared refcounted clock.)
+  Also `DonePulse` — the idle life of a row that's already cleared: one slow edge
+  glow (3.4s, low amplitude) in the row's own colour, no travel. It is the COLD
+  end of `LiveMissionCard`'s hot pulse (1.05s + a 1.9s sweep) on purpose —
+  **speed is how the board says live vs. done**, read before any word is. Never
+  make it faster or brighter than the live card. One shared refcounted clock (the
+  `Shimmer.js` pattern) drives every instance, so a board of cleared rows is one
+  native loop, all breathing in unison.
   Also `ClearSweep` — the "cleared" beat on a tickable row (HomeScreen's missions
   + daily quests): a bright bar in the row's own colour scanning across it, plus a
   brief wash. It plays ONLY on the false→true flip (a `prev` ref), so a board that

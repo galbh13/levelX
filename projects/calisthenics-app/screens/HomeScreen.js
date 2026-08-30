@@ -16,6 +16,7 @@ import { ShimmerText, ShimmerFill, GOLD } from '../components/Shimmer';
 import ScreenFrame, { FRAME_PAD } from '../components/ScreenFrame';
 import PopCheck from '../components/PopCheck';
 import ClearSweep from '../components/ClearSweep';
+import DonePulse from '../components/DonePulse';
 import QuestGate from '../components/QuestGate';
 import { hapticTap } from '../lib/haptics';
 import { CARD_W } from '../constants/layout';
@@ -777,6 +778,8 @@ export default function HomeScreen({ navigation }) {
                           <PopCheck><Text style={styles.missionCheckMark}>✓</Text></PopCheck>
                         )}
                       </TouchableOpacity>
+                      {/* Cleared: a slow cold breath (vs. the live card's hot pulse). */}
+                      <DonePulse active={workout.completed} color={tc || SL.accent} />
                       {/* The scan that confirms it — plays on the tick, then unmounts. */}
                       <ClearSweep done={workout.completed} color={tc || SL.accent} />
                     </TouchableOpacity>
@@ -819,6 +822,7 @@ export default function HomeScreen({ navigation }) {
                       <Text style={[styles.dqTitle, done && styles.dqTitleDone]} numberOfLines={2}>
                         {q.title}
                       </Text>
+                      <DonePulse active={done} color={SL.accent} />
                       <ClearSweep done={done} color={SL.accent} />
                     </TouchableOpacity>
                   );
