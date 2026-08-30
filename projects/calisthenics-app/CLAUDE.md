@@ -32,9 +32,10 @@ exists.
 - **PHONE + BIRTHDAY are GLOBAL, and they live on `profiles` (2026-08-25).** One
   number and one date per player, typed at invite time — the one moment the coach
   has them in front of them — and shown everywhere they're needed. **The phone is
-  required and it is for WhatsApp**: the coach adds every new player to the
-  WhatsApp community by hand, so the success card repeats the number back under
-  the starter password ("PHONE · ADD TO WHATSAPP"). **The birthday is optional**
+  required and it is for WhatsApp**: it is the coach's line to the player, and
+  the success card repeats it back under the starter password. (Joining the
+  WhatsApp groups is no longer manual — see THE COMMUNITY below.) **The
+  birthday is optional**
   (`YYYY-MM-DD`) — it can be filled in later on the business card.
   · Stored normalized on `profiles.phone`: a leading `+` if typed, then digits
     only — the form WhatsApp wants pasted into a contact. Validation is
@@ -141,7 +142,7 @@ screens two ways, set when the admin taps a player on the roster:
   SkillsScreen forwards it to QuestTree. The hub's **CURRENT WEEK** button opens
   WorkoutsScreen with the param so the admin sees the player's real week (with their
   changes). (WorkoutsScreen no longer has a ▶ WORKOUT MODE button at all — the live
-  session is entered only through HomeScreen's portal, a device-local self-scoped
+  session is entered only through HomeScreen's quest gate, a device-local self-scoped
   flow not meaningful for an admin anyway.)
 - These screens are registered in BOTH the player navigators and the `AdminStack`
   (App.js) so they work from either entry.
@@ -359,14 +360,34 @@ mastered, add a player-specific question, etc.).
   [lib/checkups.js](lib/checkups.js)) → `{ source, items }`: a player's **own**
   (`player_id`) items if any exist, **else** their **class's** (`class_id`) items,
   else `source:'none'`. `splitTemplateParts(items)` → `{ questions, exercises }`.
-- **Customizing a player = materialize-then-edit** (same pattern as the schedule):
-  `materializePlayerTemplate(playerId, classId)` COPIES the class items onto the
-  player, then the admin edits/trims those; `resetPlayerTemplate(playerId)` deletes
+- **Customizing a player = EDIT IN PLACE, fork on first write (2026-08-29).**
+  `AdminCheckupScreen` always shows the ONE list that player fills in (their own
+  items, else the class standard they inherit) — there is no "customize" step and
+  no second structure on the page. The first add/edit/delete calls
+  `materializePlayerTemplate(playerId, classId)` under the hood (it COPIES the
+  class items onto the player), then applies that change to THEIR copy, so the
+  class standard is never edited by accident. `CheckupTemplateEditor` owns this
+  (`inherited` + `ensureOwnItems` + `mirrorOf`, which maps an inherited row to its
+  fresh copy by part + prompt) and reports `'player'|'class'|'none'` up through
+  `onSourceChange`. `resetPlayerTemplate(playerId)` deletes
   the player rows so they fall back to the class standard. Item CRUD:
   `addTemplateItem(scope, item)` / `updateTemplateItem` / `deleteTemplateItem`
   (`scope = { classId }` or `{ playerId }`).
 - Template items are the **standing definition** — NOT subject to the
   submission purge (only `checkups`/`checkup_answers`/`checkup_videos` are).
+- **Item ids are NOT stable, and three things key off them.** Forking a player's
+  template (and re-authoring a class) DELETES rows and inserts new ones, so
+  anything holding an item id has to survive the swap by NAME:
+  · uploaded clips — `bindVideosToExercises` + `repairVideoLinks` (rebinds and
+    writes the new link back);
+  · the player's UNSENT draft text — `remapDraftKeys` in
+    [lib/checkupDraft.js](lib/checkupDraft.js). The draft stores a `prompts`
+    map ({itemId: prompt}) beside the text, and `CheckupScreen` re-keys the draft
+    onto the freshly resolved items on every load. Without it, personalising a
+    player's check-up silently blanked everything they had typed but not sent.
+  · submitted answers — safe by construction: `checkup_answers` /
+    `checkup_videos` snapshot the `prompt` at submit, and the FK is
+    ON DELETE SET NULL.
 
 ### Screens
 - **`AdminCheckupTemplateScreen`** (new) — the **class-standard builder**, reached
@@ -399,14 +420,24 @@ mastered, add a player-specific question, etc.).
   `PlayerAdminScreen`) — three jobs on one screen: (1) the **CHECK-UP DAY** picker;
   (2) **review** the latest submitted check-up (THEIR ANSWERS + THEIR EXERCISES with
   clips/notes) and write `feedback_url` (+ `feedback_note`) → `SEND FEEDBACK`; (3)
-  **THIS PLAYER'S CHECK-UP** — a `CLASS STANDARD`/`CUSTOM` scope chip + `✎ CUSTOMIZE
-  FOR THIS PLAYER` (materialize) → the same `CheckupTemplateEditor` scoped
-  `{ playerId }`, with `↺ RESET TO CLASS STANDARD`. Needs the admin-override RLS in
+  **THIS PLAYER'S CHECK-UP** — the same `CheckupTemplateEditor`, scoped
+  `{ playerId, classId }`, showing the list that player actually fills in, always,
+  edited in place; a `CLASS STANDARD`/`PERSONAL` chip says which it currently is
+  and flips to PERSONAL on the first change. `↺ BACK TO CLASS STANDARD` (confirmed
+  via `SystemConfirm`) appears only once it IS personal.
+  **The section is READ-ONLY until the coach taps EDIT (2026-08-30).** He screen-
+  records himself walking a player through their check-up, so the per-row EDIT/✕,
+  the ADD buttons, the explainer and the reset button are all hidden behind the
+  editor's `editable` prop (a plain EDIT / green DONE `PillButton` beside the
+  chip); the clean view is a numbered list and nothing else, and it is what the
+  screen opens in every time. `AdminCheckupTemplateScreen` leaves `editable`
+  at its default `true` — authoring is its whole purpose. Needs the admin-override RLS in
   `migrations/20260714_checkups.sql` + `20260722_checkup_templates.sql`.
 - **Shared `components/CheckupTemplateEditor`** — the admin authoring surface used by
   BOTH admin screens: lists Part-1 questions + Part-2 exercises with add/edit/delete
   (a modal form; exercises also take a video URL + description). Scope-driven
-  (`{ classId }` or `{ playerId }`).
+  (`{ classId }`, or `{ playerId, classId }` — which resolves the inherited list
+  and forks it onto the player on the first write).
 - **Recurring check-up DAY (2026-07-19).** The check-up is on a **systematic weekly
   pattern**: the admin pins the player to a weekday (e.g. "every Tuesday") via the
   **CHECK-UP DAY** Sun–Sat pill picker at the top of `AdminCheckupScreen` (always
@@ -431,7 +462,15 @@ mastered, add a player-specific question, etc.).
   `context/CheckupNotifyContext.js` (`CheckupNotifyProvider` wraps the player
   root; `PlayerTabBar` reads `state`), refreshed on mount + a 60s poll, and
   `CheckupScreen` calls the context's `refresh()` right after a successful submit
-  so the dot **vanishes the moment the check-up is sent**. Migration
+  so the dot **vanishes the moment the check-up is sent**.
+  The same tab dot also carries **NEW FEEDBACK (2026-08-29)** — a **GOLD** dot when
+  the coach has replied and the player hasn't opened it yet. The context exposes
+  `feedbackUnseen` beside `state`; the dot's priority is LATE (red) → new feedback
+  (gold) → due (ice). "Read" is a LOCAL stamp — the `feedback_at` of the newest
+  reply the player has opened, in AsyncStorage
+  ([lib/checkupSeen.js](lib/checkupSeen.js): `hasUnseenFeedback` /
+  `markFeedbackSeen`) — so it needs no column; `CheckupScreen` stamps it on load,
+  because the feedback card is on that screen in every state. Migration
   `migrations/20260719_checkup_schedule.sql`. The screen's header is the shared
   `ScreenHeader` (title `WEEKLY CHECK-UP`), like every other player screen — the
   old bespoke ◆-flanked kicker and the "fill this in" intro blurb were removed
@@ -439,9 +478,15 @@ mastered, add a player-specific question, etc.).
 - **SPACE POLICY — ONE check-up per player, ever (2026-08-24).** The rule is
   **replace-on-submit**: the moment a player SUBMITS a new check-up,
   `purgePreviousCheckups(studentId, keepId)` in [lib/checkups.js](lib/checkups.js)
-  wipes every EARLIER check-up of theirs — clips, notes, answers and the coach's
-  feedback on it. There is no history; the current check-up lives exactly until the
-  next one replaces it. Called from `CheckupScreen`'s `handleSubmit` right after
+  wipes every EARLIER check-up of theirs — clips, notes and answers. There is no
+  history; the current check-up lives exactly until the next one replaces it.
+  **The coach's LATEST feedback is the one exception (2026-08-29):** that row is
+  EMPTIED (`stripCheckupContent` — clips + answers go, the feedback columns stay)
+  instead of deleted, and is exempt from the 14-day purge, so a player always has
+  their coach's last note + video link on screen — including while a newly sent
+  check-up waits for its own reply. `fetchLatestFeedback(studentId)` reads it;
+  `CheckupScreen` renders it as a standing COACH FEEDBACK card at the top of the
+  screen whenever the current check-up isn't itself the answered one. Called from `CheckupScreen`'s `handleSubmit` right after
   `submitted_at` is stamped. Re-submitting an EDITED check-up reuses the same row,
   so it's a no-op there (the current check-up can never delete itself).
   The **14-day `purgeExpiredCheckups()`** (run on load of both check-up screens) is
@@ -454,14 +499,102 @@ mastered, add a player-specific question, etc.).
 - Tables `checkups` + `checkup_videos`, bucket `checkup-videos` (public, 50 MB file
   limit) — see DATABASE.md. Shared clip player: [components/VideoPlayer.js](components/VideoPlayer.js).
 
+## THE COMMUNITY — WhatsApp invite links (2026-08-26)
+**"The community" means WhatsApp, and it means exactly two groups.** When the
+coach says *the community*, *the announcement group* / *the official one* (the
+one only he talks in), or *the open group* / *the open community*, these are the
+two entries in `WHATSAPP_GROUPS`:
+
+| Coach's words | Constant `label` | Colour | Link |
+|---|---|---|---|
+| official · announcements · the one only I talk in | `ANNOUNCEMENTS` | gold `#FFD700` | `chat.whatsapp.com/Bbo0pdkFc1lL0474MyYOQm` |
+| open group · open community · where everyone talks | `THE OPEN GROUP` | jade `#1FD79A` | `chat.whatsapp.com/Bt3ISJjjJAA9tEZNbb8iIg` |
+
+Both live in ONE place: `WHATSAPP_GROUPS` at the top of
+[supabase/functions/invite-player/index.ts](supabase/functions/invite-player/index.ts).
+Nothing else in the repo references them.
+
+**Why links and not an automation.** The coach asked for new players to be added
+to the groups automatically when he creates them. **That is not possible and the
+answer will not change**: the official WhatsApp Cloud API has no group endpoints
+at all, and even in the app a player's "who can add me to groups" privacy setting
+can refuse it. (Puppeteering libraries like whatsapp-web.js / Baileys can, but
+they break WhatsApp's ToS and risk the number.) **An invite link is the whole
+mechanism** — the player taps it and joins themselves. Don't re-propose the
+auto-add route.
+
+**Where they go: the welcome email, and ONLY the email.** An in-app copy (behind
+the SOCIALIZE pillar) was built and then removed on the coach's call — the player
+gets the links at the one moment they need them, on the way in. Don't add them
+back to the app.
+
+**Editing the email (rebuilt 2026-08-28).** The mail now lives in its OWN file,
+`invite-player/welcome-email.ts`, and it is **pure** — no env, no network, no
+Deno API, just `buildWelcomeEmail({...}) → { subject, text, html }`. `index.ts`
+keeps the account, the config and the SMTP send and calls it. Everything you'd
+want to reword is a constant at the top of `welcome-email.ts`: the palette
+(lifted from `constants/colors.js`), `STEPS` (the numbered "first four minutes")
+and `INSIDE` (the ◆ list of the four tabs).
+- **A link or a wording change must be made in BOTH halves.** The plain-text and
+  HTML bodies are written out separately, on purpose — text is the fallback every
+  client can render and what a screen reader gets.
+- **Preview it before anyone real sees it** — that's what the split bought:
+  ```bash
+  cd projects/calisthenics-app/supabase/functions/invite-player
+  node preview.mjs            # → preview.html + preview.txt (both gitignored)
+  node preview.mjs --stores    # the future: both store links live
+  ```
+  Node ≥22 runs the `.ts` import directly (type stripping). No Supabase, no Gmail.
+- **Nobody who gets this mail is a stranger.** Every recipient has already been
+  on a sales call with the coach and been placed. That is WHY the mail has no
+  greeting, no pitch, no "here's what the app does" tour and no "message me"
+  section — all of that either duplicates the call or reads like a mailshot. It
+  is an access document. Keep it short.
+- **What's in it, top to bottom (trimmed hard 2026-08-28):** the `THE SYSTEM`
+  wordmark · "Welcome aboard. / You're in." · the username/password panel (both
+  at 22px — this is the one block that must survive a squinting read; the
+  password is the only gold thing in the mail) · **YOUR FIRST FOUR STEPS** ·
+  **SCHEDULE AN ONBOARDING CALL** → `ONBOARDING_URL` · **GET THE APP** with the
+  two store buttons · **OUR COMMUNITIES** (the two WhatsApp groups) ·
+  **THE AGREEMENT** · `Gal Benhamo`. No footer, no legal line.
+- **Three buttons are deliberately DEAD, and each is one secret away from live.**
+  `PLAY_URL`, `IOS_URL` and `AGREEMENT_URL` are all unset, so each renders as a
+  dashed "· SOON" chip — visible, never a 404. Set the secret, redeploy, done; no
+  code change. `AGREEMENT_URL` is the coaching agreement / terms of service, and
+  the slot exists so the document can be dropped in without redesigning anything.
+- **The browser link was CUT** (2026-08-28, coach's call). `APP_URL` is still
+  passed into `buildWelcomeEmail` and deliberately not read — the app comes from
+  the stores, and until the listings exist the onboarding call carries anyone who
+  lands early. One line to reverse if that turns out to hurt.
+- **`ONBOARDING_URL` defaults to the coach's own WhatsApp** with the message
+  pre-typed, so the button works today with nothing configured. Point it at a
+  booking page when one exists.
+- HTML rules that are not negotiable: **tables, not flex** (Outlook renders
+  neither grid nor flex), **every style inline** (Gmail strips `<style>`), and
+  **nothing loaded from the network** — the whole design is borders, background
+  colours and letter-spacing, so it survives blocked images.
+
+Then redeploy, or nothing changes for real:
+
+```bash
+cd projects/calisthenics-app
+npx supabase functions deploy invite-player
+```
+
+Resetting a link in WhatsApp (Group info → Invite via link → Reset) means pasting
+the new one into `WHATSAPP_GROUPS` and redeploying. Strip the `?s=cl&p=a&mlu=4`
+share-tracking params WhatsApp appends when you copy — the bare link is the
+invite. An empty `url` drops that button from the mail rather than sending a
+dead one.
+
 ## Community — REMOVED FROM THE PLAYER APP (2026-08-23)
 The community idea (groups, group challenges, group chat, raids, leaderboard) was
 **dropped on the player side** — that social layer lives in WhatsApp instead. What
 changed:
 - The 5th player tab is now **PERSONAL** (`PersonalNavigator` / `PersonalStack`:
-  `PersonalList` = `screens/PersonalScreen.js` → `CoachChat` + `System`). It holds
-  exactly two cards: **COACH** (jade, the 1-on-1 coach chat) and **THE SYSTEM**
-  (purple, placeholder). No group cards, and the **MY PLAYER CARD** entry was
+  `PersonalList` = `screens/PersonalScreen.js` → `System`). It holds exactly ONE
+  card: **THE SYSTEM** (purple, placeholder) — the COACH card went with the chat
+  removal (2026-08-26). No group cards, and the **MY PLAYER CARD** entry was
   removed too (`HunterStatusScreen` still exists and is still reachable from the
   ADMIN stack — the group rosters; the `PlayerAdminScreen` tile went too, see
   "Player Profiles").
@@ -607,40 +740,33 @@ so history scrolls there and never grows the dashboard endlessly. Table
   member-delete-own (unsend) + member-purge-expired. Text capped at 1000 chars
   (DB CHECK + client clamp). See DATABASE.md `community_messages`.
 
-### Coach ⇄ player DIRECT chat (2026-07-22)
-A **private 1-on-1** chat between one player and the coach (admin) — SEPARATE from
-the per-group community chat. It's keyed to the player (`coach_messages.player_id`
-= the "channel"); `sender_id` is the author, and a message is **from the coach**
-iff `sender_id !== player_id`. Same **ephemeral 7-day** retention + client-side
-purge as the group chat. Table `coach_messages`, migration `20260722_coach_chat.sql`;
-helpers `fetchCoachMessages` / `latestCoachMessage` / `sendCoachMessage` /
-`deleteCoachMessage` / `purgeExpiredCoachMessages` in [lib/community.js](lib/community.js).
-- **One shared screen, `CoachChatScreen`** (`isAdmin` param + optional `player`),
-  registered in BOTH `CommunityStack` (player) and `AdminStack` (admin). Mirrors
-  `CommunityChatScreen`'s UI (inverted `FlatList`, `<ScreenFrame fill>`, 3s
-  mounted-life poll, right-swipe-back). `meId === sender_id` = own bubble; the
-  other side renders as **COACH** (player view) or the **player's first name**
-  (admin view). Player unsends own; admin deletes any.
-- **Player entry — the emerald-jade COACH card at the TOP of the PERSONAL tab**
-  (`PersonalScreen`), with a last-message preview via `latestCoachMessage`.
-- **Coach entry — the COACH CHAT tile on `PlayerAdminScreen`** (the admin-as-coach
-  hub), opened with `{ player, isAdmin: true }`.
-- **RLS:** admin all (`is_admin()`) + player read/send/delete/purge scoped to their
-  OWN channel (`auth.uid() = player_id`, send also `= sender_id`). See DATABASE.md
-  `coach_messages`.
+### Coach ⇄ player DIRECT chat — REMOVED (2026-08-26)
+The private 1-on-1 coach↔player chat (added 2026-07-22) is **gone from the app**.
+That conversation moved to **WhatsApp**, the same way the community layer did.
+Removed: `screens/CoachChatScreen.js`, `screens/AdminChatNotesScreen.js`, the
+`CoachChat` / `ChatNotes` routes, the COACH card on the PERSONAL tab, the COACH
+CHAT tile on `PlayerAdminScreen`, the CHAT NOTES pill + its badge, the five
+`*CoachMessage*` helpers in [lib/community.js](lib/community.js) and the whole
+chat half of [lib/adminInbox.js](lib/adminInbox.js) (thread list, unread count,
+AsyncStorage read-marks).
 
-### Personal tab card order + accents (2026-08-23)
-`PersonalScreen`'s cards, top→bottom: **COACH** (emerald-jade `#1FD79A`, →
-`CoachChat`, which is themed jade throughout) → **THE SYSTEM** (purple `#A66BFF`,
-route `System` → `SystemScreen`, a placeholder empty page for now, registered in
-`PersonalStack`). The accent hexes live as `SYSTEM_PURPLE` / `COACH_JADE` consts
-at the top of `PersonalScreen.js`; PillButton has a matching `jade` tone.
+**The `coach_messages` table was deliberately NOT dropped** — the app no longer
+reads or writes it, but the rows (and `migrations/20260722_coach_chat.sql`) are
+still there. Drop it only on an explicit call; see DATABASE.md.
+
+### Personal tab cards + accents (2026-08-23, trimmed 2026-08-26)
+`PersonalScreen` now holds a single card: **THE SYSTEM** (purple `#A66BFF`, route
+`System` → `SystemScreen`, a placeholder empty page for now, registered in
+`PersonalStack`). The accent hex lives as the `SYSTEM_PURPLE` const at the top of
+`PersonalScreen.js`. The jade COACH card above it was removed with the chat;
+PillButton keeps its `jade` tone (used elsewhere). The screen fetches nothing any
+more, so it has no loading state.
 (Was the COMMUNITY tab, whose MY PLAYER CARD `PLAYER_ICE` card + group cards were
 removed — see "Community — REMOVED FROM THE PLAYER APP".)
 
-## Admin inbox — CHECK-UP INBOX + CHAT NOTES (2026-08-25)
-Two "someone is waiting on you" queues on the AdminDashboard top bar, each a pill
-that wears a **pulsing count badge** while its queue isn't empty. Both live in
+## Admin inbox — CHECK-UP INBOX (2026-08-25)
+The "someone is waiting on you" queue on the AdminDashboard top bar: a pill that
+wears a **pulsing count badge** while it isn't empty. It lives in
 [lib/adminInbox.js](lib/adminInbox.js); the badge counts come from
 `context/AdminNotifyContext.js` (`AdminNotifyProvider` wraps the `AdminStack`
 inside `CoachProvider`; mount + 45s poll + a `refresh()` the screens call after
@@ -652,26 +778,12 @@ acting, plus a `useFocusEffect` refresh on the dashboard).
   `PlayerCheckup` (`AdminCheckupScreen`); sending feedback stamps `feedback_at`, so
   the player drops off the list and the dot clears on return. **Pure server state —
   no read-tracking, no migration.**
-- **CHAT NOTES** (jade `#1FD79A`) → `AdminChatNotesScreen` (route `ChatNotes`).
-  WhatsApp-style list of every 1-on-1 coach chat: name search, **unread threads
-  sorted to the top** with a count, last-message preview ("You: …" when the coach
-  sent it), tap → `CoachChat` with `{ player, isAdmin: true }`. Nothing to reply
-  to — **seeing is reading**.
-- **Read-marks are LOCAL, not a DB column.** `coach_messages` has no read state and
-  the live DB drifts from migrations, so the admin's device stores a
-  `playerId → last-read ISO` map in AsyncStorage (`admin_chat_read_v1`;
-  `getChatReadMap` / `markChatRead`). A message is unread when it came FROM the
-  player (`sender_id === player_id`) and is newer than that mark. Consequence: read
-  state does **not** follow the admin across devices — acceptable for a single-coach
-  app, and the alternative is a schema change. Marked read two ways: tapping a row
-  in Chat Notes, and `CoachChatScreen` itself (`markSeen`, admin side only, on load
-  and on each 3s poll, ref-guarded so it only writes when the newest message moves).
 - **COMMUNITY was removed from the AdminDashboard top bar** to make room. The admin
   community screens/routes (`AdminCommunity`, `AdminGroup`, `CommunityChat`,
   `HunterStatus`) are still registered but now have **no entry point** — the whole
   community layer is unreachable from the UI on both sides (see "Community —
   REMOVED FROM THE PLAYER APP"). Bar order is now **＋ NEW PLAYER** · GALLERY ·
-  CHECKUP EDITOR · BUSINESS · CHECK-UP INBOX · CHAT NOTES · SIGN OUT. ＋ NEW PLAYER is the one
+  CHECKUP EDITOR · BUSINESS · CHECK-UP INBOX · SIGN OUT. ＋ NEW PLAYER is the one
   CREATE action on the bar, so it wears the GOLD accent to sit apart from the
   navigation pills (see "Player onboarding").
 
@@ -729,7 +841,7 @@ in the top bar), NOT a modal:
   The screen is kept for a possible future re-entry. An admin opening a player's card sees it
   **read-only** (`userId !== meId`) — reads ride the admin `profiles` /
   completions RLS.
-- Uses `<ScreenFrame fill maxWidth={CARD_W}>`; the pager fills the measured area.
+- Uses `<ScreenFrame fill>`; the pager fills the measured area.
   Do NOT reintroduce the shared `ScreenHeader` here (its flexed side slots squeezed
   the title) or a fullscreen `Modal` for the clip (an earlier attempt — replaced by
   this pager to match the exercise cards).
@@ -828,15 +940,28 @@ tile → it lands in MY WORKOUTS → schedule it onto weekdays from there.
 
 ## Workout Mode — live session (LOCAL only)
 "Workout Mode" is where a player actually performs a scheduled workout, logging
-each set as they go. Entered **exclusively through the RED GATE portal** on
-HomeScreen's today's-missions (tap a mission → the gate opens → ▶ ENTER / ▶ RESUME
-steps through into the live session via `startWorkoutMode`). WorkoutsScreen's day
-panel does NOT offer it anymore — its rows are VIEW / MARK DONE only (no
-▶ WORKOUT button). This keeps the "entering a session" moment a single, dramatic
-portal flow rather than a plain list button.
+each set as they go. Entered **exclusively through the QUEST GATE** on
+HomeScreen's today's-missions (tap a mission → the system's alert window opens →
+▶ ENTER / ▶ RESUME steps through into the live session via `startWorkoutMode`).
+WorkoutsScreen's day panel does NOT offer it anymore — its rows are VIEW / MARK
+DONE only (no ▶ WORKOUT button). This keeps the "entering a session" moment a
+single, staged flow rather than a plain list button.
+- **The launcher is `components/QuestGate.js` (2026-08-28).** The old RED GATE
+  portal — the spinning crimson vortex with rotating energy rings — was
+  **removed**; `GatePortalFX` and every `portal*`/`gate*` style went with it.
+  Its replacement is the SYSTEM's own alert window, in the daily-quest panel's
+  voice: ice-blue `ShimmerFrame` border, corner brackets that kick outward as it
+  lands, an opening hairline that widens into the panel, and a scan bar that
+  sweeps the glass on open and every few seconds after. Header reads **WORKOUT
+  ALERT** (**WORKOUT IN PROGRESS** when resuming); body is the mission name, its
+  purpose and a category chip; the one hot control is ▶ ENTER / ▶ RESUME over
+  WORKOUT MODE, with DISMISS below. An accessory/legs mission tints the whole
+  window in its own `accentFor` colour. **Android note:** the ENTER button's
+  background is opaque and carries NO `elevation` — an elevation shadow under a
+  TRANSLUCENT background paints as a hard rectangle inside the button on Android.
 - **Screens:** `WorkoutModeScreen` (the tracker) → `WorkoutSummaryScreen` (the
-  end-of-session recap). For the live portal flow both are registered in **`App.js`'s
-  `RootStack`** (`PlayerApp`), ABOVE the tab pager — the portal pushes WorkoutMode
+  end-of-session recap). For the live launcher flow both are registered in **`App.js`'s
+  `RootStack`** (`PlayerApp`), ABOVE the tab pager — the gate pushes WorkoutMode
   full-screen over the tabs (no bottom bar during a session). CRITICAL: they must
   NOT be entered by a cross-tab nested navigate into the Workouts tab — swiping the
   pager to Workouts AND mounting the heavy tracker at once desyncs
@@ -951,8 +1076,8 @@ portal flow rather than a plain list button.
 - Fonts: import from `constants/fonts.js` as `F` — never hardcode font names
 - Theme: dark navy/blue + ice-glow accents (Solo Leveling-inspired)
 - **Framed "gallery" look** (the standard for player screens): wrap the screen in
-  `<ScreenFrame>` (hug mode — the frame wraps its content and centers; animated
-  ice-glow border + holo-build entrance; pass `ready={!loading}`). Use
+  `<ScreenFrame fill>` (one fixed full-screen card — see "ONE CARD, EVERY SCREEN"
+  below; animated ice-glow border + holo-build entrance; pass `ready={!loading}`). Use
   `components/ScreenHeader` for the header (glowing BACK pill + centered glow title
   + optional `subtitle`/`right`) and `components/PillButton` for every action button
   (rounded "ice pill"; `variant` solid|outline, `tone` accent|gold|green|danger|muted,
@@ -1030,6 +1155,16 @@ portal flow rather than a plain list button.
   `lib/forgeSwipe.js` (`forgeP`, `SWIPE_MS`) and the ghost-swipe machinery in
   StudentDetailScreen are dormant. Don't reintroduce the forge swipe unless the hub
   is brought back.
+- **A mission card wears its TYPE color in EVERY state (2026-08-30).** On
+  HomeScreen's TODAY'S MISSIONS, the type glow (`accentFor`) is no longer just the
+  idle card's left rail: the **in-progress** `LiveMissionCard` derives its whole
+  palette from it (breathing border, sweep, rail, beacon, title, TAP TO RESUME —
+  the bright half via the local `lighten()`/`rgba()` helpers), and a **completed**
+  card keeps its type border + checkbox instead of flipping to the ice-blue "done"
+  theme. Same rule as the quest-node palettes: a card that owns a color owns it in
+  every state — starting or finishing a HANDSTAND mission must never repaint it
+  blue. The rows also show the **title only** — a mission's `purpose` is read in
+  Workout Mode (and in the quest gate), not on the board.
 - **Quest chain cards carry a LEFT ACCENT RAIL (2026-08-24).** Every chain card on
   SkillsScreen (main + both side tiers) uses the app's shared left-rail card
   language (`borderLeftWidth: 4`, as on the Workouts day cards / exercise cards).
@@ -1040,35 +1175,189 @@ portal flow rather than a plain list button.
   the frame, the progress rail (taller, with a bright leading cap), the chevron
   node, the title ink and the +LVL. Moving shimmer (ShimmerText/ShimmerFrame) stays
   reserved for MAXED. There is no "UPGRADED" text badge — the rail is the tell.
-- **Constant card size — CRITICAL:** the framed cards must NOT resize with their
-  data or loading state. Wrap the screen's content in a fixed-height card
-  (`height: CARD_H` from [constants/layout.js](constants/layout.js)) and let the
-  variable middle region (`flex: 1` + an internal `ScrollView`) absorb the slack;
-  ALWAYS render the full layout (show the spinner *inside* the fixed region, never
-  swap the whole body for a spinner — that causes the load-time resize jump). The
-  Weekly Plan, Elite Workouts, My Workouts, **and HomeScreen**
-  cards share `CARD_H` so they're identically sized and full-screen. Tune them
-  together via `CARD_H`. (Home's content is top-aligned; any slack is dead space at
-  the bottom, same as the Workouts card.) **Home differs in ONE way:** it wraps its
-  body in `styles.card` = `minHeight: CARD_H` (not a hard `height`). It has no
-  internal ScrollView (the Workouts card absorbs slack via `flex:1` + inner scroll),
-  so a hard height would CLIP any day whose missions+quests exceed CARD_H — the
-  overflow is cut off by ScreenFrame's `overflow:hidden` and unreachable (the old
-  bug: extra daily quests sliced off the bottom). `minHeight` keeps the
-  constant-minimum size (never shrinks → no load jump, matches the others on short
-  days) but lets the card GROW on busy days; ScreenFrame's outer ScrollView then
-  scrolls to reveal all of it. **SkillsScreen** is too tall to
-  fit without scrolling, so it uses `<ScreenFrame fill>` (frame fixed to the
-  viewport, its own inner `ScrollView` scrolls the quest sections) — same animated
-  ice-glow border as the others (its old static 1.5px border was removed); the
-  frame renders in every state (loading spinner too) so the border shows even
-  mid-swipe. The body is mounted eagerly (not gated on focus) for swipe smoothness;
-  its first-swipe entrance is driven by a `play` token, not a mount — see the
-  entrance-animation bullets above.
-  (Home used to be a hug-mode exception with no fixed height; that was dropped so
-  its frame is now constant full-screen like the rest.) It still avoids the load
-  jump by ALWAYS rendering the full layout and overlaying the load spinner (never
-  swapping the body for a spinner).
+- **The tour can ask a SCREEN to show something (2026-08-26).** A step with an
+  `id` publishes it through `TourContext.stepId`, and a screen can render a
+  tutorial-only element while that step is up. Two of these exist:
+  · HomeScreen's demo mission row (rest day — nothing for "Start a Workout" to
+    point at), keyed off `tourOpen`;
+  · CheckupScreen's **example coach reply** on the GET FEEDBACK step, keyed off
+    `stepId === 'checkup.feedback'` AND no real feedback. It is the real
+    `feedbackCard` with a dashed border and an "EXAMPLE" tag, carrying the REAL
+    `checkup.feedback` tour tag (the two can never co-exist), so the step
+    highlights it and the player sees the WATCH FEEDBACK VIDEO button they will
+    get instead of reading about something invisible. It disappears on NEXT.
+  The rule for this pattern: the demo must be tagged as the real element, must be
+  impossible to mistake for real data, and must not outlive its step — GuidedTour
+  publishes `null` on step change AND on unmount.
+- **`pad: { top, bottom, x }` on a step** grows its highlight beyond the measured
+  element, in canvas units. For when the tagged view is smaller than the thing the
+  player reads as one block — the week strip's row versus its day cells. Reach for
+  a real target first; this is a tuning knob, not a fix for a mis-measurement.
+- **Guided-tour targets: three rules, all learned the hard way (2026-08-26).**
+  1. **`collapsable={false}` on every tagged `<View>`.** Android flattens any View
+     that carries only layout props, and a ref does NOT keep it alive — the ref
+     resolves to the nearest surviving ancestor, so the element measures as its
+     PARENT and the highlight lands on the wrong box. ScrollViews and Touchables
+     are native already and don't need it.
+  2. **Tag EVERY branch that can render the thing.** `home.mission1` was tagged on
+     the ordinary mission row but not on `LiveMissionCard`, the in-progress
+     variant — so for any player mid-session (the common case) the step fell back
+     to drawing a circle in empty space.
+  3. **The tour navigates to a tab's ROOT route, never just the tab.** Skills,
+     Workouts and Personal are STACKS and a tab remembers where the player left
+     it. Open a quest tree once and the SKILLS steps then play over
+     `QuestTreeScreen`. Worse, they don't fail loudly: `SkillsScreen` is still
+     mounted underneath, so its elements still MEASURE — as hidden views, which
+     stranded the highlight in the top-left corner. `TAB_ROOT` in `PlayerTour`
+     (App.js) maps each tab to its root route and the nested navigate pops the
+     stack back to it.
+  When a step points somewhere strange, check these three before touching the
+  drawing code — every one of them presents as "the highlight is in the wrong
+  place", which looks like a geometry bug and is not.
+- **A NaN in an SVG prop is a HARD NATIVE CRASH (2026-08-26).** react-native-svg
+  hands numbers straight to the platform path builder, so one non-finite
+  coordinate closes the whole app — it is not a JS throw and no error boundary
+  can catch it. This is what killed the app on the guided tour's step 7: when a
+  step's element can't be measured it falls back to a `{ type: 'circle' }` mark,
+  that mark carried only `cx/cy/rad`, and the caption placement reads `mark.y` /
+  `mark.h` to find the room above and below — `undefined` → NaN room → NaN
+  `capY` → NaN in the connector arrow's path. Rules that keep it dead:
+  · **every mark exposes a complete `x/y/w/h` box**, whatever its shape;
+  · `fitMark()` rejects non-finite input, clips to the overlay, and returns
+    **null** for a degenerate box (draw nothing rather than a zero-size reticle);
+  · the arrow is only built if every coordinate in it is finite, and `capY` has a
+    final `Number.isFinite` fallback.
+  A measurement going non-finite is NORMAL, not exotic — a view that unmounts
+  mid-poll measures as `undefined`, and `undefined * scale` is NaN. Guard at the
+  boundary, never assume a measured number is a number.
+  [components/TourBoundary.js](components/TourBoundary.js) catches the JS-level
+  failures on top of that (same pattern as `IntroBoundary`): the tour renders at
+  the root, so an uncaught throw there would unmount the entire tree. It closes
+  the tutorial instead, and resets on the next step so one bad step doesn't
+  poison the session.
+- **ANDROID `measureInWindow` LIES ABOUT SIZE — CRITICAL (2026-08-26).**
+  `NativeViewHierarchyManager.measureInWindow` reports **position** through the
+  ancestor transform (`view.getLocationInWindow()`, which honours ScaledRoot's
+  0.72) but **size** as the raw layout box (`view.getWidth()` / `getHeight()`,
+  untransformed). So measuring anything in the app tree on Android gives a
+  CORRECT top-left and a size ~39% too big. Anchored at that correct corner, the
+  guided tour's highlight spilled off the right edge of the card and down over
+  the panel BELOW its target (TODAY'S MISSIONS swallowing DAILY QUESTS, YOUR
+  CLASS swallowing the LVL line) — and it dragged the connector arrow's endpoint
+  out with it. It also silently broke scroll-into-view: `revealTourTarget`
+  derives the scale from `box.h / getViewportH()`, which came out 1 instead of
+  0.72, so every reveal scroll under-shot by 28%.
+  The correction lives at the SOURCE — `M_SCALE` in
+  [lib/tourTargets.js](lib/tourTargets.js) multiplies the w/h of every in-app
+  measurement, so the highlight and the scroll math share one coordinate space.
+  iOS is untouched (`convertRect:toView:` transforms size correctly) and web goes
+  through `getBoundingClientRect` (already zoom-aware), hence `Platform.OS ===
+  'android'` only. **GuidedTour's own `measureNode` is deliberately NOT
+  corrected** — it measures the overlay, which is in the modal's own window with
+  no transform above it. `fitMark()` clips every highlight to the overlay as a
+  backstop, so a bad measurement can never again paint off-screen.
+  Any future feature that measures a view to draw on top of it hits this same
+  trap.
+- **The GUIDED TOUR renders at the APP ROOT, never inside a tab (2026-08-26).**
+  `GuidedTour` used to be a child of `HomeScreen`. On the APK that broke the
+  tutorial the first time it changed tabs: Home is one page of the material-top-tab
+  pager, React Navigation deactivates an inactive scene (`detachInactiveScreens`),
+  and a `<Modal>` inside a detached native screen is torn down with it — the
+  overlay vanished on the SKILLS step and the player was stranded mid-tour with no
+  way to continue. Web never showed it (no native screens to detach).
+  It now lives in **`PlayerTour`** (App.js), a sibling of `RootStack.Navigator`,
+  so no tab change can touch it. Two consequences to keep:
+  · it is outside every navigator, so it drives the tabs through the
+    **`NavigationContainer` ref** (`useNavigationContainerRef` in `App()`, passed
+    down as `navRef`) — `navRef.navigate('Tabs', { screen: tab })`, guarded by
+    `isReady()`. There is no `useNavigation()` to call from there.
+  · **`context/TourContext.js`** is the remaining link to HomeScreen: `openTour`
+    for the TUTORIAL pill, and `tourOpen` for the tutorial-only demo mission card
+    on a rest day. Its default value is a working no-op, so a screen rendered
+    outside the provider just sees "no tour running".
+  CLOSING the tour still navigates back to Home FIRST and lifts the overlay 240ms
+  later — dismissing the overlay and jumping the pager on one frame desyncs
+  react-native-pager-view. Don't collapse those two steps.
+  **Do not move the tour back under a screen.** Any future full-app overlay that
+  outlives a tab change belongs at the root for the same reason.
+- **A <Modal> ESCAPES ScaledRoot — CRITICAL (2026-08-26):** on native, App.js
+  lays the whole tree out on an oversized canvas and scales it back by
+  `NATIVE_SCALE` (0.72). A React Native `<Modal>` renders in its OWN native
+  window, so it does **NOT** inherit that transform — anything drawn inside one
+  comes out 1/0.72 ≈ **39% bigger** than the app behind it, and it covers the
+  status bar AND the Android nav bar (nothing pads them for you). `GuidedTour`
+  hit both: its caption card ate the phone screen and buried the connector
+  arrows. The fix pattern, and the one to copy for any new fullscreen modal:
+  · a module-level `const S = Platform.OS === 'web' ? 1 : NATIVE_SCALE` +
+    `s(n) => n * S`, applied to every fixed px value drawn in the overlay;
+  · the card laid out at FULL canvas size and scaled as ONE block
+    (`width: capW / S`, `transform: [{ scale: S }]`, `transformOrigin: 'top left'`)
+    so nested components (PillButton, fonts, pads) shrink with it — remember its
+    `onLayout` height is then LAYOUT height, not visual (visual = capH * S);
+  · raw `useSafeAreaInsets()` (NOT `useAppInsets`, which converts to canvas
+    units) for the top/bottom limits, since the overlay is measured in device px.
+  Web renders the modal inside the zoomed root, so `S` is 1 and nothing changes
+  there — which is exactly why this only ever showed up in the APK.
+  GuidedTour's caption also **dodges the highlight** now: it measures the real
+  room above and below the mark, takes the side the card actually fits on, and
+  then pushes the card to the FAR WALL of that side (flush to the top edge, or
+  flush to the bottom above the tab bar) — a hugged caption made the connector
+  arrow an unreadable stub.
+  The old per-step `captionGap` hand-tuning is gone — don't reintroduce it.
+- **ONE CARD, EVERY SCREEN — CRITICAL (2026-08-25):** the frame is **full-screen,
+  identical on every screen, and never changes size**. `ScreenFrame` owns that
+  entirely now: it always fills the viewport minus a constant margin
+  (`FRAME_PAD` / `FRAME_PAD_V` = 12 on all four sides) at one width
+  (`FRAME_MAX_W` = `CARD_W`, capped by the window). Screens do NOT pass `maxWidth`
+  and do NOT set a card height — **`CARD_H` is gone**, and the per-screen widths
+  (560 / 640 / 720 / 900 / 920 / 1800) are gone with it. Content that outgrows the
+  card scrolls INSIDE it; the frame itself never moves, never resizes with data or
+  loading state, and matches the neighbouring screen mid-swipe.
+  Two modes, same geometry:
+  · **`<ScreenFrame fill>`** — for a screen whose body is one full-height card with
+    its own internal scroll region (`<View style={styles.card}>` with
+    `card: { flex: 1 }` + a `flex: 1` middle that holds a `ScrollView`/`FlatList`).
+    **This is the default choice** — the flex chain reaches the card, so the inner
+    scroll region is bounded exactly the way the old fixed `CARD_H` bounded it.
+    Weekly Plan, My Workouts, Elite Workouts, Personal, Skills, the admin roster,
+    the chats and the check-up screens all work this way.
+  · **plain `<ScreenFrame>`** — for a screen that is just a run of content with no
+    internal scroll region (Home, System, Login, Set Password, the editors). The
+    frame supplies the ScrollView; give the root child `flexGrow: 1` if it should
+    stretch to the bottom. NEVER wrap `<ScreenFrame>` in a ScrollView — that lets
+    the card shrink to its content, which is the exact bug this rule kills.
+  ALWAYS render the full layout and overlay the load spinner (never swap the body
+  for a spinner) — that was the other source of load-time size jumps.
+  **The frame must not blink out BETWEEN screens either (2026-08-28).** After
+  sign-in, App.js waits on the role lookup before it knows which tree to mount,
+  and that gap used to render a bare dark `View` — the border vanished for a
+  split second and the login → home hand-off read as a reload. `FrameShell` in
+  App.js now holds the identical empty card there (`<ScreenFrame fill
+  holoEntry={false}>`, inside ScaledRoot). It must NOT consume the holo latch —
+  that belongs to the real landing card. Any future "we don't know what to
+  render yet" state between two framed screens gets the same treatment.
+  **The player TAB BAR unfolds, and the card's bottom edge rides on it
+  (2026-08-28).** The bar lives OUTSIDE the card, so the build — which is bounded
+  to the card — left it popping into place fully formed. Sliding it up with a
+  transform was no better: that was still TWO motions, the card's lower border
+  sitting still while the bar travelled past underneath. What has to move is the
+  BOUNDARY they share. So the bar animates its own **layout height** from 0 to
+  full; the pager above it is `flex: 1`, so the card's bottom edge is pushed up
+  by the same pixels on the same frame — one line rising, the bar unfolding
+  beneath it. Hence a height animation and **not** a transform (a transform moves
+  the bar THROUGH a fixed layout; only a layout change carries the card's border
+  with it), which also means it cannot use the native driver — keep it short, it
+  re-lays out the card every frame. The bar's contents are pinned to the TOP of
+  the growing box (`barBox` clips, `bar` is absolute at `top: 0`) so the labels
+  ride up with the boundary instead of being revealed in place.
+  The sync is explicit, not a guessed delay — `lib/holoEntry.js` gained
+  `onHoloStart` / `notifyHoloStart` (HoloBuild calls it beside
+  `playHologram()`) plus `isHoloComing()`, which the bar reads ONCE at mount to
+  decide whether to start hidden at all. Two failure modes are already handled,
+  keep them: an ordinary mount with no build coming shows the bar immediately,
+  and a build that never starts (a screen stuck loading) still reveals the bar
+  after `BAR_RISE_FALLBACK_MS`. Anything else that sits outside the card and
+  must move with the entrance should hang off `onHoloStart` the same way.
 
 ## App identity — "The System" + cold-start intro (2026-08-24)
 The app's display name is **The System** (`app.json` `expo.name`), and a 3-second
@@ -1119,10 +1408,31 @@ title sequence plays on every cold start.
   is a one-line kill switch. Reduce-motion skips it entirely —
   `AccessibilityInfo.isReduceMotionEnabled` is **undefined on Expo web**, so it is
   optional-called (`?.()?.then`); see the web-gotchas rule.
-- **LoginScreen's wordmark** is the `WORDMARK` const (`'The System'`), used by the
-  ShimmerText title, both RGB-split ghost copies and the brick-shatter copy. Its
-  type dropped 84/9 → **60/7** because "THE SYSTEM" is 10 glyphs to LevelX's 6 and
-  would otherwise overflow the 680px card.
+- **LoginScreen's wordmark** is the `WORDMARK` const (`'The System'`), a plain
+  glowing accent `Text` at 46/8 over a hairline rule — the ScreenHeader treatment,
+  sized so 10 glyphs fit the card. **The login GLITCHES ARE GONE (2026-08-28):**
+  the deviation engine (datamosh overlay, RGB-split ghosts, sharp jitter), the
+  brick-shatter login intro and the void drone were deleted along with
+  `DeviationOverlay` / `BrickShatter` / `ScatterCollapse` / `FrameShatter`,
+  ScreenFrame's `shatter` prop, and the glitch half of `lib/glitchSound.js`
+  (renamed **`lib/uiSound.js`**, now just the hologram boot-up chime HoloBuild
+  plays). The screen is ordinary app chrome: ScreenFrame card, wordmark + rule,
+  a `▍SIGN IN` section head, EMAIL / PASSWORD labels over the standard inputs,
+  the shared `PillButton` (solid accent, lg) and the standard red error box.
+  Pressing LOGIN now calls `signInWithPassword` immediately — the old button ran
+  a ~1.5s collapse animation FIRST and only then signed in, which read as a dead
+  tap. Don't reintroduce the glitch layer.
+- **The login hands off to the landing card as ONE motion (2026-08-28).**
+  `components/HoloDissolve.js` is the exact MIRROR of `HoloBuild`: the same 16
+  slices and the same glowing cyan build-front, covering the card from the TOP
+  DOWN. Pressing LOGIN plays it (via ScreenFrame's `overlay`), and only when the
+  card is fully covered does `signInWithPassword` run — the session flip unmounts
+  the screen, so racing it would cut the line off half way down. The card then
+  sits as empty space for the round-trip, which is what the landing card's
+  `HoloBuild` builds out of (bottom up). A FAILED sign-in runs the dissolve
+  backwards and hands the form back with the error. `N` / `STRIP_MS` /
+  `STAGGER` must stay in step with HoloBuild's or the two halves stop reading as
+  the same line.
 - **`slug` and `android.package` were deliberately NOT renamed** (still `levelx` /
   `com.levelx.app`): the slug owns the EAS project + the `levelx.expo.app` deploy
   URL, and changing the package makes it a different app on-device with no upgrade
@@ -1169,8 +1479,9 @@ title sequence plays on every cold start.
   admin authoring surface for check-up templates (Part-1 questions + Part-2
   exercises; scope `{ classId }` or `{ playerId }`), used by both admin check-up
   screens (see Checkups).
-- `constants/` — colors.js, fonts.js, layout.js (`CARD_H` — shared fixed card height)
-- `context/` — React contexts
+- `constants/` — colors.js, fonts.js, layout.js (`CARD_W` — THE card width for every framed screen; there is no CARD_H, the card is always full height)
+- `context/` — React contexts (incl. `TourContext` — the guided tour is owned by
+  the app root, not HomeScreen; see the Design System note)
 - `lib/` — utilities
 - `supabase/` — `migrations/` (the SQL to run on the live project) and
   `functions/` (Deno **edge functions** — server-side code holding secrets the app
