@@ -304,17 +304,12 @@ export default function WorkoutDetailScreen({ route, navigation }) {
             </View>
           ) : null}
 
-          {/* CTA — the detail view is read-only for the player: completion happens
-              on HomeScreen's missions (the checkbox) or by finishing a Workout
-              Mode session. The Workouts day panel doesn't tick anything off
-              anymore either. A completed dated workout still shows its banner. */}
-          {studentView ? (
-            (workout.completed ?? false) && (
-              <View style={styles.completedBanner}>
-                <Text style={styles.completedText}>✓ MISSION COMPLETE</Text>
-              </View>
-            )
-          ) : (
+          {/* CTA — the player's view is READ-ONLY and says nothing about state:
+              completion happens on HomeScreen's missions (the checkbox) or by
+              finishing a Workout Mode session, and it's reported there and on the
+              day board. This screen is just the workout. The coach gets the one
+              action there is. */}
+          {studentView ? null : (
             <PillButton
               label="EDIT WORKOUT"
               size="lg"
@@ -560,26 +555,5 @@ const styles = StyleSheet.create({
     color: SL.accent,
     letterSpacing: 0.5,
     lineHeight: 25,
-  },
-
-  completedBanner: {
-    height: 54,
-    marginTop: 8,
-    borderWidth: 1.5,
-    borderColor: '#4CAF50',
-    borderRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(76,175,80,0.08)',
-    shadowColor: '#4CAF50',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-  },
-  completedText: {
-    fontFamily: F.heading,
-    fontSize: 24,
-    color: '#4CAF50',
-    letterSpacing: 3,
   },
 });
