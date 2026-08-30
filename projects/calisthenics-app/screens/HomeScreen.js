@@ -730,8 +730,13 @@ export default function HomeScreen({ navigation }) {
                           ? { borderColor: tc, shadowColor: tc }
                           : { borderColor: tc + '66', shadowColor: tc }),
                       ]}
-                      onPress={() => setActiveMission(workout)}
-                      activeOpacity={0.8}
+                      // A finished mission does NOT open the launcher. The gate is a
+                      // staged "you are entering a session" moment; letting a done row
+                      // fire it turns it into a thing you poke at, which is the fastest
+                      // way to make it stop meaning anything. Un-tick via the checkbox
+                      // and the row is live again.
+                      onPress={() => { if (!workout.completed) setActiveMission(workout); }}
+                      activeOpacity={workout.completed ? 1 : 0.8}
                     >
                       <View style={[styles.missionAccent, tc && { backgroundColor: tc, shadowColor: tc }]} />
                       <View style={styles.missionBody}>

@@ -946,6 +946,12 @@ HomeScreen's today's-missions (tap a mission → the system's alert window opens
 WorkoutsScreen's day panel does NOT offer it anymore — a row there just opens the
 workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps the
 "entering a session" moment a single, staged flow rather than a plain list button.
+- **A COMPLETED mission does not open the gate (2026-08-30).** HomeScreen's
+  mission row only calls `setActiveMission` while `!workout.completed`. The gate
+  is a staged "you are entering a session" moment; a done row that still fires it
+  turns it into something you poke at for fun, which is the fastest way to make it
+  stop meaning anything. The checkbox still un-ticks the row, which makes it live
+  again.
 - **The launcher is `components/QuestGate.js` (2026-08-28).** The old RED GATE
   portal — the spinning crimson vortex with rotating energy rings — was
   **removed**; `GatePortalFX` and every `portal*`/`gate*` style went with it.
