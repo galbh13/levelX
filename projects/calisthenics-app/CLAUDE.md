@@ -1156,6 +1156,20 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   `lib/forgeSwipe.js` (`forgeP`, `SWIPE_MS`) and the ghost-swipe machinery in
   StudentDetailScreen are dormant. Don't reintroduce the forge swipe unless the hub
   is brought back.
+- **ALL CLEAR — a finished panel goes GOLD (2026-08-30).** When every row of
+  HomeScreen's TODAY'S MISSIONS (or DAILY QUESTS) is done, the panel answers as a
+  whole: header bar, title (`ShimmerText`, `sweep={false}`), divider, count chip
+  and panel border all turn gold, a gold `ClearSweep` scans the panel 300ms behind
+  the row's own sweep, and `hapticSuccess()` thumps once. **Gold is the app's word
+  for "nothing left to earn here"** (MAXED chains, class gates, hidden challenges)
+  — ice is progress, gold is completion; the panel says it so the rows don't have
+  to. Two traps, both already handled: the panel sweep must be the **LAST child**
+  (mission cards are opaque and would hide it), and `allDone` **also flips
+  false→true when the first fetch lands** — the `clearFx.armed` ref plus not
+  mounting the sweeps until `!loading` is what stops every visit to a finished
+  board from replaying the celebration. Use `sweep={false}` on a ShimmerText that
+  needs its layout: the per-glyph wave drops `style` off its row container and
+  loses `flex: 1`.
 - **A mission card wears its TYPE color in EVERY state (2026-08-30).** On
   HomeScreen's TODAY'S MISSIONS, the type glow (`accentFor`) is no longer just the
   idle card's left rail: the **in-progress** `LiveMissionCard` derives its whole
