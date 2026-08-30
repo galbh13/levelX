@@ -15,6 +15,7 @@ import { categoryLabel, categoryMeta } from '../lib/workouts';
 import { ShimmerText, ShimmerFill, GOLD } from '../components/Shimmer';
 import ScreenFrame, { FRAME_PAD } from '../components/ScreenFrame';
 import PopCheck from '../components/PopCheck';
+import ClearSweep from '../components/ClearSweep';
 import QuestGate from '../components/QuestGate';
 import { hapticTap } from '../lib/haptics';
 import { CARD_W } from '../constants/layout';
@@ -747,7 +748,11 @@ export default function HomeScreen({ navigation }) {
                         {/* Title only — the purpose/description lives in Workout
                             Mode, in full, so the board stays a clean list. */}
                         <Text
-                          style={[styles.missionTitle, tc && { color: tc }]}
+                          style={[
+                            styles.missionTitle,
+                            tc && { color: tc },
+                            workout.completed && styles.missionTitleDone,
+                          ]}
                           numberOfLines={2}
                           ellipsizeMode="tail"
                         >
@@ -772,6 +777,8 @@ export default function HomeScreen({ navigation }) {
                           <PopCheck><Text style={styles.missionCheckMark}>✓</Text></PopCheck>
                         )}
                       </TouchableOpacity>
+                      {/* The scan that confirms it — plays on the tick, then unmounts. */}
+                      <ClearSweep done={workout.completed} color={tc || SL.accent} />
                     </TouchableOpacity>
                     );
                   })}
@@ -812,6 +819,7 @@ export default function HomeScreen({ navigation }) {
                       <Text style={[styles.dqTitle, done && styles.dqTitleDone]} numberOfLines={2}>
                         {q.title}
                       </Text>
+                      <ClearSweep done={done} color={SL.accent} />
                     </TouchableOpacity>
                   );
                 })
@@ -1318,6 +1326,11 @@ const styles = StyleSheet.create({
     color: SL.text,
     letterSpacing: 0.2,
   },
+  // Struck out and quieted — but still its own type colour, never repainted.
+  missionTitleDone: {
+    textDecorationLine: 'line-through',
+    opacity: 0.5,
+  },
   missionCheckbox: {
     width: 20,
     height: 20,
@@ -1453,6 +1466,7 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 14,
     marginBottom: 10,
+    overflow: 'hidden',   // keeps the ClearSweep bar inside the card's corners
   },
   dqCardDone: {
     borderColor: SL.accent,
