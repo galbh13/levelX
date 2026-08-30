@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Modal,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
   Animated, Easing, useWindowDimensions, AccessibilityInfo,
 } from 'react-native';
 import { F } from '../constants/fonts';
@@ -11,22 +11,44 @@ import { evaluatePrestige, prestigeStars } from '../lib/prestige';
 import { DEFAULT_JOB } from '../lib/jobs';
 import { israelToday } from '../lib/israelDate';
 import { materializeDay } from '../lib/schedule';
-import { categoryMeta } from '../lib/workouts';
+import { categoryLabel, categoryMeta } from '../lib/workouts';
 import { ShimmerText, ShimmerFill, GOLD } from '../components/Shimmer';
-import Svg, { Circle, Defs, RadialGradient, LinearGradient, Stop } from 'react-native-svg';
 import ScreenFrame, { FRAME_PAD } from '../components/ScreenFrame';
 import PopCheck from '../components/PopCheck';
+import QuestGate from '../components/QuestGate';
 import { hapticTap } from '../lib/haptics';
-import { CARD_W, CARD_H } from '../constants/layout';
+import { CARD_W } from '../constants/layout';
 import { sessionKey, activeSessionKeys } from '../lib/workoutSession';
-import GuidedTour from '../components/GuidedTour';
-import { markOnboardingSeen } from '../lib/onboarding';
 import { useTourTarget } from '../lib/tourTargets';
+import { useTour } from '../context/TourContext';
 
-// Off-program ACCESSORIES / LEGS missions glow in their type color; the dated
-// program keeps the default theme. Returns a color or null (= default).
+// EVERY typed mission glows in its own type color — the same hex the launcher
+// window wears, so the row you tap and the window that opens are one thing.
+// (Was accessory/legs only, which left a SIDE QUEST row plain and then opened a
+// violet window.) Untyped/legacy missions return null = the default theme.
 const accentFor = (category) =>
-  (category === 'accessory' || category === 'legs') ? categoryMeta(category).color : null;
+  categoryLabel(category) ? categoryMeta(category).color : null;
+
+// A brighter sibling of a type color — mixed toward white. The live card's glow,
+// rail and beacon used to be hard-coded ice blue (#8CE0FF); now every one of them
+// is derived from the mission's OWN type color so an in-progress HANDSTAND stays
+// rose instead of turning blue mid-session.
+const lighten = (hex, amt = 0.45) => {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const mix = (c) => Math.round(c + (255 - c) * amt);
+  const r = mix((n >> 16) & 255), g = mix((n >> 8) & 255), b = mix(n & 255);
+  return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+};
+
+// Same color as an `rgba()` string, for translucent fills/shadows.
+const rgba = (hex, a) => {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+};
 
 const SL = {
   bg:     '#050912',
@@ -69,124 +91,19 @@ const rankType = (text) => ({
   letterSpacing: text.length >= 3 ? 0 : 1,
 });
 
-// Bright pinks→white for the ENTER label, so it stays legible (and glows like the
-// light core) over the portal's dark button backing.
-const ENTER_GLOW = ['#FFB3C9', '#FFFFFF', '#FFD6E2', '#FF6E92', '#FFADC6', '#FF8FB0'];
-
-// The RED GATE portal (Solo Leveling), layered behind the content:
-//   • a pulsing/breathing red halo (the gate "leaking" energy),
-//   • a deep radial-gradient vortex core (dark center bleeding to a hot rim),
-//   • two counter-rotating dashed energy rings at different speeds,
-//   • a crisp outer rim for a clean edge.
-// All driven by Animated (native-driver transforms), started on mount and torn
-// down on unmount — so it only spins while the portal is open. Decorative; never
-// intercepts taps. Unique gradient ids per instance so multiple svg roots on web
-// never collide.
-function GatePortalFX({ size }) {
-  const spinA = useRef(new Animated.Value(0)).current;
-  const spinB = useRef(new Animated.Value(0)).current;
-  const pulse = useRef(new Animated.Value(0)).current;
-  const ids = useRef({
-    disc: `pd_${Math.random().toString(36).slice(2)}`,
-    ring: `pr_${Math.random().toString(36).slice(2)}`,
-  }).current;
-
-  useEffect(() => {
-    const spin = (v, dur) => Animated.loop(
-      Animated.timing(v, { toValue: 1, duration: dur, easing: Easing.linear, useNativeDriver: true }),
-    );
-    const a = spin(spinA, 16000);
-    const b = spin(spinB, 9000);
-    const p = Animated.loop(Animated.sequence([
-      Animated.timing(pulse, { toValue: 1, duration: 1500, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-      Animated.timing(pulse, { toValue: 0, duration: 1500, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-    ]));
-    a.start(); b.start(); p.start();
-    return () => { a.stop(); b.stop(); p.stop(); };
-  }, [spinA, spinB, pulse]);
-
-  const rotA = spinA.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
-  const rotB = spinB.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '-360deg'] });
-  const haloOpacity = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.4, 0.85] });
-  const haloScale   = pulse.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1.05] });
-
-  const R      = size / 2;
-  const rRim   = R - 4;
-  const rRingB = R - 20;
-  const rDisc  = R - 28;
-  const circ   = 2 * Math.PI * rRim;
-
-  return (
-    <View
-      style={[StyleSheet.absoluteFillObject, { alignItems: 'center', justifyContent: 'center' }]}
-      pointerEvents="none"
-    >
-      {/* Pulsing red halo bleeding into the dark. */}
-      <Animated.View style={{
-        position: 'absolute', width: size, height: size, borderRadius: size / 2,
-        backgroundColor: 'rgba(225,29,72,0.05)',
-        shadowColor: SL.red, shadowOffset: { width: 0, height: 0 },
-        shadowOpacity: 1, shadowRadius: 48, elevation: 20,
-        opacity: haloOpacity, transform: [{ scale: haloScale }],
-      }} />
-
-      {/* Vortex core — dark center bleeding to a hot rim. */}
-      <Svg width={size} height={size} style={StyleSheet.absoluteFill}>
-        <Defs>
-          <RadialGradient id={ids.disc} cx="50%" cy="50%" r="50%">
-            <Stop offset="0%"   stopColor="#2a0712" stopOpacity="1" />
-            <Stop offset="58%"  stopColor="#0a0308" stopOpacity="1" />
-            <Stop offset="90%"  stopColor="#7a0f2a" stopOpacity="0.55" />
-            <Stop offset="100%" stopColor="#FF5C8A" stopOpacity="0.85" />
-          </RadialGradient>
-        </Defs>
-        <Circle cx={R} cy={R} r={rDisc} fill={`url(#${ids.disc})`} />
-      </Svg>
-
-      {/* Outer energy ring — slow clockwise. */}
-      <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ rotate: rotA }] }]}>
-        <Svg width={size} height={size}>
-          <Defs>
-            <LinearGradient id={`${ids.ring}a`} x1="0%" y1="0%" x2="100%" y2="100%">
-              <Stop offset="0%"   stopColor="#6A0F2A" />
-              <Stop offset="50%"  stopColor="#FF5C8A" />
-              <Stop offset="100%" stopColor="#E11D48" />
-            </LinearGradient>
-          </Defs>
-          <Circle
-            cx={R} cy={R} r={rRim} stroke={`url(#${ids.ring}a)`} strokeWidth={4.5}
-            fill="none" strokeLinecap="round"
-            strokeDasharray={`${circ * 0.06} ${circ * 0.04}`}
-          />
-        </Svg>
-      </Animated.View>
-
-      {/* Inner energy ring — faster counter-clockwise, fine sparks. */}
-      <Animated.View style={[StyleSheet.absoluteFill, { transform: [{ rotate: rotB }] }]}>
-        <Svg width={size} height={size}>
-          <Circle
-            cx={R} cy={R} r={rRingB} stroke="#FF5C8A" strokeWidth={2.5}
-            fill="none" strokeLinecap="round" strokeDasharray="2 16" opacity={0.85}
-          />
-        </Svg>
-      </Animated.View>
-
-      {/* Crisp outer rim. */}
-      <Svg width={size} height={size} style={StyleSheet.absoluteFill}>
-        <Circle cx={R} cy={R} r={rRim} stroke={SL.red} strokeWidth={1.5} fill="none" opacity={0.6} />
-      </Svg>
-    </View>
-  );
-}
-
 // A mission the player is CURRENTLY mid-session on (a live Workout Mode session
 // is saved on this device). It reads totally different from a normal mission
-// card so the eye is pulled straight to it: a breathing ice-glow border, a hot
+// card so the eye is pulled straight to it: a breathing type-color glow, a hot
 // pulsing "● IN PROGRESS" beacon, an energized left rail, and a light sweep that
 // keeps streaking across the card — it looks ALIVE, not idle. Tapping resumes.
 // Animations are native-driver (opacity + transform only) and torn down on
 // unmount, so they run only while a live card is on screen.
-function LiveMissionCard({ workout, onOpen }) {
+function LiveMissionCard({ workout, onOpen, tint }) {
+  // The whole live treatment is one color family: the mission's type color (rose
+  // for HANDSTAND, gold for ACCESSORIES…), falling back to the ice accent when a
+  // legacy workout has no type.
+  const base  = tint || SL.accent;
+  const bright = lighten(base);
   const pulse = useRef(new Animated.Value(0)).current;
   const sweep = useRef(new Animated.Value(0)).current;
   const [w, setW] = useState(0);
@@ -209,30 +126,48 @@ function LiveMissionCard({ workout, onOpen }) {
 
   return (
     <TouchableOpacity
-      style={styles.liveCard}
+      style={[styles.liveCard, { borderColor: base }]}
       onPress={onOpen}
       activeOpacity={0.85}
       onLayout={e => setW(e.nativeEvent.layout.width)}
     >
-      {/* Breathing ice-glow border — the whole card seems to inhale/exhale. */}
-      <Animated.View pointerEvents="none" style={[styles.liveGlow, { opacity: glowO }]} />
+      {/* Breathing type-color glow border — the card seems to inhale/exhale. */}
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.liveGlow, { opacity: glowO, borderColor: bright, shadowColor: base }]}
+      />
       {/* Diagonal light streak sweeping across, on a loop — pure energy. */}
       <Animated.View
         pointerEvents="none"
-        style={[styles.liveSweep, { transform: [{ translateX: sweepX }, { rotate: '18deg' }] }]}
+        style={[
+          styles.liveSweep,
+          { backgroundColor: rgba(bright, 0.16), shadowColor: bright },
+          { transform: [{ translateX: sweepX }, { rotate: '18deg' }] },
+        ]}
       />
       {/* Energized left rail, pulsing in time with the glow. */}
-      <Animated.View pointerEvents="none" style={[styles.liveRail, { opacity: railO }]} />
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.liveRail, { opacity: railO, backgroundColor: bright, shadowColor: base }]}
+      />
 
       <View style={styles.liveBody}>
         <View style={styles.liveBadgeRow}>
-          <Animated.View style={[styles.liveDot, { opacity: dotO, transform: [{ scale: dotS }] }]} />
-          <Text style={styles.liveBadgeText}>IN PROGRESS</Text>
+          <Animated.View
+            style={[
+              styles.liveDot,
+              { backgroundColor: bright, shadowColor: bright },
+              { opacity: dotO, transform: [{ scale: dotS }] },
+            ]}
+          />
+          <Text style={[styles.liveBadgeText, { color: lighten(base, 0.7), textShadowColor: rgba(bright, 0.8) }]}>
+            IN PROGRESS
+          </Text>
         </View>
-        <Text style={styles.missionTitle} numberOfLines={2} ellipsizeMode="tail">
+        <Text style={[styles.missionTitle, { color: base }]} numberOfLines={2} ellipsizeMode="tail">
           {workout.title?.toUpperCase()}
         </Text>
-        <Text style={styles.liveResume}>▶ TAP TO RESUME</Text>
+        <Text style={[styles.liveResume, { color: base, textShadowColor: rgba(base, 0.6) }]}>▶ TAP TO RESUME</Text>
       </View>
     </TouchableOpacity>
   );
@@ -249,20 +184,19 @@ export default function HomeScreen({ navigation }) {
   const [dailyQuests,    setDailyQuests]    = useState([]);
   const [doneTodayIds,   setDoneTodayIds]   = useState(new Set());
   const [loading,        setLoading]        = useState(true);
-  // First-launch "How LevelX Works" walkthrough. Auto-opens once for a brand-new
-  // player (gated in AsyncStorage); the HOW IT WORKS button can reopen it anytime.
-  const [showOnboarding, setShowOnboarding] = useState(false);
-  // Mission tapped → a red-gate portal the player steps through into the session.
+  // The walkthrough itself is NOT rendered here any more — it lives at the app
+  // root (PlayerTour in App.js), because a <Modal> inside a tab-pager page gets
+  // torn down on the APK the moment the tour navigates to another tab. This
+  // screen only opens it (the TUTORIAL pill) and reads whether it's running, so
+  // it can show the tutorial-only demo mission. Opening it ONLY happens on that
+  // tap — there is no first-launch auto-open.
+  const { tourOpen: showOnboarding, openTour } = useTour();
+  // Mission tapped → the system's quest-alert window opens over Home.
   const [activeMission,  setActiveMission]  = useState(null);
   // Keys of workouts with a saved (in-progress) Workout Mode session on this
   // device — so today's mission card switches to its live, animated state.
   const [inProgress,     setInProgress]     = useState(new Set());
   const { width: winW } = useWindowDimensions();
-  // Fill the width (minus the backdrop's side gutters) so the gate is as big as
-  // it can be — the inner button then has room to keep "WORKOUT MODE" on one
-  // line. Capped so it doesn't grow huge on wide/desktop windows.
-  const portalD = Math.min(440, winW - 36);
-
   // The big "trophy HUD" display elements (player name, level number, rank
   // medallion, section titles) and the generous vertical paddings are tuned for
   // the WIDE desktop card (CARD_W). On a phone the card width collapses to the
@@ -284,7 +218,18 @@ export default function HomeScreen({ navigation }) {
   const statAnim = useRef(new Animated.Value(0)).current;
   const gridAnim = useRef(new Animated.Value(0)).current;
   const [displayLvl, setDisplayLvl] = useState(0);
-  const [barPct,     setBarPct]     = useState(0);
+  // The bar is ANIMATED, not re-rendered. `barGrow` (0→1) slides the fill in on
+  // the NATIVE thread and `barTarget` is the level's real percentage. The fill
+  // used to be plain state written from a per-frame listener, which re-rendered
+  // this whole screen 60 times a second for the length of the intro — that was
+  // the stutter. `countUp` is its JS-side twin: the number can't leave the JS
+  // thread, but its rounded value only changes a handful of times, so it costs a
+  // handful of renders instead of one per frame.
+  const barGrow = useRef(new Animated.Value(0)).current;
+  const countUp = useRef(new Animated.Value(0)).current;
+  const [barTarget, setBarTarget] = useState(0);
+  // Track width in px — a transform can't be driven by a percentage.
+  const [trackW, setTrackW] = useState(0);
   const reduceMotion = useRef(false);
   const introDone    = useRef(false);
   // The entrance (blocks pop-in + level count-up + bar fill) plays ONCE per mount
@@ -301,19 +246,6 @@ export default function HomeScreen({ navigation }) {
     AccessibilityInfo.isReduceMotionEnabled?.().then(v => { if (alive) reduceMotion.current = !!v; });
     return () => { alive = false; };
   }, []);
-
-  // The tutorial opens ONLY when the player taps the TUTORIAL button — no
-  // first-launch auto-open.
-  const closeOnboarding = useCallback(() => {
-    markOnboardingSeen();
-    // The tour may have walked the player to another tab. Return to Home FIRST,
-    // while the overlay still covers the screen, then lift the overlay a beat
-    // later. Dismissing the overlay AND jumping the tab pager on the same frame
-    // desyncs react-native-pager-view (screen stuck half-shifted + unresponsive
-    // — the documented cross-tab hazard), which is what "skip goes crazy" was.
-    try { navigation.navigate('Home'); } catch {}
-    setTimeout(() => setShowOnboarding(false), 240);
-  }, [navigation]);
 
   // Elements the guided tour measures + points its arrow at.
   const tourLevelRef    = useTourTarget('home.level');
@@ -334,7 +266,7 @@ export default function HomeScreen({ navigation }) {
 
     if (reduceMotion.current) {
       heroAnim.setValue(1); statAnim.setValue(1); gridAnim.setValue(1);
-      setDisplayLvl(lvl); setBarPct(targetPct);
+      setDisplayLvl(lvl); setBarTarget(targetPct); barGrow.setValue(1); countUp.setValue(1);
       introDone.current = true;
       return;
     }
@@ -345,30 +277,34 @@ export default function HomeScreen({ navigation }) {
     });
     Animated.stagger(120, [enter(heroAnim), enter(statAnim), enter(gridAnim)]).start();
 
-    setDisplayLvl(0); setBarPct(0);
+    setDisplayLvl(0); setBarTarget(targetPct); barGrow.setValue(0); countUp.setValue(0);
 
-    // Count-up + bar fill share one driver so they rise in lockstep.
-    const driver = new Animated.Value(0);
-    const sub = driver.addListener(({ value }) => {
+    // Two drivers, same curve, started together — so the number and the bar rise
+    // in lockstep while each runs where it belongs: the bar's slide natively, the
+    // count-up in JS (a listener can't read a native value without dragging every
+    // frame back over the bridge).
+    const cfg = { toValue: 1, duration: 1100, delay: 260, easing: Easing.out(Easing.cubic) };
+    const sub = countUp.addListener(({ value }) => {
       setDisplayLvl(Math.round(value * lvl));
-      setBarPct(value * targetPct);
     });
-    const run = Animated.timing(driver, {
-      toValue: 1, duration: 1100, delay: 260, easing: Easing.out(Easing.cubic), useNativeDriver: false,
+    const slide = Animated.timing(barGrow, { ...cfg, useNativeDriver: true });
+    const count = Animated.timing(countUp, { ...cfg, useNativeDriver: false });
+    slide.start();
+    count.start(({ finished }) => {
+      if (finished) { setDisplayLvl(lvl); introDone.current = true; }
+      countUp.removeListener(sub);
     });
-    run.start(({ finished }) => {
-      if (finished) { setDisplayLvl(lvl); setBarPct(targetPct); introDone.current = true; }
-      driver.removeListener(sub);
-    });
-    return () => { driver.removeListener(sub); run.stop(); };
-  }, [loading, !!profile, heroAnim, statAnim, gridAnim]);
+    return () => { countUp.removeListener(sub); slide.stop(); count.stop(); };
+  }, [loading, !!profile, heroAnim, statAnim, gridAnim, barGrow, countUp]);
 
   // After the intro count-up settles, keep the number/bar in sync with later
   // level changes (e.g. finishing a workout) — instantly, no re-count.
   useEffect(() => {
     if (!introDone.current) return;
     setDisplayLvl(lvl);
-    setBarPct(maxLvl > 0 ? Math.min(lvl / maxLvl, 1) * 100 : 0);
+    setBarTarget(maxLvl > 0 ? Math.min(lvl / maxLvl, 1) * 100 : 0);
+    barGrow.setValue(1);
+    countUp.setValue(1);
   }, [lvl, maxLvl]);
 
   const fetchData = useCallback(async () => {
@@ -597,7 +533,7 @@ export default function HomeScreen({ navigation }) {
   });
 
   return (
-    <ScreenFrame maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame ready={!loading}>
     <View style={styles.card}>
     <View style={[styles.body, d.body]}>
 
@@ -606,7 +542,7 @@ export default function HomeScreen({ navigation }) {
         <TouchableOpacity
           style={styles.helpBtn}
           activeOpacity={0.8}
-          onPress={() => setShowOnboarding(true)}
+          onPress={openTour}
         >
           <Text style={styles.helpLabel}>TUTORIAL</Text>
         </TouchableOpacity>
@@ -633,13 +569,6 @@ export default function HomeScreen({ navigation }) {
             {className && (
               <View style={[styles.crestBlock, d.crestBlock]}>
                 <View style={[styles.crest, d.crest]}>
-                  {/* Left flourish — gold line into a diamond tick. */}
-                  <View style={styles.crestWing}>
-                    <View style={styles.crestSpacer} />
-                    <View style={styles.crestLine} />
-                    <View style={styles.crestTick} />
-                  </View>
-
                   {/* Rank medallion — a glowing gold gem holding the numeral. */}
                   <View style={[styles.medallionWrap, d.medallionWrap]}>
                     <View style={[styles.medallion, d.medallion]} />
@@ -659,13 +588,6 @@ export default function HomeScreen({ navigation }) {
                       {rankNumeral}
                     </Text>
                   </View>
-
-                  {/* Right flourish — mirror of the left. */}
-                  <View style={styles.crestWing}>
-                    <View style={styles.crestTick} />
-                    <View style={styles.crestLine} />
-                    <View style={styles.crestSpacer} />
-                  </View>
                 </View>
 
                 {classKicker && (
@@ -684,7 +606,7 @@ export default function HomeScreen({ navigation }) {
 
           {/* ── LVL ── */}
           <Animated.View style={[styles.statsRow, d.statsRow, enterStyle(statAnim)]}>
-            <View ref={tourLevelRef} style={[styles.statCard, d.statCard]}>
+            <View ref={tourLevelRef} collapsable={false} style={[styles.statCard, d.statCard]}>
               <View style={styles.levelTopRow}>
                 <Text style={[styles.levelKicker, d.levelKicker]}>CURRENT LEVEL</Text>
                 {/* The % pill was dropped — the bar + "x / y" below already show
@@ -704,11 +626,29 @@ export default function HomeScreen({ navigation }) {
 
               <ShimmerText text={String(displayLvl)} style={[styles.statNumber, d.statNumber]} active={prestigeReady} />
 
-              <View style={styles.progressBg}>
-                <ShimmerFill
-                  style={[styles.progressFill, { width: `${barPct.toFixed(1)}%` }]}
-                  active={prestigeReady}
-                />
+              {/* The fill is laid out at its FINAL width and slid in from the
+                  left; the track clips the overhang, so it reads as a bar
+                  growing while being one native transform. */}
+              <View
+                style={styles.progressBg}
+                onLayout={(e) => {
+                  const w = Math.round(e.nativeEvent.layout.width);
+                  setTrackW(prev => (prev === w ? prev : w));
+                }}
+              >
+                <Animated.View
+                  style={[styles.progressFillWrap, {
+                    width: (trackW * barTarget) / 100,
+                    transform: [{
+                      translateX: barGrow.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [-(trackW * barTarget) / 100, 0],
+                      }),
+                    }],
+                  }]}
+                >
+                  <ShimmerFill style={styles.progressFill} active={prestigeReady} />
+                </Animated.View>
               </View>
 
               <View style={styles.levelBottomRow}>
@@ -724,7 +664,7 @@ export default function HomeScreen({ navigation }) {
           <Animated.View style={[styles.sectionsRow, d.sectionsRow, enterStyle(gridAnim)]}>
 
             {/* Today's Missions */}
-            <View ref={tourMissionsRef} style={[styles.sectionPanel, d.sectionPanel]}>
+            <View ref={tourMissionsRef} collapsable={false} style={[styles.sectionPanel, d.sectionPanel]}>
               <View style={styles.panelHeader}>
                 <View style={styles.panelHeaderBar} />
                 <Text style={[styles.panelHeaderText, d.panelHeaderText]} numberOfLines={2} ellipsizeMode="tail">
@@ -747,11 +687,10 @@ export default function HomeScreen({ navigation }) {
                   // we show one placeholder mission (non-interactive) purely so the
                   // player can SEE + experience what a mission looks like. Tagged as
                   // home.mission1 so the tour highlights its exact shape.
-                  <View ref={tourMission1Ref} style={styles.missionCard} pointerEvents="none">
+                  <View ref={tourMission1Ref} collapsable={false} style={styles.missionCard} pointerEvents="none">
                     <View style={styles.missionAccent} />
                     <View style={styles.missionBody}>
                       <Text style={styles.missionTitle} numberOfLines={1}>EXAMPLE WORKOUT</Text>
-                      <Text style={styles.missionPurpose} numberOfLines={1}>A sample mission — just for this tour</Text>
                     </View>
                     <View style={styles.missionCheckbox} />
                   </View>
@@ -766,14 +705,26 @@ export default function HomeScreen({ navigation }) {
                     // Mid-session today → swap in the live, animated card.
                     if (!workout.completed && inProgress.has(sessionKey(TODAY, workout.id))) {
                       return (
-                        <LiveMissionCard
+                        // The tour's "Start a Workout" step measures the FIRST
+                        // mission row — and this live variant is a first row too.
+                        // Without the tag here, a player mid-session (the common
+                        // case: you resume a workout, so your one mission is
+                        // in-progress) left home.mission1 unregistered and the
+                        // step fell back to drawing a circle in empty space.
+                        <View
                           key={workout.overrideId}
-                          workout={workout}
-                          onOpen={() => setActiveMission(workout)}
-                        />
+                          ref={mi === 0 ? tourMission1Ref : undefined}
+                          collapsable={false}
+                        >
+                          <LiveMissionCard
+                            workout={workout}
+                            tint={accentFor(workout.category)}
+                            onOpen={() => setActiveMission(workout)}
+                          />
+                        </View>
                       );
                     }
-                    const tc = accentFor(workout.category); // accessory/legs glow, else null
+                    const tc = accentFor(workout.category); // type glow, null when untyped
                     return (
                     <TouchableOpacity
                       key={workout.overrideId}
@@ -781,25 +732,27 @@ export default function HomeScreen({ navigation }) {
                       style={[
                         styles.missionCard,
                         workout.completed && styles.missionCardDone,
-                        tc && !workout.completed && { borderColor: tc + '66', shadowColor: tc },
+                        // Done or not, the card wears its OWN type color — a
+                        // completed HANDSTAND stays rose instead of flipping to
+                        // the ice-blue "done" theme.
+                        tc && (workout.completed
+                          ? { borderColor: tc, shadowColor: tc }
+                          : { borderColor: tc + '66', shadowColor: tc }),
                       ]}
                       onPress={() => setActiveMission(workout)}
                       activeOpacity={0.8}
                     >
                       <View style={[styles.missionAccent, tc && { backgroundColor: tc, shadowColor: tc }]} />
                       <View style={styles.missionBody}>
+                        {/* Title only — the purpose/description lives in Workout
+                            Mode, in full, so the board stays a clean list. */}
                         <Text
-                          style={[styles.missionTitle, tc && !workout.completed && { color: tc }]}
+                          style={[styles.missionTitle, tc && { color: tc }]}
                           numberOfLines={2}
                           ellipsizeMode="tail"
                         >
                           {workout.title?.toUpperCase()}
                         </Text>
-                        {workout.purpose ? (
-                          <Text style={styles.missionPurpose} numberOfLines={2} ellipsizeMode="tail">
-                            {workout.purpose}
-                          </Text>
-                        ) : null}
                       </View>
                       {/* Checkbox stays the quick-complete toggle (its own tap target,
                           so the card body opens the launcher instead). */}
@@ -807,6 +760,9 @@ export default function HomeScreen({ navigation }) {
                         style={[
                           styles.missionCheckbox,
                           workout.completed && styles.missionCheckboxDone,
+                          tc && (workout.completed
+                            ? { backgroundColor: tc, borderColor: tc, shadowColor: tc }
+                            : { borderColor: tc + '99' }),
                         ]}
                         onPress={() => toggleWorkout(workout)}
                         hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -872,70 +828,20 @@ export default function HomeScreen({ navigation }) {
         </View>
       )}
 
-      {/* Mission launcher — a RED GATE portal (Solo Leveling) the player steps
-          through into the live session. Rotating energy rings + a vortex core. */}
-      <Modal
+      {/* Mission launcher — the SYSTEM's own alert window (see QuestGate). */}
+      <QuestGate
         visible={!!activeMission}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setActiveMission(null)}
-      >
-        <TouchableOpacity
-          style={styles.modalBackdrop}
-          activeOpacity={1}
-          onPress={() => setActiveMission(null)}
-        >
-          <TouchableOpacity
-            activeOpacity={1}
-            style={[styles.portalWrap, { width: portalD, height: portalD }]}
-          >
-            {/* Spinning portal effects (mounted only while open, so it animates
-                from the moment the gate appears). */}
-            {!!activeMission && <GatePortalFX size={portalD} />}
-
-            <View style={[styles.portalContent, { width: portalD * 0.72 }]}>
-              <Text style={styles.modalTitle} numberOfLines={3}>
-                {activeMission?.title?.toUpperCase()}
-              </Text>
-
-              <View style={styles.modalDivider} />
-
-              {/* The gate core — press to step through. */}
-              <TouchableOpacity
-                style={styles.gateBtn}
-                activeOpacity={0.85}
-                onPress={() => startWorkoutMode(activeMission)}
-              >
-                <ShimmerText
-                  text={missionLive ? '▶ RESUME' : '▶ ENTER'}
-                  style={styles.gateBtnText}
-                  colors={ENTER_GLOW}
-                  active={!!activeMission}
-                />
-                <Text style={styles.gateBtnSub} numberOfLines={1}>WORKOUT MODE</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.modalCloseBtn}
-                activeOpacity={0.8}
-                onPress={() => setActiveMission(null)}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              >
-                <Text style={styles.modalCloseText}>CLOSE</Text>
-              </TouchableOpacity>
-            </View>
-          </TouchableOpacity>
-        </TouchableOpacity>
-      </Modal>
-
-      {/* First-launch guided tour — walks the player through every tab (auto-opens
-          once for a new player; reopened via the HOW IT WORKS pill). It drives the
-          tab navigation itself so the real screens show behind each caption. */}
-      <GuidedTour
-        visible={showOnboarding}
-        onClose={closeOnboarding}
-        onNavigate={(tab) => navigation.navigate(tab)}
+        title={(activeMission?.title || '').toUpperCase()}
+        purpose={activeMission?.purpose}
+        tagLabel={categoryLabel(activeMission?.category)?.toUpperCase()}
+        accent={accentFor(activeMission?.category)}
+        live={missionLive}
+        onEnter={() => startWorkoutMode(activeMission)}
+        onClose={() => setActiveMission(null)}
       />
+
+      {/* The guided tour itself renders at the app root — see PlayerTour in
+          App.js and the note on `showOnboarding` above. */}
 
     </View>
     </View>
@@ -975,15 +881,11 @@ function makeDyn(s) {
 }
 
 const styles = StyleSheet.create({
-  // Constant-MINIMUM-height card (matches the Workouts/Weekly-Plan CARD_H) so the
-  // frame is a constant full-screen size from the first render — it never SHRINKS
-  // with data or loading state (no load-time size jump), so short-content days look
-  // identical to the other cards with dead space below. But unlike a hard `height`,
-  // `minHeight` lets the card GROW when a day has more missions/quests than fit in
-  // CARD_H — otherwise the overflow is clipped by ScreenFrame's `overflow:hidden`
-  // and unreachable (the old bug: extra daily quests sliced off the bottom). When it
-  // grows, ScreenFrame's outer ScrollView scrolls to reveal the rest.
-  card: { width: '100%', minHeight: CARD_H },
+  // No height of its own: ScreenFrame's card is already a constant full-screen
+  // box, so `flexGrow: 1` just stretches this body to the bottom of it — short
+  // days get dead space below instead of a shorter frame, and a day with more
+  // missions than fit scrolls inside the card (the frame itself never moves).
+  card: { width: '100%', flexGrow: 1 },
   // Content inside the card. The full layout ALWAYS renders — the load spinner is
   // overlaid, never swapped in — so the card never jumps size on load.
   body: {
@@ -1008,6 +910,9 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   // Quiet ice-pill that reopens the walkthrough — help without stealing focus.
+  // OUTLINE ONLY: no fill, and no `elevation` either — on Android elevation
+  // paints a shaded plate behind the pill, which is what made these two read as
+  // filled light-blue buttons next to the unfilled BACK pills everywhere else.
   helpBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1017,12 +922,11 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     borderWidth: 1.5,
     borderColor: SL.accent,
-    backgroundColor: 'rgba(74,158,191,0.10)',
+    backgroundColor: 'transparent',
     shadowColor: SL.accent,
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.35,
     shadowRadius: 10,
-    elevation: 4,
   },
   helpLabel: {
     fontFamily: F.heading,
@@ -1031,6 +935,7 @@ const styles = StyleSheet.create({
     color: SL.accent,
   },
   // Icon-only power pill — quiet chrome so the hero owns the top of the screen.
+  // Outline only, same as helpBtn above.
   signOutBtn: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -1039,12 +944,11 @@ const styles = StyleSheet.create({
     borderRadius: 22,
     borderWidth: 1.5,
     borderColor: SL.accent,
-    backgroundColor: 'rgba(74,158,191,0.10)',
+    backgroundColor: 'transparent',
     shadowColor: SL.accent,
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.35,
     shadowRadius: 10,
-    elevation: 4,
   },
   // Power symbol drawn from primitives (no icon font): a ring with a vertical
   // stem through its top center — the universal power/exit glyph.
@@ -1102,44 +1006,9 @@ const styles = StyleSheet.create({
   crest: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 18,
     width: '100%',
-  },
-  // Each wing stretches to fill the row, so the gold rules run all the way out to
-  // the card edges (the medallion stays centered between them).
-  crestWing: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  // Gold rule with a soft glow; flex:1 so it extends across the available width.
-  crestLine: {
-    flex: 1,
-    height: 3,
-    borderRadius: 1.5,
-    backgroundColor: SL.gold,
-    opacity: 0.7,
-    shadowColor: SL.gold,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.9,
-    shadowRadius: 8,
-  },
-  // Outer spacer that splits the wing's free space with the line, so the gold
-  // rule renders half-length (anchored at the medallion, gap toward the edge).
-  crestSpacer: {
-    flex: 1,
-  },
-  // Small diamond tick (rotated square) sitting between the line and the gem.
-  crestTick: {
-    width: 11,
-    height: 11,
-    backgroundColor: SL.gold,
-    transform: [{ rotate: '45deg' }],
-    shadowColor: SL.gold,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 1,
-    shadowRadius: 10,
   },
   // Fixed box the rotated gem + numeral are centered in. Sized larger so even
   // wider roman numerals (VIII, etc.) sit comfortably inside the diamond.
@@ -1281,8 +1150,15 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.5,
     shadowRadius: 8,
   },
+  // Animated width wrapper (grows in on load); the fill itself just fills it.
+  progressFillWrap: {
+    height: '100%',
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
   progressFill: {
     height: '100%',
+    width: '100%',
     backgroundColor: SL.accent,
     borderRadius: 4,
   },
@@ -1441,12 +1317,6 @@ const styles = StyleSheet.create({
     fontSize: 20,
     color: SL.text,
     letterSpacing: 0.2,
-  },
-  missionPurpose: {
-    fontFamily: F.bodyMed,
-    fontSize: 14,
-    color: SL.muted,
-    letterSpacing: 0.3,
   },
   missionCheckbox: {
     width: 20,
@@ -1624,106 +1494,6 @@ const styles = StyleSheet.create({
   dqTitleDone: {
     color: SL.muted,
     textDecorationLine: 'line-through',
-  },
-
-  // ── Mission launcher — the RED GATE portal ────────────────────────────────
-
-  modalBackdrop: {
-    flex: 1,
-    // Deep, near-black wash so the lit portal is the only thing the eye lands on.
-    backgroundColor: 'rgba(1,3,8,0.88)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 18,
-  },
-  // The circular gate. Content is centered inside; GatePortalFX fills it behind.
-  portalWrap: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  // Content sits over the vortex core, width-constrained so it stays inside the
-  // circle.
-  portalContent: {
-    alignItems: 'center',
-    gap: 12,
-    zIndex: 2,
-  },
-  modalTitle: {
-    fontFamily: F.heading,
-    fontSize: 23,
-    color: '#FFFFFF',
-    letterSpacing: 0.8,
-    textAlign: 'center',
-    lineHeight: 27,
-    // Dark halo so white reads cleanly over the bright crimson swirl.
-    textShadowColor: 'rgba(20,0,4,0.95)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 14,
-  },
-  modalDivider: {
-    width: 70,
-    height: 1.5,
-    backgroundColor: SL.red,
-    opacity: 0.6,
-    shadowColor: SL.red,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.8,
-    shadowRadius: 6,
-  },
-  // The gate core — a glowing pill you press to step through. Dark wine backing
-  // so the label reads even as the white light core blooms behind it.
-  gateBtn: {
-    marginTop: 4,
-    paddingVertical: 16,
-    paddingHorizontal: 22,
-    borderRadius: 999,
-    borderWidth: 2,
-    borderColor: '#FF8FB0',
-    backgroundColor: 'rgba(22,2,8,0.95)',
-    alignItems: 'center',
-    gap: 5,
-    shadowColor: SL.red,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.95,
-    shadowRadius: 26,
-    elevation: 12,
-  },
-  gateBtnText: {
-    fontFamily: F.heading,
-    fontSize: 30,
-    color: '#FFD6E2',
-    letterSpacing: 4,
-    textShadowColor: 'rgba(255,92,138,0.9)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 16,
-  },
-  gateBtnSub: {
-    fontFamily: F.heading,
-    fontSize: 15,
-    color: '#FFD6E2',
-    letterSpacing: 3,
-    textShadowColor: 'rgba(255,92,138,0.7)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 8,
-  },
-  // Small dark pill housing the CLOSE label so it reads as a real button.
-  modalCloseBtn: {
-    marginTop: 12,
-    paddingVertical: 10,
-    paddingHorizontal: 28,
-    borderRadius: 999,
-    borderWidth: 2,
-    borderColor: '#FF8FB0',
-    backgroundColor: 'rgba(16,2,6,0.96)',
-  },
-  modalCloseText: {
-    fontFamily: F.heading,
-    fontSize: 16,
-    color: '#FFFFFF',
-    letterSpacing: 4,
-    textShadowColor: 'rgba(255,92,138,0.6)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 6,
   },
 
 });
