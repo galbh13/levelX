@@ -806,12 +806,12 @@ export default function HomeScreen({ navigation }) {
                       onPress={() => toggleDailyQuest(q)}
                       activeOpacity={0.7}
                     >
-                      <View style={[styles.dqCheckbox, done && styles.dqCheckboxDone]}>
-                        {done && <PopCheck><Text style={styles.dqCheckMark}>✓</Text></PopCheck>}
-                      </View>
                       <Text style={[styles.dqTitle, done && styles.dqTitleDone]} numberOfLines={2}>
                         {q.title}
                       </Text>
+                      <View style={[styles.dqCheckbox, done && styles.dqCheckboxDone]}>
+                        {done && <PopCheck><Text style={styles.dqCheckMark}>✓</Text></PopCheck>}
+                      </View>
                       <DoneAura active={done} color={SL.accent} />
                       <ClearSweep done={done} color={SL.accent} />
                     </TouchableOpacity>
@@ -1470,9 +1470,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.2,
     shadowRadius: 10,
   },
+  // Matches missionCheckbox exactly — both boards tick the same way, on the right.
   dqCheckbox: {
-    width: 28,
-    height: 28,
+    width: 20,
+    height: 20,
     borderWidth: 1.5,
     borderColor: SL.muted,
     borderRadius: 6,
@@ -1490,7 +1491,7 @@ const styles = StyleSheet.create({
   dqCheckMark: {
     fontFamily: F.heading,
     color: SL.bg,
-    fontSize: 18,
+    fontSize: 15,
   },
   dqTitle: {
     flex: 1,

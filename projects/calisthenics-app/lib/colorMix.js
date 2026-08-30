@@ -38,4 +38,4 @@ export const rgba = (hex, a) => {
 // repeats the first stop at the end, so the cycle closes on itself with no jump,
 // and the whole ramp stays inside a single hue — a travelling light in the
 // colour the caller already owns, not a rainbow.
-export const glowRamp = (hex) => [darken(hex, 0.55), hex, lighten(hex, 0.55), hex];
+export const glowRamp = (hex) => [darken(hex, 0.78), hex, lighten(hex, 0.85), hex];
