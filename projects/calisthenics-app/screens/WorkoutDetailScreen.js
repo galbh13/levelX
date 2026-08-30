@@ -170,7 +170,7 @@ export default function WorkoutDetailScreen({ route, navigation }) {
           activeOpacity={0.7}
         >
           <Text style={[styles.exName, styles.exNameLink, compact && styles.exNameSm]}>
-            {ex.name?.toUpperCase()} <Text style={styles.exNameHint}>ⓘ</Text>
+            {ex.name?.toUpperCase()}
           </Text>
         </TouchableOpacity>
         {ex.variation ? <CoachText text={ex.variation} style={styles.exVariation} prefix="※ " /> : null}
@@ -481,12 +481,11 @@ const styles = StyleSheet.create({
     letterSpacing: 1.5,
     textTransform: 'uppercase',
   },
-  // The name is a button into the how-to card — ice-glow + ⓘ hint marks it tappable.
+  // The name is a button into the how-to card — the ice glow marks it tappable.
   exNameLink: {
     color: SL.accent,
     textShadowColor: 'rgba(74,158,191,0.5)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
   },
-  exNameHint: { fontFamily: F.heading, fontSize: 17, color: SL.accent },
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   metaChip: {
     borderWidth: 1,

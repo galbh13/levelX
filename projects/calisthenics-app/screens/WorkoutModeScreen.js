@@ -794,7 +794,7 @@ export default function WorkoutModeScreen({ route, navigation }) {
                 styles.exNameLink,
                 tc && { color: tc, textShadowColor: rgba(tc, 0.5) },
               ]}>
-                {ex.name?.toUpperCase()} <Text style={[styles.exNameHint, tcText]}>ⓘ</Text>
+                {ex.name?.toUpperCase()}
               </Text>
             </TouchableOpacity>
             <Text style={styles.exTarget}>
@@ -1266,7 +1266,6 @@ const styles = StyleSheet.create({
     color: SL.accent,
     textShadowColor: 'rgba(74,158,191,0.5)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
   },
-  exNameHint: { fontFamily: F.heading, fontSize: 17, color: SL.accent },
   exTarget: { fontFamily: F.bodyMed, fontSize: 16, color: SL.muted, letterSpacing: 1, marginTop: 2 },
   nowTag: {
     fontFamily: F.heading, fontSize: 14, color: SL.bg, letterSpacing: 1.5,
