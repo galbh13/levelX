@@ -943,9 +943,9 @@ tile → it lands in MY WORKOUTS → schedule it onto weekdays from there.
 each set as they go. Entered **exclusively through the QUEST GATE** on
 HomeScreen's today's-missions (tap a mission → the system's alert window opens →
 ▶ ENTER / ▶ RESUME steps through into the live session via `startWorkoutMode`).
-WorkoutsScreen's day panel does NOT offer it anymore — its rows are VIEW / MARK
-DONE only (no ▶ WORKOUT button). This keeps the "entering a session" moment a
-single, staged flow rather than a plain list button.
+WorkoutsScreen's day panel does NOT offer it anymore — a row there just opens the
+workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps the
+"entering a session" moment a single, staged flow rather than a plain list button.
 - **The launcher is `components/QuestGate.js` (2026-08-28).** The old RED GATE
   portal — the spinning crimson vortex with rotating energy rings — was
   **removed**; `GatePortalFX` and every `portal*`/`gate*` style went with it.
@@ -1143,7 +1143,8 @@ single, staged flow rather than a plain list button.
   CLASS) + three direct ice-tile buttons **DAILY QUESTS** (→ `DailyQuest`, passed
   the scoped `selectedStudent` from CoachContext), **MY WORKOUTS** (→ `AllWorkouts`)
   and **WORKOUTS LIBRARY** (→ `EliteWorkouts` — import example workouts into the
-  scoped player's warehouse) + week strip + day panel (EDIT DAY, VIEW / DONE). The
+  scoped player's warehouse) + week strip + day panel (EDIT DAY; the rows are
+  read-only — see "The Workouts day panel is a READ-ONLY board"). The
   only admin-mode difference is a **← BACK** pill (returns to the `PlayerAdmin`
   hub). The old admin-only **TRAINING FORGE → Manage page-swipe was RETIRED** here —
   with it went the admin's path to `Manage`/StudentDetailScreen and the
@@ -1165,6 +1166,34 @@ single, staged flow rather than a plain list button.
   every state — starting or finishing a HANDSTAND mission must never repaint it
   blue. The rows also show the **title only** — a mission's `purpose` is read in
   Workout Mode (and in the quest gate), not on the board.
+- **The type color runs the WHOLE length of a workout (2026-08-30).** The rule
+  above is no longer HomeScreen's alone — `accentFor` is now `categoryLabel(cat)
+  ? categoryMeta(cat).color : null` (EVERY typed category, not just
+  accessory/legs) in `WorkoutsScreen`, `WorkoutModeScreen` and
+  `WorkoutDetailScreen` too, so one workout is one colour from the week strip's
+  accent dot → its row on the day panel → the quest gate → the live session.
+  · **Day panel row:** whole frame tinted (`borderColor` at `tc + '66'`, full
+    `tc` once complete, `borderLeftColor` + glow always `tc`) + the title in `tc`.
+  · **Workout Mode:** title, timer pill, purpose bar, progress fill (a
+    `lighten()`-built 4-stop ramp so the sweep still moves), the CURRENT exercise
+    card / letter badge / NOW tag / superset bracket, and the tappable exercise
+    names. Done = green and skipped = muted are untouched — those are states of
+    the EXERCISE, not the workout's identity.
+  · **Workout Detail:** purpose bar, letter badges, exercise-name links, the
+    SUPERSET chip.
+  An untyped/legacy workout returns `null` from `accentFor` and every patch is
+  `null` too, so the stylesheet's ice theme stands unchanged.
+- **The Workouts day panel is a READ-ONLY board (2026-08-30).** Its rows no
+  longer carry DONE / UNDO / a shimmering ✓ COMPLETED badge, and no longer show
+  the workout's `purpose` (same reason as the mission rows — the description is
+  read in Workout Mode). A row is: title, type colour, an unread-feedback dot,
+  and a **small static ✓ in its own colour** with the title struck through at
+  half opacity when it's behind you. The whole row is the old VIEW button (taps
+  through to `WorkoutDetail`). **Completing a session happens in exactly two
+  places — HomeScreen's mission checkbox and finishing Workout Mode** — so the
+  week view states what the training IS rather than offering a second, competing
+  tick. `handleMarkDone`/`handleUndoDone`, the `marking` state, the `isLocked`
+  7-day lock and its 🔒 LOCKED badge went with them.
 - **Quest chain cards carry a LEFT ACCENT RAIL (2026-08-24).** Every chain card on
   SkillsScreen (main + both side tiers) uses the app's shared left-rail card
   language (`borderLeftWidth: 4`, as on the Workouts day cards / exercise cards).

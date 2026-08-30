@@ -9,13 +9,10 @@ import { F } from '../constants/fonts';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
+import CoachText, { parseCoachText } from '../components/CoachText';
+import { buildGalleryIndex, resolveGuide } from '../lib/exerciseGuide';
+import { categoryLabel, categoryMeta } from '../lib/workouts';
 
-// Normalize an exercise name for catalog matching — lowercased, punctuation and
-// extra whitespace stripped — so minor formatting differences between the workout
-// row and the gallery catalog still match. (Same rule as Workout Mode.)
-function normName(name) {
-  return String(name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-}
 
 // Session-lifetime cache of everything the screen fetches, keyed by workout id.
 // A revisit renders the cached content INSTANTLY (no spinner) and then refetches
@@ -36,8 +33,23 @@ const SL = {
   gold:   '#FFD700',
 };
 
+// The workout's TYPE color — same rule as the board, the quest gate and Workout
+// Mode: a HANDSTAND workout is rose everywhere it's shown. Untyped → null = ice.
+const accentFor = (category) =>
+  categoryLabel(category) ? categoryMeta(category).color : null;
+
+const rgba = (hex, a) => {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+};
+
 export default function WorkoutDetailScreen({ route, navigation }) {
   const { workout, studentView } = route.params;
+  const tc       = accentFor(workout.category);   // null = the default ice theme
+  const tcText   = tc && { color: tc };
+  const tcFill   = tc && { backgroundColor: tc };
 
   // Seed everything from the cache when this workout was opened before — the
   // full content paints on the very first frame, no spinner.
@@ -104,21 +116,13 @@ export default function WorkoutDetailScreen({ route, navigation }) {
         setCoachFeedback(next.coachFeedback);
         setFeedbackIsRead(next.feedbackIsRead);
       }
-      const gById = {};
-      const gByName = {};
-      for (const g of galleryRes.data ?? []) {
-        gById[g.id] = g;
-        if (g.name) gByName[normName(g.name)] = g;
-      }
+      const { byId: gById, byName: gByName } = buildGalleryIndex(galleryRes.data);
       setGalleryById(gById);
       setGalleryByName(gByName);
 
       const exercisesWithVideo = (exercisesRes.data ?? []).map(ex => ({
         ...ex,
-        youtube_url:
-          (ex.gallery_id ? gById[ex.gallery_id]?.youtube_url : null)
-          ?? gByName[normName(ex.name)]?.youtube_url
-          ?? null,
+        youtube_url: resolveGuide(ex, gById, gByName).youtube_url ?? null,
       }));
       setExercises(exercisesWithVideo);
 
@@ -155,21 +159,24 @@ export default function WorkoutDetailScreen({ route, navigation }) {
   }
 
   // Tapping an exercise name opens its how-to card (video + coaching cues).
-  // Resolve the catalog row by the exact `gallery_id` link first, then a
-  // normalized-name match; if nothing matches, fall back to a name-only card so
-  // every title stays tappable (same 3-tier resolution as Workout Mode).
+  // `resolveGuide` always returns something — a name-only placeholder when the
+  // movement has no catalog entry — so every title stays tappable.
   const openExercise = (ex) => {
-    const guide = (ex.gallery_id ? galleryById[ex.gallery_id] : null)
-      ?? galleryByName[normName(ex.name)]
-      ?? { name: ex.name, movement_type: ex.variation ?? null };
-    navigation.navigate('ExerciseDetail', { exercise: guide, hideEdit: true });
+    navigation.navigate('ExerciseDetail', {
+      exercise: resolveGuide(ex, galleryById, galleryByName, categoryLabel(workout?.category)),
+      hideEdit: true,
+    });
   };
 
   // One exercise card. `compact` shrinks it so two fit side by side in a fork path.
   const renderExercise = (ex, compact = false) => (
     <View key={ex.id} style={[styles.exCard, compact && styles.exCardCompact]}>
-      <View style={[styles.letterBadge, compact && styles.letterBadgeSm]}>
-        <Text style={[styles.letterText, compact && styles.letterTextSm]}>{ex.letter}</Text>
+      <View style={[
+        styles.letterBadge,
+        compact && styles.letterBadgeSm,
+        tc && { borderColor: tc, backgroundColor: rgba(tc, 0.1) },
+      ]}>
+        <Text style={[styles.letterText, compact && styles.letterTextSm, tcText]}>{ex.letter}</Text>
       </View>
       <View style={styles.exBody}>
         <TouchableOpacity
@@ -177,14 +184,19 @@ export default function WorkoutDetailScreen({ route, navigation }) {
           hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
           activeOpacity={0.7}
         >
-          <Text style={[styles.exName, styles.exNameLink, compact && styles.exNameSm]}>
-            {ex.name?.toUpperCase()} <Text style={styles.exNameHint}>ⓘ</Text>
+          <Text style={[
+            styles.exName,
+            styles.exNameLink,
+            compact && styles.exNameSm,
+            tc && { color: tc, textShadowColor: rgba(tc, 0.5) },
+          ]}>
+            {ex.name?.toUpperCase()} <Text style={[styles.exNameHint, tcText]}>ⓘ</Text>
           </Text>
         </TouchableOpacity>
-        {ex.variation ? <Text style={styles.exVariation}>※ {ex.variation}</Text> : null}
+        {ex.variation ? <CoachText text={ex.variation} style={styles.exVariation} prefix="※ " /> : null}
         <View style={styles.metaRow}>
           {ex.superset_group != null ? (
-            <View style={[styles.metaChip, { borderColor: SL.accent }]}>
+            <View style={[styles.metaChip, { borderColor: tc ?? SL.accent }]}>
               <Text style={styles.metaChipText}>⇄ SUPERSET</Text>
             </View>
           ) : null}
@@ -195,9 +207,7 @@ export default function WorkoutDetailScreen({ route, navigation }) {
             <View style={styles.metaChip}><Text style={styles.metaChipText}>{ex.reps} REPS</Text></View>
           ) : null}
         </View>
-        {ex.notes ? (
-          <Text style={styles.exNotes}>{ex.notes}</Text>
-        ) : null}
+        {ex.notes ? <CoachText text={ex.notes} style={styles.exNotes} /> : null}
         {ex.youtube_url ? (
           <PillButton
             label="▶ WATCH VIDEO"
@@ -220,12 +230,12 @@ export default function WorkoutDetailScreen({ route, navigation }) {
   return (
     // fill mode: the frame spans the whole viewport from the first frame — its
     // size comes from the phone, never from the data, so loading can't shrink it.
-    <ScreenFrame fill maxWidth={900} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
       <ScreenHeader title={workoutTitle} onBack={() => navigation.goBack()} />
       {workoutPurpose ? (
         <View style={styles.purposeRow}>
-          <View style={styles.purposeAccent} />
-          <Text style={styles.purposeText}>{workoutPurpose}</Text>
+          {parseCoachText(workoutPurpose).some(p => p.label) ? null : <View style={[styles.purposeAccent, tcFill]} />}
+          <CoachText text={workoutPurpose} style={styles.purposeText} containerStyle={styles.purposeFlex} />
         </View>
       ) : null}
 
@@ -315,9 +325,9 @@ export default function WorkoutDetailScreen({ route, navigation }) {
           ) : null}
 
           {/* CTA — the detail view is read-only for the player: completion happens
-              on the day panel (DONE) or by finishing a Workout Mode session. The
-              old MARK AS COMPLETE button here wrote to the wrong table and was
-              removed. A completed dated workout still shows its banner. */}
+              on HomeScreen's missions (the checkbox) or by finishing a Workout
+              Mode session. The Workouts day panel doesn't tick anything off
+              anymore either. A completed dated workout still shows its banner. */}
           {studentView ? (
             (workout.completed ?? false) && (
               <View style={styles.completedBanner}>
@@ -350,6 +360,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 22,
     justifyContent: 'center',
   },
+  purposeFlex: { flex: 1 },
   purposeAccent: {
     width: 3,
     height: 18,
@@ -510,18 +521,22 @@ const styles = StyleSheet.create({
   exNotes: {
     fontFamily: F.bodyMed,
     fontSize: 18,
-    color: SL.muted,
+    lineHeight: 25,
+    color: SL.text,
+    opacity: 0.75,
     letterSpacing: 0.5,
     fontStyle: 'italic',
-    marginTop: 2,
+    marginTop: 4,
   },
+  // Matches the in-session card: the description is what explains the exercise.
   exVariation: {
     fontFamily: F.bodyMed,
-    fontSize: 15,
+    fontSize: 18,
+    lineHeight: 25,
     color: SL.accent,
     letterSpacing: 0.5,
-    marginTop: 2,
-    marginBottom: 2,
+    marginTop: 4,
+    marginBottom: 4,
   },
 
   emptyText: {

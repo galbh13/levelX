@@ -12,8 +12,11 @@ import {
 import ScreenFrame from '../components/ScreenFrame';
 import PillButton from '../components/PillButton';
 import PopCheck from '../components/PopCheck';
+import CoachText, { parseCoachText } from '../components/CoachText';
 import { ShimmerFill, BLUE } from '../components/Shimmer';
 import { hapticTap, hapticSuccess } from '../lib/haptics';
+import { buildGalleryIndex, resolveGuide } from '../lib/exerciseGuide';
+import { categoryLabel, categoryMeta } from '../lib/workouts';
 
 const SL = {
   bg:     '#050912',
@@ -24,6 +27,32 @@ const SL = {
   muted:  '#4a6a8a',
   green:  '#4CAF50',
   gold:   '#FFD700',
+};
+
+// The session wears the workout's TYPE color — the same rule the board and the
+// quest gate follow, so a HANDSTAND workout is rose from the row you tap all the
+// way through the live session. Untyped/legacy workouts → null = the ice theme.
+const accentFor = (category) =>
+  categoryLabel(category) ? categoryMeta(category).color : null;
+
+// A brighter sibling of a type color — mixed toward white. Same helper (and the
+// same job) as HomeScreen's: the progress bar needs a bright half to sweep with.
+const lighten = (hex, amt = 0.45) => {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const mix = (c) => Math.round(c + (255 - c) * amt);
+  const r = mix((n >> 16) & 255), g = mix((n >> 8) & 255), b = mix(n & 255);
+  return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+};
+
+// Same color as an `rgba()` string, for the translucent fills the ice theme
+// hard-coded (the timer pill's glass, the superset bracket's wash).
+const rgba = (hex, a) => {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -42,12 +71,6 @@ function parseSets(sets) {
   const n = parseInt(s, 10);
   const c = Number.isFinite(n) && n > 0 ? n : 1;
   return { required: c, total: c };
-}
-// Normalize an exercise name for catalog matching — lowercased, punctuation and
-// extra whitespace stripped — so minor spacing/formatting differences between the
-// workout row and the gallery catalog still match.
-function normName(name) {
-  return String(name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 function setsCountFor(ex) { return parseSets(ex.sets).total; }
@@ -270,6 +293,19 @@ export default function WorkoutModeScreen({ route, navigation }) {
   const isGallery = gallery === true;
   const dateStr = workout.specific_date ?? null;
   const title   = workout.title ?? '';
+  // The workout's own type (MAIN QUEST / SIDE QUEST / …) — worn by an exercise's
+  // how-to card as its eyebrow badge when the catalog has no movement type for it.
+  const workoutType = categoryLabel(workout.category);
+  // The session's own color, and the style patches derived from it. `tc` is null
+  // for an untyped workout, in which case every patch below is `null` too and the
+  // stylesheet's ice theme stands.
+  const tc        = accentFor(workout.category);
+  const tcText    = tc && { color: tc };
+  const tcBorder  = tc && { borderColor: tc, shadowColor: tc };
+  const tcFill    = tc && { backgroundColor: tc };
+  // The progress sweep needs a palette, not one hex — dark → bright → dark in
+  // the session's own hue, so the bar still moves the way the ice one did.
+  const tcRamp    = tc ? [tc, lighten(tc, 0.35), lighten(tc, 0.65), lighten(tc, 0.35)] : BLUE;
   const key     = sessionKey(isGallery ? `gallery:${workout.id}` : dateStr, workout.id);
 
   const [exercises, setExercises] = useState([]);
@@ -282,6 +318,9 @@ export default function WorkoutModeScreen({ route, navigation }) {
   // Lets the player jump to the fork early (e.g. feeling off) without finishing
   // every trunk set.
   const [forceFork, setForceFork] = useState(false);
+  // Workout-level description (workouts.purpose) — the same line the detail screen
+  // shows before entering, repeated here so it stays visible during the session.
+  const [purpose, setPurpose] = useState(workout.purpose ?? '');
   // FINAL TIME CHECK — the post-FINISH editor. Non-null = open, holding
   // { segs (all closed), trimmedIdleMs, auto } while the player fixes the clock
   // (erase false breaks, nudge start/end). Nothing is finalized until CONFIRM.
@@ -315,6 +354,9 @@ export default function WorkoutModeScreen({ route, navigation }) {
           notes:          e.notes ?? null,
           superset_group: e.superset_group ?? null,
           branch:         e.branch ?? null,
+          // Keep the catalog link when the JSONB carries one — the how-to card
+          // resolves by exact id before falling back to a name match.
+          gallery_id:     e.gallery_id ?? null,
         }));
         br = workout.branches;
       } else {
@@ -324,23 +366,20 @@ export default function WorkoutModeScreen({ route, navigation }) {
             .select('id, letter, name, variation, sets, reps, notes, superset_group, branch, gallery_id')
             .eq('workout_id', workout.id)
             .order('letter', { ascending: true }),
-          supabase.from('workouts').select('branches').eq('id', workout.id).maybeSingle(),
+          supabase.from('workouts').select('branches, purpose').eq('id', workout.id).maybeSingle(),
         ]);
         if (error) console.error('[WorkoutMode] exercises:', error);
         exs = data ?? [];
         br  = wData?.branches;
+        if (wData?.purpose != null) setPurpose(wData.purpose);
       }
 
       // The rich "how to perform" card lives in the shared `exercises_gallery`
       // catalog. Exercises picked in the builder carry a `gallery_id` (exact link);
       // legacy/free-text rows fall back to a normalized-name match.
-      const { data: galleryRows } = await supabase.from('exercises_gallery').select('*');
-      const gById = {};
-      const gByName = {};
-      for (const g of galleryRows ?? []) {
-        gById[g.id] = g;
-        if (g.name) gByName[normName(g.name)] = g;
-      }
+      const { data: galleryRows, error: gErr } = await supabase.from('exercises_gallery').select('*');
+      if (gErr) console.error('[WorkoutMode] gallery:', gErr);
+      const { byId: gById, byName: gByName } = buildGalleryIndex(galleryRows);
 
       const saved = await loadSession(key);
       let next = saved
@@ -658,7 +697,7 @@ export default function WorkoutModeScreen({ route, navigation }) {
 
   if (loading || !session) {
     return (
-      <ScreenFrame maxWidth={900} ready={false}>
+      <ScreenFrame ready={false}>
         <View style={{ paddingVertical: 120, alignItems: 'center' }}>
           <ActivityIndicator size="large" color={SL.accent} />
         </View>
@@ -717,47 +756,58 @@ export default function WorkoutModeScreen({ route, navigation }) {
         style={[
           styles.exCard,
           hot && styles.exCardCurrent,
+          // The card you're ON is the session speaking — so it speaks in the
+          // session's own colour. Done/skipped keep green/muted: those are
+          // states of the EXERCISE, not of the workout's identity.
+          hot && tc && { borderColor: tc, borderLeftColor: tc, shadowColor: tc },
           realDone && styles.exCardDone,
           isSkip && styles.exCardSkipped,
         ]}
       >
         <View style={styles.exHead}>
-          <View style={[styles.letterBadge, hot && styles.letterBadgeCurrent]}>
-            <Text style={styles.letterText}>{ex.letter}</Text>
+          <View style={[
+            styles.letterBadge,
+            hot && styles.letterBadgeCurrent,
+            hot && tc && { borderColor: tc, backgroundColor: rgba(tc, 0.12) },
+          ]}>
+            <Text style={[styles.letterText, tcText]}>{ex.letter}</Text>
           </View>
           <View style={{ flex: 1 }}>
-            {(() => {
-              // Forgot how to perform this? Tap the name to open its how-to card
-              // (video + coaching cues). Resolve the catalog row by the exact
-              // `gallery_id` link first, then a normalized-name match for
-              // legacy/free-text rows; if nothing matches, fall back to a name-only
-              // card ("no video added yet") so every title stays tappable.
-              const guide = galleryById[ex.gallery_id]
-                ?? galleryByName[normName(ex.name)]
-                ?? { name: ex.name, movement_type: ex.variation ?? null };
-              return (
-                <TouchableOpacity
-                  onPress={() => navigation.navigate('ExerciseDetail', { exercise: guide })}
-                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                  activeOpacity={0.7}
-                >
-                  <Text style={[styles.exName, styles.exNameLink]}>
-                    {ex.name?.toUpperCase()} <Text style={styles.exNameHint}>ⓘ</Text>
-                  </Text>
-                </TouchableOpacity>
-              );
-            })()}
+            {/* Forgot how to perform this? Tap the name to open its how-to card
+                (video + coaching cues). `resolveGuide` ALWAYS returns something —
+                a name-only placeholder when the movement has no catalog entry —
+                so no title is ever a dead tap. EDIT is hidden: mid-session you're
+                looking the movement up, not authoring the catalog. */}
+            <TouchableOpacity
+              onPress={() => {
+                hapticTap();
+                navigation.navigate('ExerciseDetail', {
+                  exercise: resolveGuide(ex, galleryById, galleryByName, workoutType),
+                  hideEdit: true,
+                });
+              }}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              activeOpacity={0.7}
+            >
+              <Text style={[
+                styles.exName,
+                styles.exNameLink,
+                tc && { color: tc, textShadowColor: rgba(tc, 0.5) },
+              ]}>
+                {ex.name?.toUpperCase()} <Text style={[styles.exNameHint, tcText]}>ⓘ</Text>
+              </Text>
+            </TouchableOpacity>
             <Text style={styles.exTarget}>
               {required === total ? `${total} SETS` : `${required}–${total} SETS`}
               {ex.reps ? ` · ${ex.reps} REPS` : ''}
             </Text>
           </View>
-          {showNow && hot && <Text style={styles.nowTag}>NOW</Text>}
+          {showNow && hot && <Text style={[styles.nowTag, tcFill]}>NOW</Text>}
           {isSkip ? <Text style={styles.skipTag}>SKIPPED</Text> : realDone && <Text style={styles.doneTag}>✓</Text>}
         </View>
 
-        {ex.variation ? <Text style={styles.exVariation}>※ {ex.variation}</Text> : null}
-        {ex.notes ? <Text style={styles.exNotes}>{ex.notes}</Text> : null}
+        {ex.variation ? <CoachText text={ex.variation} style={styles.exVariation} prefix="※ " /> : null}
+        {ex.notes ? <CoachText text={ex.notes} style={styles.exNotes} /> : null}
 
         {/* Sets — rows past the required count are OPTIONAL (range upper bound):
             rendered muted so the mandatory sets read as the real target. */}
@@ -824,11 +874,16 @@ export default function WorkoutModeScreen({ route, navigation }) {
     return (
       <View
         key={`${keyPrefix}${gi}`}
-        style={[styles.groupWrap, current && styles.groupWrapCurrent, done && styles.groupWrapDone]}
+        style={[
+          styles.groupWrap,
+          current && styles.groupWrapCurrent,
+          current && !done && tcBorder,
+          done && styles.groupWrapDone,
+        ]}
       >
         <View style={styles.groupHeader}>
-          <Text style={styles.groupHeaderText}>⇄ SUPERSET · ANY ORDER</Text>
-          {current && !done && <Text style={styles.nowTag}>NOW</Text>}
+          <Text style={[styles.groupHeaderText, tcText]}>⇄ SUPERSET · ANY ORDER</Text>
+          {current && !done && <Text style={[styles.nowTag, tcFill]}>NOW</Text>}
           {done && <Text style={styles.doneTag}>✓</Text>}
         </View>
         {g.items.map(ex => renderCard(ex, { current, showNow: false }))}
@@ -836,8 +891,12 @@ export default function WorkoutModeScreen({ route, navigation }) {
     );
   };
 
+  // A purpose carrying "goal - …" / "note - …" renders as call-outs, which
+  // already have a coloured left edge of their own.
+  const purposeMarked = !!purpose && parseCoachText(purpose).some(pt => pt.label);
+
   return (
-    <ScreenFrame maxWidth={900} ready={!loading}>
+    <ScreenFrame ready={!loading}>
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerTop}>
@@ -850,13 +909,26 @@ export default function WorkoutModeScreen({ route, navigation }) {
               tone={paused ? 'gold' : 'muted'}
               onPress={togglePause}
             />
-            <View style={[styles.timerPill, paused && styles.timerPillPaused]}>
+            <View style={[
+              styles.timerPill,
+              tc && { borderColor: tc, backgroundColor: rgba(tc, 0.08) },
+              paused && styles.timerPillPaused,
+            ]}>
               <View style={[styles.liveDot, paused && styles.liveDotPaused]} />
-              <Text style={[styles.timerText, paused && styles.timerTextPaused]}>{fmtDur(elapsed)}</Text>
+              <Text style={[styles.timerText, tcText, paused && styles.timerTextPaused]}>{fmtDur(elapsed)}</Text>
             </View>
           </View>
         </View>
-        <Text style={styles.title}>{title?.toUpperCase()}</Text>
+        <Text style={[styles.title, tcText]}>{title?.toUpperCase()}</Text>
+
+        {purpose ? (
+          <View style={styles.purposeRow}>
+            {/* The plain accent bar is dropped when the text carries its own
+                GOAL/NOTE call-outs — those bring their own coloured edge. */}
+            {purposeMarked ? null : <View style={[styles.purposeAccent, tcFill]} />}
+            <CoachText text={purpose} style={styles.purposeText} containerStyle={styles.purposeFlex} />
+          </View>
+        ) : null}
 
         {/* Progress */}
         <View style={styles.progressMetaRow}>
@@ -869,7 +941,7 @@ export default function WorkoutModeScreen({ route, navigation }) {
             : breakCount > 0 && <Text style={styles.progressMeta}>{breakCount} BREAK{breakCount > 1 ? 'S' : ''}</Text>}
         </View>
         <View style={styles.progressTrack}>
-          <ShimmerFill style={[styles.progressFill, { width: `${progressPct}%` }]} colors={BLUE} active />
+          <ShimmerFill style={[styles.progressFill, tcFill, { width: `${progressPct}%` }]} colors={tcRamp} active />
         </View>
       </View>
 
@@ -978,58 +1050,81 @@ export default function WorkoutModeScreen({ route, navigation }) {
                   <Text style={styles.adjustHeroValue}>{fmtDur(activeMs(adjust.segs, Date.now()))}</Text>
                 </View>
 
+                {/* Each edge is its own block: the clock reads on one line, the
+                    nudge pad sits underneath with room to breathe. */}
                 {adjust.segs.length > 0 && (
                   <>
-                    <View style={styles.adjustRow}>
-                      <Text style={styles.adjustRowLabel}>STARTED</Text>
-                      <Text style={styles.adjustRowTime}>{fmtClock(adjust.segs[0].start)}</Text>
-                      <View style={styles.adjustBtns}>
-                        {[-5, -1, +1, +5].map(m => (
-                          <TouchableOpacity key={m} style={styles.nudgeBtn} onPress={() => shiftEdge('start', m)}>
-                            <Text style={styles.nudgeText}>{m > 0 ? `+${m}` : m}m</Text>
-                          </TouchableOpacity>
-                        ))}
+                    {[
+                      { key: 'start', label: 'STARTED', at: adjust.segs[0].start },
+                      { key: 'end',   label: 'ENDED',   at: adjust.segs[adjust.segs.length - 1].end },
+                    ].map(edge => (
+                      <View key={edge.key} style={styles.edgeCard}>
+                        <View style={styles.edgeHead}>
+                          <Text style={styles.edgeLabel}>{edge.label}</Text>
+                          <Text style={styles.edgeTime}>{fmtClock(edge.at)}</Text>
+                        </View>
+                        <View style={styles.nudgeRow}>
+                          {[-5, -1, +1, +5].map(m => (
+                            <TouchableOpacity
+                              key={m}
+                              style={styles.nudgeBtn}
+                              activeOpacity={0.8}
+                              onPress={() => shiftEdge(edge.key, m)}
+                            >
+                              <Text style={styles.nudgeText} numberOfLines={1}>
+                                {m > 0 ? `+${m}` : `−${Math.abs(m)}`}m
+                              </Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
                       </View>
-                    </View>
-                    <View style={styles.adjustRow}>
-                      <Text style={styles.adjustRowLabel}>ENDED</Text>
-                      <Text style={styles.adjustRowTime}>{fmtClock(adjust.segs[adjust.segs.length - 1].end)}</Text>
-                      <View style={styles.adjustBtns}>
-                        {[-5, -1, +1, +5].map(m => (
-                          <TouchableOpacity key={m} style={styles.nudgeBtn} onPress={() => shiftEdge('end', m)}>
-                            <Text style={styles.nudgeText}>{m > 0 ? `+${m}` : m}m</Text>
-                          </TouchableOpacity>
-                        ))}
-                      </View>
-                    </View>
+                    ))}
                   </>
                 )}
 
-                <Text style={styles.adjustSection}>BREAKS</Text>
+                <View style={styles.sectionHead}>
+                  <Text style={styles.adjustSection}>BREAKS</Text>
+                  <View style={styles.sectionRule} />
+                  {adjust.segs.length > 1 && (
+                    <Text style={styles.sectionCount}>{adjust.segs.length - 1}</Text>
+                  )}
+                </View>
+
                 {adjust.segs.length < 2 ? (
-                  <Text style={styles.adjustEmpty}>No breaks logged.</Text>
+                  <View style={styles.breakEmptyCard}>
+                    <Text style={styles.adjustEmpty}>No breaks logged — the clock ran clean.</Text>
+                  </View>
                 ) : adjust.segs.slice(1).map((seg, i) => {
                   const prev = adjust.segs[i];
                   const ms = Math.max(0, new Date(seg.start).getTime() - new Date(prev.end).getTime());
                   return (
-                    <View key={`${prev.end}-${seg.start}`} style={styles.breakEditRow}>
-                      <Text style={styles.breakEditText}>
-                        ⏸ {fmtDur(ms)} · {fmtClock(prev.end)} → {fmtClock(seg.start)}
-                      </Text>
-                      <PillButton label="✕ ERASE" size="sm" tone="gold" variant="outline" onPress={() => eraseBreak(i + 1)} />
+                    <View key={`${prev.end}-${seg.start}`} style={styles.breakCard}>
+                      <View style={styles.breakInfo}>
+                        <Text style={styles.breakDur} numberOfLines={1}>{fmtDur(ms)}</Text>
+                        <Text style={styles.breakRange} numberOfLines={1}>
+                          {fmtClock(prev.end)} → {fmtClock(seg.start)}
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        style={styles.eraseBtn}
+                        activeOpacity={0.8}
+                        onPress={() => eraseBreak(i + 1)}
+                      >
+                        <Text style={styles.eraseText}>ERASE</Text>
+                      </TouchableOpacity>
                     </View>
                   );
                 })}
 
                 <PillButton
-                  label="✔ CONFIRM & SEE RECAP"
+                  label="CONFIRM & SEE RECAP"
                   variant="solid"
-                  size="lg"
+                  size="md"
                   onPress={confirmAdjust}
-                  style={{ alignSelf: 'stretch', marginTop: 8 }}
+                  style={{ alignSelf: 'stretch', marginTop: 10 }}
                 />
                 <PillButton
-                  label="↩ KEEP TRAINING"
+                  label="KEEP TRAINING"
                   tone="muted"
                   size="sm"
                   onPress={keepTraining}
@@ -1048,7 +1143,10 @@ const styles = StyleSheet.create({
   // Header
   header: {
     width: '100%', maxWidth: 1440, alignSelf: 'center',
-    paddingHorizontal: 24, paddingTop: 56, paddingBottom: 18,
+    // 22 to match ScreenHeader — the frame already clears the status bar
+    // (ScreenFrame adds insets.top), so a big paddingTop here just left the
+    // EXIT / BREAK / timer row floating below the card's top edge.
+    paddingHorizontal: 24, paddingTop: 22, paddingBottom: 18,
     borderBottomWidth: 1, borderBottomColor: SL.border,
   },
   headerTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
@@ -1073,6 +1171,11 @@ const styles = StyleSheet.create({
     fontFamily: F.heading, fontSize: 34, color: SL.accent,
     letterSpacing: 3, textTransform: 'uppercase', marginTop: 14,
   },
+  purposeRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, marginTop: 10 },
+  purposeFlex: { flex: 1 },
+  purposeAccent: { width: 3, alignSelf: 'stretch', minHeight: 18, backgroundColor: SL.accent, borderRadius: 2 },
+  purposeText: { flex: 1, fontFamily: F.body, fontSize: 18, lineHeight: 25, color: SL.text, opacity: 0.8, letterSpacing: 0.5 },
+
   progressMetaRow: { flexDirection: 'row', gap: 16, marginTop: 14, flexWrap: 'wrap' },
   progressMeta: { fontFamily: F.body, fontSize: 15, color: SL.muted, letterSpacing: 1.5 },
   progressTrack: {
@@ -1175,8 +1278,10 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: SL.muted, paddingHorizontal: 8, paddingVertical: 3,
     borderRadius: 4, overflow: 'hidden',
   },
-  exVariation: { fontFamily: F.bodyMed, fontSize: 15, color: SL.accent, letterSpacing: 0.5, marginBottom: 2 },
-  exNotes: { fontFamily: F.bodyMed, fontSize: 16, color: SL.muted, fontStyle: 'italic', letterSpacing: 0.5 },
+  // The coach's per-exercise description is the point of the card — it says WHY
+  // this exercise is here. Sized to stay readable at arm's length mid-set.
+  exVariation: { fontFamily: F.bodyMed, fontSize: 18, lineHeight: 25, color: SL.accent, letterSpacing: 0.5, marginTop: 4, marginBottom: 4 },
+  exNotes: { fontFamily: F.bodyMed, fontSize: 18, lineHeight: 25, color: SL.text, opacity: 0.75, fontStyle: 'italic', letterSpacing: 0.5, marginBottom: 4 },
 
   setRow: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
@@ -1229,21 +1334,47 @@ const styles = StyleSheet.create({
   },
   adjustHeroLabel: { fontFamily: F.body, fontSize: 12, color: SL.muted, letterSpacing: 3 },
   adjustHeroValue: { fontFamily: F.heading, fontSize: 30, color: SL.text, letterSpacing: 2 },
-  adjustRow: { flexDirection: 'row', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
-  adjustRowLabel: { fontFamily: F.body, fontSize: 14, color: SL.muted, letterSpacing: 2, width: 74 },
-  adjustRowTime: { fontFamily: F.heading, fontSize: 20, color: SL.accent, letterSpacing: 1, flex: 1 },
-  adjustBtns: { flexDirection: 'row', gap: 6 },
+  // Edge editors — label + clock on top, a full-width nudge pad beneath, so
+  // nothing has to fight for horizontal room on a phone.
+  edgeCard: {
+    borderWidth: 1, borderColor: SL.border, borderRadius: 12,
+    backgroundColor: 'rgba(74,158,191,0.04)', padding: 12, gap: 10,
+  },
+  edgeHead: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 },
+  edgeLabel: { fontFamily: F.body, fontSize: 12, color: SL.muted, letterSpacing: 3 },
+  edgeTime: { fontFamily: F.heading, fontSize: 22, color: SL.accent, letterSpacing: 1 },
+  nudgeRow: { flexDirection: 'row', gap: 8 },
   nudgeBtn: {
-    minWidth: 42, paddingHorizontal: 8, paddingVertical: 6, borderRadius: 8,
-    borderWidth: 1.5, borderColor: SL.border, alignItems: 'center',
-    backgroundColor: 'rgba(74,158,191,0.06)',
+    flex: 1, paddingVertical: 9, borderRadius: 10,
+    borderWidth: 1.5, borderColor: SL.border, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(74,158,191,0.08)',
   },
   nudgeText: { fontFamily: F.heading, fontSize: 15, color: SL.text, letterSpacing: 0.5 },
-  adjustSection: { fontFamily: F.body, fontSize: 13, color: SL.muted, letterSpacing: 3, marginTop: 4 },
-  adjustEmpty: { fontFamily: F.bodyMed, fontSize: 14, color: SL.muted, letterSpacing: 0.5 },
-  breakEditRow: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10,
-    borderTopWidth: 1, borderTopColor: 'rgba(26,58,92,0.5)', paddingTop: 8,
+  // Section header: label, a hairline that fills the rest, then a count chip.
+  sectionHead: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 6 },
+  sectionRule: { flex: 1, height: 1, backgroundColor: 'rgba(26,58,92,0.7)' },
+  adjustSection: { fontFamily: F.body, fontSize: 13, color: SL.muted, letterSpacing: 3 },
+  sectionCount: {
+    fontFamily: F.heading, fontSize: 12, color: SL.gold, letterSpacing: 1,
+    minWidth: 22, textAlign: 'center', paddingVertical: 2, borderRadius: 999,
+    borderWidth: 1, borderColor: 'rgba(255,215,0,0.4)', backgroundColor: 'rgba(255,215,0,0.08)',
   },
-  breakEditText: { fontFamily: F.bodyMed, fontSize: 15, color: SL.gold, letterSpacing: 0.5, flex: 1 },
+  adjustEmpty: { fontFamily: F.bodyMed, fontSize: 14, color: SL.muted, letterSpacing: 0.5, textAlign: 'center' },
+  breakEmptyCard: {
+    borderWidth: 1, borderColor: 'rgba(26,58,92,0.6)', borderStyle: 'dashed',
+    borderRadius: 12, paddingVertical: 14, paddingHorizontal: 12,
+  },
+  breakCard: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+    borderWidth: 1, borderColor: 'rgba(255,215,0,0.28)', borderRadius: 12,
+    backgroundColor: 'rgba(255,215,0,0.05)', paddingVertical: 10, paddingHorizontal: 12,
+  },
+  breakInfo: { flex: 1, gap: 2 },
+  breakDur: { fontFamily: F.heading, fontSize: 18, color: SL.gold, letterSpacing: 1 },
+  breakRange: { fontFamily: F.bodyMed, fontSize: 13, color: SL.muted, letterSpacing: 0.5 },
+  eraseBtn: {
+    paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999,
+    borderWidth: 1.5, borderColor: 'rgba(255,215,0,0.55)', backgroundColor: 'rgba(255,215,0,0.10)',
+  },
+  eraseText: { fontFamily: F.heading, fontSize: 13, color: SL.gold, letterSpacing: 1.5 },
 });

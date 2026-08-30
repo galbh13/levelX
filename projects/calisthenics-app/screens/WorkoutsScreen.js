@@ -2,26 +2,26 @@ import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { useFocusEffect } from '@react-navigation/native';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, Pressable,
-  ActivityIndicator, RefreshControl, Modal, Animated,
+  ActivityIndicator, RefreshControl, Modal, Animated, Platform,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { computeLvl } from '../lib/computeLvl';
 import { materializeDay, isDateOverridden } from '../lib/schedule';
-import { categoryMeta, WORKOUT_CATEGORIES } from '../lib/workouts';
+import { categoryMeta, categoryLabel, WORKOUT_CATEGORIES } from '../lib/workouts';
 import { F } from '../constants/fonts';
+import { useAppDimensions, NATIVE_SCALE } from '../constants/layout';
 
-// Off-program ACCESSORIES / LEGS workouts get their type's signature glow; the
-// dated program (main/side/untyped) keeps the default ice theme. Returns a color
-// or null (= use default styling).
+// EVERY typed workout wears its own type color — the same rule HomeScreen's
+// missions follow, so a HANDSTAND session reads rose on the board, on the week
+// strip and inside Workout Mode. Untyped/legacy rows return null = default ice.
 const accentFor = (category) =>
-  (category === 'accessory' || category === 'legs') ? categoryMeta(category).color : null;
+  categoryLabel(category) ? categoryMeta(category).color : null;
 
 import ScreenFrame from '../components/ScreenFrame';
 import PillButton from '../components/PillButton';
 import { useTourTarget } from '../lib/tourTargets';
-import { ShimmerText, BLUE } from '../components/Shimmer';
-import { CARD_H, CARD_W } from '../constants/layout';
+
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
@@ -36,6 +36,28 @@ const SL = {
   gold:  '#FFD700',
 };
 
+// The edit modal is OUTSIDE ScaledRoot: App.js lays the native tree out on an
+// oversized canvas and scales it back by NATIVE_SCALE, but a React Native
+// <Modal> renders in its OWN window and does NOT inherit that transform, so
+// every fixed pixel in the dialog came out 1/0.72 = 39% bigger than the app
+// behind it -- which is why the per-date editor ate the screen and buried its
+// buttons. Every fixed value in the modal styles is a canvas unit passed
+// through s(). On web the modal is inside the zoomed root, so S is 1.
+const MODAL_S = Platform.OS === 'web' ? 1 : NATIVE_SCALE;
+const s = (n) => n * MODAL_S;
+
+// The picker list is sized to the BIGGEST category, not the visible one, so the
+// dialog keeps ONE frame while you flip between MAIN QUEST / SIDE QUEST / ...
+// A short category just leaves empty space at the bottom - deliberately.
+// Rows are a fixed height so that height is exact arithmetic, not a guess.
+const EDIT_ROW_H   = s(56);
+const EDIT_ROW_GAP = s(8);
+const EDIT_MAX_ROWS = 6;   // beyond this the list scrolls instead of growing
+const editListHeight = (rows) => {
+  const n = Math.min(Math.max(rows, 1), EDIT_MAX_ROWS);
+  return n * EDIT_ROW_H + (n - 1) * EDIT_ROW_GAP;
+};
+
 // ─── Direct action tile (player) ──────────────────────────────────────────────
 // The player's Workouts screen skips the Training Forge swipe entirely — DAILY
 // QUESTS and MY WORKOUTS are reached straight from here. A dark "system" panel
@@ -47,7 +69,7 @@ function ActionTile({ label, onPress }) {
   const onOut = () => Animated.spring(press, { toValue: 0, useNativeDriver: true, speed: 18, bounciness: 14 }).start();
   const scale = press.interpolate({ inputRange: [0, 1], outputRange: [1, 0.94] });
   return (
-    <Pressable style={{ flex: 1 }} onPressIn={onIn} onPressOut={onOut} onPress={onPress}>
+    <Pressable style={styles.actionTilePress} onPressIn={onIn} onPressOut={onOut} onPress={onPress}>
       <Animated.View style={[styles.actionTile, { transform: [{ scale }] }]}>
         <View pointerEvents="none" style={styles.actionTileInner} />
         <Text style={styles.actionTileText} numberOfLines={2}>{label}</Text>
@@ -96,15 +118,6 @@ function fmtDisplayDate(dateStr) {
   if (!dateStr) return '—';
   const d = new Date(dateStr + 'T00:00:00');
   return d.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
-}
-
-function isLocked(dateStr) {
-  if (!dateStr) return false;
-  const workoutDate = new Date(dateStr + 'T00:00:00');
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const diffDays = Math.floor((today - workoutDate) / (1000 * 60 * 60 * 24));
-  return diffDays >= 7;
 }
 
 // ─── Calendar window / retention ───────────────────────────────────────────────
@@ -158,6 +171,19 @@ export default function WorkoutsScreen({ navigation, route }) {
   // WORKOUTS LIBRARY is coach-only: players never see the tile, and the route
   // isn't registered in their stack.
   const { selectedStudent, isAdmin } = useCoach();
+
+  // ── Phone layout ──
+  // The card is ALWAYS exactly as tall as the viewport, so on a phone the fixed
+  // blocks (hero → tiles → week nav → week strip) eat the whole budget and the
+  // stack collides — the week-range pill lands on the tiles and the day panel
+  // rides up over the SUN→SAT strip. `compact` trims each fixed block (and the
+  // type that drives its height) so everything keeps its own line.
+  // NOT useWindowDimensions — on native that reports the device window while the
+  // tree is laid out on the larger ScaledRoot canvas, which handed this screen
+  // phone-sized styles on a 546x1182 canvas (web got the roomy ones). See
+  // useAppDimensions in constants/layout.js.
+  const { width: winW, height: winH } = useAppDimensions();
+  const compact = winW < 560 || winH < 900;
   const resolveTargetId = useCallback(async () => {
     if (overrideStudentId) return overrideStudentId;
     const { data: { user } } = await supabase.auth.getUser();
@@ -196,8 +222,6 @@ export default function WorkoutsScreen({ navigation, route }) {
   const [selectedDay, setSelectedDay] = useState(
     () => getWeekDays(0).find(d => d.dateStr === TODAY_STR) ?? getWeekDays(0)[0]
   );
-
-  const [marking, setMarking] = useState({});
 
   // ── HUD chrome (entrance removed) ──
   // The staggered boot-up was retired when tab swiping landed: the neighbouring
@@ -420,6 +444,8 @@ export default function WorkoutsScreen({ navigation, route }) {
   const editDefaultFilter = editCats.includes('main') ? 'main' : (editCats[0] ?? 'main');
   const editActiveFilter = editCats.includes(editFilter) ? editFilter : editDefaultFilter;
   const editVisibleWorkouts = editCandidates.filter(w => editCatKey(w) === editActiveFilter);
+  // Tallest category on offer - the picker reserves room for THAT many rows.
+  const editMaxRows = editCats.reduce((m, k) => Math.max(m, editCounts[k] ?? 0), 1);
 
   // Switch the picker filter; drop a pending pick the new filter would hide.
   function pickEditFilter(k) {
@@ -427,9 +453,7 @@ export default function WorkoutsScreen({ navigation, route }) {
     if (editPending && editCatKey(editPending) !== k) setEditPending(undefined);
   }
 
-  // ── Mark a workout as done ─────────────────────────────────────────────────
-
-  const mkKey = (w) => w.overrideId ?? `t:${w.id}`;
+  // ── Per-date materialization ───────────────────────────────────────────────
 
   // Dates known to already have override rows. Mirrors overrideWorkouts, but is a
   // synchronous ref so two edits queued on the same not-yet-materialized day (before
@@ -450,53 +474,6 @@ export default function WorkoutsScreen({ navigation, route }) {
     await materializeDay({ studentId: tid, coachId: tid, dateStr, templateWorkoutIds: ids });
   }
 
-  async function handleMarkDone(workout) {
-    setMarking(prev => ({ ...prev, [mkKey(workout)]: true }));
-    try {
-      const tid = await resolveTargetId();
-      if (workout.overrideId) {
-        const { error } = await supabase
-          .from('workout_override_workouts')
-          .update({ completed: true })
-          .eq('id', workout.overrideId);
-        if (error) { alert('Could not mark as done: ' + error.message); }
-      } else {
-        // Template-derived day — materialize it, then complete this workout.
-        await ensureMaterialized(workout.specific_date);
-        const { error } = await supabase
-          .from('workout_override_workouts')
-          .update({ completed: true })
-          .eq('student_id', tid)
-          .eq('specific_date', workout.specific_date)
-          .eq('workout_id', workout.id);
-        if (error) { alert('Could not mark as done: ' + error.message); }
-      }
-      await fetchData();
-    } catch {
-      alert('Something went wrong.');
-    }
-    setMarking(prev => ({ ...prev, [mkKey(workout)]: false }));
-  }
-
-  async function handleUndoDone(workout) {
-    setMarking(prev => ({ ...prev, [mkKey(workout)]: true }));
-    try {
-      const { error } = await supabase
-        .from('workout_override_workouts')
-        .update({ completed: false })
-        .eq('id', workout.overrideId);
-      if (!error) {
-        setOverrideWorkouts(prev =>
-          prev.map(o => o.id === workout.overrideId ? { ...o, completed: false } : o)
-        );
-      } else {
-        alert('Could not undo: ' + error.message);
-      }
-    } catch {
-      alert('Something went wrong.');
-    }
-    setMarking(prev => ({ ...prev, [mkKey(workout)]: false }));
-  }
 
   // ── Per-date editing (override the weekly skeleton for one date) ────────────
 
@@ -584,7 +561,7 @@ export default function WorkoutsScreen({ navigation, route }) {
   // shows inside the day panel.
 
   return (
-    <ScreenFrame maxWidth={CARD_W} ready={!loading}>
+    <ScreenFrame fill ready={!loading}>
     <View style={styles.card}>
     <View style={styles.body}>
       {/* Admin-as-coach: BACK to the player hub (this screen is a tab for players,
@@ -596,19 +573,19 @@ export default function WorkoutsScreen({ navigation, route }) {
       )}
 
       {/* ── Header ── */}
-      <Animated.View style={[styles.header, {
+      <Animated.View style={[styles.header, compact && styles.headerCompact, {
         opacity: boot.header,
         transform: [{ translateY: boot.header.interpolate({ inputRange: [0, 1], outputRange: [16, 0] }) }],
       }]}>
-        <Text style={styles.studentName}>
+        <Text numberOfLines={1} adjustsFontSizeToFit style={[styles.studentName, compact && styles.studentNameCompact]}>
           {profile?.full_name?.toUpperCase() ?? '—'}
         </Text>
         <View style={styles.statRow}>
-          <Text style={styles.level}>LVL {lvl ?? '—'}</Text>
+          <Text style={[styles.level, compact && styles.levelCompact]}>LVL {lvl ?? '—'}</Text>
           {className && (
             <>
               <View style={styles.statDot} />
-              <Text style={styles.className}>{className.toUpperCase()}</Text>
+              <Text style={[styles.className, compact && styles.classNameCompact]}>{className.toUpperCase()}</Text>
             </>
           )}
         </View>
@@ -625,20 +602,20 @@ export default function WorkoutsScreen({ navigation, route }) {
           2026-08-13 (Accessories + the weekly-skeleton editor went with it).
           WORKOUTS LIBRARY is the one COACH-ONLY tile — players have no permission
           for it, so it renders only under the admin CoachProvider. */}
-      <Animated.View style={[styles.manageRow, styles.actionTileRow, {
+      <Animated.View style={[styles.manageRow, styles.actionTileRow, compact && styles.manageRowCompact, {
         opacity: boot.forge,
         transform: [
           { translateY: boot.forge.interpolate({ inputRange: [0, 1], outputRange: [20, 0] }) },
           { scale: boot.forge.interpolate({ inputRange: [0, 1], outputRange: [0.92, 1] }) },
         ],
       }]}>
-        <View ref={tourDailyRef} style={styles.actionTileWrap}>
+        <View ref={tourDailyRef} collapsable={false} style={styles.actionTileWrap}>
           <ActionTile
             label="DAILY QUESTS"
             onPress={() => navigation.navigate('DailyQuest', { student: selectedStudent })}
           />
         </View>
-        <View ref={tourMyWorkoutsRef} style={styles.actionTileWrap}>
+        <View ref={tourMyWorkoutsRef} collapsable={false} style={styles.actionTileWrap}>
           <ActionTile
             label="MY WORKOUTS"
             onPress={() => navigation.navigate('AllWorkouts')}
@@ -655,7 +632,7 @@ export default function WorkoutsScreen({ navigation, route }) {
       </Animated.View>
 
       {/* ── Week nav ── */}
-      <Animated.View style={[styles.calendarNav, {
+      <Animated.View style={[styles.calendarNav, compact && styles.calendarNavCompact, {
         opacity: boot.nav,
         transform: [{ translateY: boot.nav.interpolate({ inputRange: [0, 1], outputRange: [12, 0] }) }],
       }]}>
@@ -668,7 +645,7 @@ export default function WorkoutsScreen({ navigation, route }) {
         </TouchableOpacity>
         <View style={styles.navCenter}>
           <View style={styles.navRangeCard}>
-            <Text style={styles.navRange}>{fmtWeekRange(weekDays)}</Text>
+            <Text numberOfLines={1} style={[styles.navRange, compact && styles.navRangeCompact]}>{fmtWeekRange(weekDays)}</Text>
           </View>
         </View>
         <TouchableOpacity
@@ -683,8 +660,8 @@ export default function WorkoutsScreen({ navigation, route }) {
       {/* ── Calendar grid ── */}
       {/* Outer keeps the 28px side inset; the tour highlights the INNER row so its
           box hugs SUN→SAT (the day cells) instead of spanning the full padded width. */}
-      <View style={styles.calendarGrid}>
-       <View ref={tourWeekRef} style={styles.calendarRow}>
+      <View style={[styles.calendarGrid, compact && styles.calendarGridCompact]}>
+       <View ref={tourWeekRef} collapsable={false} style={styles.calendarRow}>
         {weekDays.map((day, i) => {
           const dayWorkouts = getDayWorkouts(day);
           const isSelected  = day.dateStr === selectedDay?.dateStr;
@@ -714,6 +691,7 @@ export default function WorkoutsScreen({ navigation, route }) {
             <TouchableOpacity
               style={[
                 styles.dayNode,
+                compact && styles.dayNodeCompact,
                 isToday && !isSelected && styles.dayNodeToday,
                 isSelected && styles.dayNodeSelected,
                 allDone && styles.dayNodeDone,
@@ -768,13 +746,13 @@ export default function WorkoutsScreen({ navigation, route }) {
       </View>
 
       {/* ── Day detail panel ── */}
-      <Animated.View style={[styles.dayCard, {
+      <Animated.View style={[styles.dayCard, compact && styles.dayCardCompact, {
         opacity: boot.panel,
         transform: [{ translateY: boot.panel.interpolate({ inputRange: [0, 1], outputRange: [24, 0] }) }],
       }]}>
         <View style={styles.dayCardHead}>
-          <Text style={styles.dayCardDate}>{fmtDisplayDate(selectedDay?.dateStr)}</Text>
-          <View ref={tourEditDayRef} style={styles.dayCardEditBtn}>
+          <Text numberOfLines={1} adjustsFontSizeToFit style={[styles.dayCardDate, compact && styles.dayCardDateCompact]}>{fmtDisplayDate(selectedDay?.dateStr)}</Text>
+          <View ref={tourEditDayRef} collapsable={false} style={styles.dayCardEditBtn}>
             <PillButton
               label="✎ EDIT DAY"
               size="sm"
@@ -784,7 +762,7 @@ export default function WorkoutsScreen({ navigation, route }) {
         </View>
 
         <ScrollView
-          style={{ flex: 1 }}
+          style={styles.dayCardScroll}
           contentContainerStyle={[
             styles.dayCardBody,
             (loading || selectedDayWorkouts.length === 0) && styles.dayCardBodyEmpty,
@@ -797,81 +775,59 @@ export default function WorkoutsScreen({ navigation, route }) {
           </View>
         ) : selectedDayWorkouts.length > 0 ? (
           selectedDayWorkouts.map(workout => {
-            const isMarking = !!marking[mkKey(workout)];
-            const locked    = isLocked(workout.specific_date);
             const hasUnreadFeedback = workout.coachFeedback && !workout.feedbackIsRead;
-            const tc        = accentFor(workout.category); // accessory/legs glow, else null
+            const tc        = accentFor(workout.category); // type glow, null when untyped
 
+            /* The board only REPRESENTS the week's training — ticking off and
+               undoing live on HomeScreen's missions, which is the one place a
+               session is completed. So no DONE / UNDO / COMPLETED badge here:
+               the row is a title, its type color, and a small ✓ when it's behind
+               you. Tapping it opens the workout (the old VIEW pill). */
             return (
-              <View key={workout.id} style={[styles.workoutCard, tc && { borderLeftColor: tc, shadowColor: tc, shadowOpacity: 0.4, shadowRadius: 8 }]}>
+              <TouchableOpacity
+                key={workout.id}
+                style={[
+                  styles.workoutCard,
+                  // Done or not, the card wears its OWN type color — a finished
+                  // HANDSTAND stays rose instead of flipping to the ice theme.
+                  tc && {
+                    borderColor: workout.completed ? tc : tc + '66',
+                    borderLeftColor: tc,
+                    shadowColor: tc,
+                    shadowOpacity: 0.4,
+                    shadowRadius: 8,
+                  },
+                ]}
+                onPress={() => navigation.navigate('WorkoutDetail', {
+                  workout,
+                  studentView: true,
+                })}
+                activeOpacity={0.8}
+              >
                 <View style={styles.workoutInfo}>
                   <View style={styles.workoutTitleRow}>
-                    <Text style={styles.workoutTitle} numberOfLines={2}>{workout.title?.toUpperCase()}</Text>
+                    {/* Title only — the purpose/description is read in Workout
+                        Mode, in full, so the board stays a clean list. */}
+                    <Text
+                      style={[
+                        styles.workoutTitle,
+                        tc && { color: tc },
+                        workout.completed && styles.workoutTitleDone,
+                      ]}
+                      numberOfLines={2}
+                    >
+                      {workout.title?.toUpperCase()}
+                    </Text>
                     {hasUnreadFeedback && <View style={styles.feedbackDot} />}
                   </View>
-                  {workout.purpose ? (
-                    <Text style={styles.workoutPurpose} numberOfLines={1}>{workout.purpose}</Text>
-                  ) : null}
-                  {locked && (
-                    <View style={styles.lockedBadge}>
-                      <Text style={styles.lockedBadgeText}>🔒 LOCKED</Text>
-                    </View>
-                  )}
                 </View>
 
-                <View style={styles.actionRow}>
-                  {workout.completed ? (
-                    /* Done — just a shining COMPLETED badge + UNDO (no mode/view). */
-                    <>
-                      <View style={styles.completedTag}>
-                        <ShimmerText
-                          text="✓ COMPLETED"
-                          style={styles.completedTagText}
-                          colors={BLUE}
-                          direction="ltr"
-                          active
-                        />
-                      </View>
-                      <PillButton
-                        label="UNDO"
-                        tone="muted"
-                        size="sm"
-                        style={styles.actionBtn}
-                        textStyle={styles.actionBtnText}
-                        onPress={locked ? undefined : () => handleUndoDone(workout)}
-                        disabled={isMarking || locked}
-                      />
-                    </>
-                  ) : (
-                    /* Not done — VIEW + DONE share one row. Entering the live
-                       session (Workout Mode) is NOT offered here anymore: the
-                       player steps into it exclusively through the RED GATE portal
-                       on HomeScreen's today's-missions. */
-                    <>
-                      <PillButton
-                        label="VIEW"
-                        size="sm"
-                        style={styles.actionBtn}
-                        textStyle={styles.actionBtnText}
-                        onPress={() => navigation.navigate('WorkoutDetail', {
-                          workout,
-                          studentView: true,
-                        })}
-                      />
-                      <PillButton
-                        label="DONE"
-                        variant="solid"
-                        size="sm"
-                        style={styles.actionBtn}
-                        textStyle={styles.actionBtnText}
-                        onPress={locked ? undefined : () => handleMarkDone(workout)}
-                        disabled={isMarking || locked}
-                        loading={isMarking}
-                      />
-                    </>
-                  )}
-                </View>
-              </View>
+                {/* The whole "completed" statement: one small check in the row's
+                    own colour. No shimmer, no badge — nothing to celebrate twice. */}
+                {workout.completed && (
+                  <Text style={[styles.workoutDoneMark, tc && { color: tc }]}>✓</Text>
+                )}
+              </TouchableOpacity>
             );
           })
         ) : (
@@ -882,6 +838,11 @@ export default function WorkoutsScreen({ navigation, route }) {
         )}
         </ScrollView>
       </Animated.View>
+
+      {/* The panel is sized by its sessions, not by the screen. Whatever height is
+          left over lands HERE, below the card, instead of inflating an empty
+          panel that swallowed ~70% of the phone. */}
+      <View style={styles.bodySpacer} />
 
       </View>
 
@@ -894,7 +855,12 @@ export default function WorkoutsScreen({ navigation, route }) {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.editorBox}>
-            <Text style={styles.editorTitle}>
+            <Text
+              style={styles.editorTitle}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.7}
+            >
               EDIT · {fmtDisplayDate(selectedDay?.dateStr)}
             </Text>
             {/* Current workouts for this date */}
@@ -904,7 +870,7 @@ export default function WorkoutsScreen({ navigation, route }) {
                 <View style={styles.assignedChips}>
                   {selectedDayWorkouts.map(w => (
                     <View key={w.id} style={styles.assignedChip}>
-                      <Text style={styles.assignedChipText}>{w.title?.toUpperCase()}</Text>
+                      <Text style={styles.assignedChipText} numberOfLines={2}>{w.title?.toUpperCase()}</Text>
                       <TouchableOpacity
                         onPress={() => removeWorkoutFromDate(selectedDay, w)}
                         hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
@@ -940,7 +906,14 @@ export default function WorkoutsScreen({ navigation, route }) {
                       activeOpacity={0.8}
                     >
                       <View style={[styles.editFilterDot, { backgroundColor: c.color, opacity: active ? 1 : 0.45 }]} />
-                      <Text style={[styles.editFilterText, active && { color: c.color }]}>{c.l}</Text>
+                      <Text
+                        style={[styles.editFilterText, active && { color: c.color }]}
+                        numberOfLines={1}
+                        adjustsFontSizeToFit
+                        minimumFontScale={0.75}
+                      >
+                        {c.l}
+                      </Text>
                       <Text style={[styles.editFilterCount, active && { color: c.color }]}>{c.n}</Text>
                     </TouchableOpacity>
                   );
@@ -948,7 +921,10 @@ export default function WorkoutsScreen({ navigation, route }) {
               </View>
             )}
 
-            <ScrollView style={styles.workoutList} showsVerticalScrollIndicator={false}>
+            <ScrollView
+              style={[styles.workoutList, { height: editListHeight(editMaxRows) }]}
+              showsVerticalScrollIndicator={false}
+            >
               {editVisibleWorkouts.map(w => {
                 const meta = categoryMeta(editCatKey(w));
                 return (
@@ -958,7 +934,10 @@ export default function WorkoutsScreen({ navigation, route }) {
                     onPress={() => setEditPending(w)}
                   >
                     <View style={[styles.workoutOptionDot, { backgroundColor: meta.color }]} />
-                    <Text style={[styles.workoutOptionText, editPending?.id === w.id && { color: SL.accent }]}>
+                    <Text
+                      style={[styles.workoutOptionText, editPending?.id === w.id && { color: SL.accent }]}
+                      numberOfLines={2}
+                    >
                       {w.title}
                     </Text>
                     {editPending?.id === w.id && <Text style={styles.checkMark}>✓</Text>}
@@ -976,23 +955,29 @@ export default function WorkoutsScreen({ navigation, route }) {
               <PillButton
                 label="CLOSE"
                 tone="muted"
+                size="sm"
                 onPress={() => setEditVisible(false)}
-                style={{ flex: 1 }}
+                style={styles.editorBtn}
+                textStyle={styles.editorBtnText}
               />
               <PillButton
                 label="ADD"
                 variant="solid"
+                size="sm"
                 onPress={() => editPending && addWorkoutToDate(selectedDay.dateStr, editPending.id)}
                 disabled={!editPending}
-                style={{ flex: 1 }}
+                style={styles.editorBtn}
+                textStyle={styles.editorBtnText}
               />
               {(isDateOverridden(selectedDay?.dateStr, overrideWorkouts) ||
                 optimisticDays[selectedDay?.dateStr]) && (
                 <PillButton
                   label="↺ RESET"
                   tone="muted"
+                  size="sm"
                   onPress={() => resetDayToPlan(selectedDay.dateStr)}
-                  style={{ flex: 1 }}
+                  style={styles.editorBtn}
+                  textStyle={styles.editorBtnText}
                 />
               )}
             </View>
@@ -1009,7 +994,7 @@ export default function WorkoutsScreen({ navigation, route }) {
 
 const styles = StyleSheet.create({
   // Fixed card size so the frame matches the Weekly Plan and never resizes with data.
-  card: { height: CARD_H },
+  card: { flex: 1 },
 
   // The body region (everything under the headline) that swipes left on exit.
   swipeBody: { flex: 1, width: '100%' },
@@ -1032,7 +1017,11 @@ const styles = StyleSheet.create({
     paddingTop: 64,
     paddingBottom: 20,
     alignItems: 'center',
+    flexShrink: 0,
   },
+  // Phone: the hero keeps its shape but gives ~60px back to the day panel.
+  headerCompact: { paddingTop: 22, paddingBottom: 10 },
+  studentNameCompact: { fontSize: 30, letterSpacing: 2, textShadowRadius: 12 },
   studentName: {
     fontFamily: F.heading,
     fontSize: 42,
@@ -1056,12 +1045,14 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: SL.muted,
   },
+  levelCompact: { fontSize: 19, letterSpacing: 2 },
   level: {
     fontFamily: F.body,
     fontSize: 26,
     color: SL.text,
     letterSpacing: 3,
   },
+  classNameCompact: { fontSize: 16, letterSpacing: 2 },
   className: {
     fontFamily: F.bodyMed,
     fontSize: 22,
@@ -1086,21 +1077,32 @@ const styles = StyleSheet.create({
   // ── Manage banner ─────────────────────────────────────────────────────────────
 
   manageRow: {
+    zIndex: 4,
     flexDirection: 'row',
     justifyContent: 'center',
     marginHorizontal: 16,
     marginTop: 18,
+    flexShrink: 0,
   },
+  // Phone: shorter tiles, tighter gap to the hero.
+  manageRowCompact: { marginTop: 16, marginHorizontal: 12 },
   // Player two-up direct actions (DAILY QUESTS / MY WORKOUTS) — same footprint as
   // the single forge button so the calendar below never shifts.
   actionTileRow: {
     justifyContent: 'flex-start',
     gap: 8,
   },
-  // Wrapper so the guided tour can measure each tile; must fill like the tile.
+  // Wrapper so the guided tour can measure each tile. It is a COLUMN, so its
+  // children must NOT use `flex: 1`: flex-basis 0 inside an auto-height column
+  // collapses to 0 on Yoga/native (web resolves it from content, which is why
+  // this only ever broke in the APK — the tile drew 62dp tall while the row
+  // measured 0, so the week nav, the SUN→SAT strip and the day panel all rode
+  // up ~62dp and stacked on top of each other). `alignSelf: stretch` fills the
+  // width; the height comes from the tile's own minHeight.
   actionTileWrap: { flex: 1 },
+  actionTilePress: { alignSelf: 'stretch' },
   actionTile: {
-    flex: 1,
+    alignSelf: 'stretch',
     minHeight: 62,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1137,6 +1139,7 @@ const styles = StyleSheet.create({
   // ── Week nav ────────────────────────────────────────────────────────────────
 
   calendarNav: {
+    zIndex: 3,
     flexDirection: 'row',
     alignItems: 'center',
     // Match the week strip's inset (calendarGrid) so the ← / → arrows keep the
@@ -1144,7 +1147,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 28,
     paddingTop: 16,
     paddingBottom: 10,
+    flexShrink: 0,
   },
+  // Phone: the ← RANGE → row sits closer under the tiles but keeps a real gap,
+  // so the range pill can never land on top of DAILY QUESTS / MY WORKOUTS.
+  calendarNavCompact: { paddingHorizontal: 12, paddingTop: 18, paddingBottom: 12 },
   navArrow: {
     width: 44,
     height: 44,
@@ -1174,6 +1181,7 @@ const styles = StyleSheet.create({
   navRangeCard: {
     paddingVertical: 7,
     paddingHorizontal: 18,
+    maxWidth: '100%',
     borderRadius: 999,
     borderWidth: 1.5,
     borderColor: SL.border,
@@ -1183,6 +1191,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.3,
     shadowRadius: 10,
   },
+  navRangeCompact: { fontSize: 15, letterSpacing: 0 },
   navRange: {
     fontFamily: F.bodyMed,
     fontSize: 24,
@@ -1192,32 +1201,42 @@ const styles = StyleSheet.create({
 
   // ── Calendar grid ────────────────────────────────────────────────────────────
 
+  calendarGridCompact: { paddingHorizontal: 12 },
   calendarGrid: {
+    zIndex: 2,
+    paddingBottom: 10,
     // Align the week strip's outer edges with the session node inside dayCard
     // (dayCard margin 8 + border 1.5 + padding 20 ≈ 29), so it sits on the same
     // line as the workout card and leaves breathing room to the frame border.
     paddingHorizontal: 28,
+    flexShrink: 0,
   },
   // The actual SUN→SAT day-cell row (tour-highlighted). Kept separate from the
   // padded wrapper so the highlight box hugs the cells, not the full padded width.
   calendarRow: {
     flexDirection: 'row',
     gap: 6,
+    flexShrink: 0,
   },
   dayNode: {
     flex: 1,
-    minHeight: 92,
+    minHeight: 104,
     backgroundColor: SL.panel,
     borderRadius: 10,
     borderWidth: 1.5,
     borderColor: SL.border,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 10,
+    paddingTop: 10,
+    // Reserved lane at the bottom of every cell for the accent dots, so they are
+    // never crowded by the day number above them.
+    paddingBottom: 22,
     paddingHorizontal: 4,
     gap: 2,
     overflow: 'hidden',
   },
+  // Phone: a shorter cell — the week strip must stay fully visible above the panel.
+  dayNodeCompact: { minHeight: 96, paddingTop: 10, paddingBottom: 20, borderRadius: 10 },
   dayNodeToday: { borderColor: SL.accent },
   dayNodeSelected: {
     backgroundColor: '#0a1a2e',
@@ -1275,9 +1294,14 @@ const styles = StyleSheet.create({
   // ── Day detail panel ──────────────────────────────────────────────────────────
 
   dayCard: {
+    zIndex: 1,
     marginHorizontal: 8,
-    marginTop: 20,            // clear gap so the panel never crowds the day-number row
-    flex: 1,                  // fills remaining space inside the fixed-height card
+    marginTop: 64,            // the panel sits LOW — a wide, deliberate gap under the week strip
+    // The panel takes the whole lower half of the card rather than ending where
+    // its sessions end — the leftover space reads as part of the panel instead of
+    // as dead screen. flexShrink lets a packed day scroll inside it.
+    flexGrow: 1,
+    flexShrink: 1,
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.border,
@@ -1289,9 +1313,17 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.15,
     shadowRadius: 16,
   },
+  // Phone: the panel starts a clear gap BELOW the week strip (it used to ride up
+  // over the day cells) and trims its own padding to win that space back.
+  dayCardCompact: { marginTop: 84, marginHorizontal: 6, padding: 14, gap: 8 },
+  // Auto-height inside an auto-height card: flex:1 here would collapse the list.
+  dayCardScroll: { flexGrow: 0, flexShrink: 1 },
   // Sessions stack from the top (first one highest); only the REST placeholder centers.
-  dayCardBody: { gap: 12, flexGrow: 1, justifyContent: 'flex-start' },
+  dayCardBody: { gap: 10, justifyContent: 'flex-start' },
   dayCardBodyEmpty: { justifyContent: 'center' },
+  // Soaks up the height the panel no longer claims, so the card ends where its
+  // sessions end and the rest of the screen simply breathes.
+  bodySpacer: { flexGrow: 1, flexShrink: 0, minHeight: 12 },
   // Date on the left, EDIT DAY pill on the right — a clean row, never overlapping.
   dayCardHead: {
     flexDirection: 'row',
@@ -1300,6 +1332,7 @@ const styles = StyleSheet.create({
     gap: 12,
     minHeight: 36,
   },
+  dayCardDateCompact: { fontSize: 22 },
   dayCardDate: {
     flex: 1,
     fontFamily: F.heading,
@@ -1316,19 +1349,20 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.85)',
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: s(30),
   },
   editorBox: {
     width: '100%',
-    maxWidth: 620,
-    height: 620,            // FIXED — dialog size is independent of its data
-    maxHeight: '92%',       // …but never taller than the viewport
+    maxWidth: s(560),
+    // No fixed height: the dialog is as tall as its content (the picker list
+    // shrinks to fit), so a short list no longer leaves half the box empty.
+    maxHeight: '88%',       // ...but never taller than the viewport
     backgroundColor: SL.panel,
     borderWidth: 1.5,
     borderColor: SL.accent,
-    borderRadius: 18,
-    padding: 24,
-    paddingBottom: 28,
+    borderRadius: s(18),
+    padding: s(20),
+    paddingBottom: s(20),
     shadowColor: SL.accent,
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.35,
@@ -1336,50 +1370,53 @@ const styles = StyleSheet.create({
   },
   editorTitle: {
     fontFamily: F.heading,
-    fontSize: 24,
+    fontSize: s(22),
     color: SL.accent,
-    letterSpacing: 3,
+    letterSpacing: s(2),
     textTransform: 'uppercase',
     textAlign: 'center',
-    marginBottom: 18,
+    marginBottom: s(14),
   },
   editorSectionLabel: {
     fontFamily: F.bodyMed,
-    fontSize: 16,
+    fontSize: s(14),
     color: SL.muted,
-    letterSpacing: 3,
+    letterSpacing: s(2),
     textTransform: 'uppercase',
-    marginBottom: 10,
+    marginBottom: s(9),
   },
-  assignedChips: { gap: 6, marginBottom: 16 },
+  assignedChips: { gap: s(6), marginBottom: s(14) },
   assignedChip: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 8,
-    paddingHorizontal: 14,
+    paddingVertical: s(8),
+    paddingHorizontal: s(14),
     borderWidth: 1,
     borderColor: SL.accent,
     borderRadius: 999,
     backgroundColor: 'rgba(74,158,191,0.12)',
   },
   assignedChipText: {
+    flex: 1,
     fontFamily: F.bodyMed,
-    fontSize: 18,
+    fontSize: s(18),
     color: SL.accent,
-    letterSpacing: 1,
+    letterSpacing: s(0.6),
     textTransform: 'uppercase',
   },
-  assignedChipRemove: { fontFamily: F.body, fontSize: 16, color: SL.muted, paddingLeft: 12 },
+  assignedChipRemove: { fontFamily: F.body, fontSize: s(15), color: SL.muted, paddingLeft: s(10) },
   // Type filter pills above the ADD WORKOUT picker (same look as My Workouts,
   // sized down to fit the modal).
-  editFilterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 12 },
+  editFilterRow: { flexDirection: 'row', flexWrap: 'nowrap', gap: s(4), marginBottom: s(12) },
   editFilterChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 7,
-    paddingHorizontal: 13,
-    height: 34,
+    flexShrink: 1,
+    justifyContent: 'center',
+    gap: s(4),
+    paddingHorizontal: s(7),
+    height: s(27),
     borderRadius: 999,
     borderWidth: 1.5,
     borderColor: SL.border,
@@ -1388,56 +1425,64 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.5,
     shadowRadius: 8,
   },
-  editFilterDot: { width: 7, height: 7, borderRadius: 999 },
+  editFilterDot: { width: s(6), height: s(6), borderRadius: 999, flexShrink: 0 },
   editFilterText: {
     fontFamily: F.bodyMed,
-    fontSize: 14,
+    fontSize: s(11),
     color: SL.muted,
-    letterSpacing: 1.5,
+    letterSpacing: s(0.2),
   },
   editFilterCount: {
     fontFamily: F.heading,
-    fontSize: 15,
+    fontSize: s(11),
     color: SL.muted,
-    letterSpacing: 0.5,
+    letterSpacing: s(0.5),
+    flexShrink: 0,
   },
 
-  workoutList: { flex: 1, marginBottom: 20 },
+  // Height comes from editListHeight() at the call site (the largest category's
+  // row count), so the dialog's frame never resizes as you switch filters.
+  workoutList: { flexGrow: 0, flexShrink: 1, marginBottom: s(16) },
   workoutOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 14,
-    marginBottom: 8,
+    height: EDIT_ROW_H,
+    paddingHorizontal: s(14),
+    marginBottom: EDIT_ROW_GAP,
     borderWidth: 1.5,
     borderColor: SL.border,
-    borderRadius: 12,
+    borderRadius: s(10),
     backgroundColor: SL.bg,
   },
   workoutOptionSelected: {
     backgroundColor: 'rgba(74,158,191,0.12)',
     borderColor: SL.accent,
   },
-  workoutOptionDot: { width: 8, height: 8, borderRadius: 999, marginRight: 10 },
+  workoutOptionDot: { width: s(8), height: s(8), borderRadius: 999, marginRight: s(10) },
   workoutOptionText: {
     flex: 1,
     fontFamily: F.bodyMed,
-    fontSize: 20,
+    fontSize: s(19),
+    lineHeight: s(22),
     color: SL.text,
-    letterSpacing: 0.5,
+    letterSpacing: s(0.4),
     textTransform: 'uppercase',
   },
-  checkMark: { fontFamily: F.bodyMed, fontSize: 20, color: SL.accent, marginLeft: 8 },
+  checkMark: { fontFamily: F.bodyMed, fontSize: s(19), color: SL.accent, marginLeft: s(8) },
   noWorkoutsText: {
     fontFamily: F.bodyMed,
-    fontSize: 18,
+    fontSize: s(15),
     color: SL.muted,
-    letterSpacing: 0.5,
+    letterSpacing: s(0.5),
     textAlign: 'center',
-    marginVertical: 20,
-    lineHeight: 26,
+    marginVertical: s(16),
+    lineHeight: s(21),
   },
-  editorButtons: { flexDirection: 'row', gap: 10 },
+  editorButtons: { flexDirection: 'row', gap: s(9) },
+  // The dialog's own pill metrics - PillButton's own sizes are tuned for canvas
+  // units, so the modal passes padding/text through s() to match its density.
+  editorBtn: { flex: 1, paddingVertical: s(11), paddingHorizontal: s(8) },
+  editorBtnText: { fontSize: s(14), letterSpacing: s(1) },
 
   // Stacked: workout info on top, action buttons centered below — so the buttons
   // never overflow the card the way a single side-by-side row did.
@@ -1448,13 +1493,13 @@ const styles = StyleSheet.create({
     borderLeftWidth: 4,
     borderLeftColor: SL.accent,
     borderRadius: 8,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
+    paddingVertical: 9,
+    paddingHorizontal: 13,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 10,
   },
-  workoutInfo: { flex: 1, gap: 2 },
+  workoutInfo: { flex: 1, gap: 1 },
   workoutTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1462,9 +1507,10 @@ const styles = StyleSheet.create({
   },
   workoutTitle: {
     fontFamily: F.heading,
-    fontSize: 19,
+    fontSize: 17,
+    lineHeight: 20,
     color: SL.accent,
-    letterSpacing: 1.5,
+    letterSpacing: 0.8,
     textTransform: 'uppercase',
     flexShrink: 1,
   },
@@ -1473,11 +1519,11 @@ const styles = StyleSheet.create({
   },
   typeTagText: { fontFamily: F.bodyMed, fontSize: 10, letterSpacing: 1.5 },
   accDots: {
-    flexDirection: 'row', gap: 3, marginTop: 3, justifyContent: 'center', flexWrap: 'wrap',
-    position: 'absolute', bottom: 6, left: 0, right: 0,
+    flexDirection: 'row', gap: 4, marginTop: 3, justifyContent: 'center', flexWrap: 'wrap',
+    position: 'absolute', bottom: 8, left: 0, right: 0,
   },
   accDot: {
-    width: 5, height: 5, borderRadius: 999,
+    width: 7, height: 7, borderRadius: 999,
     shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.9, shadowRadius: 3,
   },
   feedbackDot: {
@@ -1487,59 +1533,18 @@ const styles = StyleSheet.create({
     backgroundColor: SL.gold,
     flexShrink: 0,
   },
-  workoutPurpose: {
-    fontFamily: F.body,
-    fontSize: 13,
-    color: SL.muted,
-    letterSpacing: 0.5,
+  // A cleared row is struck through and quieted IN ITS OWN COLOUR — the same
+  // "done" language as HomeScreen's missions and the daily quests.
+  workoutTitleDone: {
+    textDecorationLine: 'line-through',
+    opacity: 0.5,
   },
-
-  actionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    flexWrap: 'wrap',
-    justifyContent: 'flex-end',
-    flexShrink: 0,
-  },
-  // Compact action buttons so WORKOUT MODE + VIEW + MARK DONE fit one row.
-  actionBtn: { paddingHorizontal: 12 },
-  actionBtnText: { fontSize: 14, letterSpacing: 1 },
-  // Shining ice-blue "completed" badge — replaces the action buttons once done.
-  completedTag: {
-    paddingVertical: 8,
-    paddingHorizontal: 18,
-    borderWidth: 1.5,
-    borderColor: SL.accent,
-    borderRadius: 999,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(74,158,191,0.12)',
-    shadowColor: SL.accent,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.6,
-    shadowRadius: 12,
-  },
-  completedTagText: {
+  workoutDoneMark: {
     fontFamily: F.heading,
-    fontSize: 15,
+    fontSize: 18,
     color: SL.accent,
-    letterSpacing: 2,
-  },
-
-  lockedBadge: {
-    alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderColor: SL.muted,
-    borderRadius: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-  },
-  lockedBadgeText: {
-    fontFamily: F.bodyMed,
-    fontSize: 14,
-    color: SL.muted,
-    letterSpacing: 1.5,
+    opacity: 0.85,
+    flexShrink: 0,
   },
 
   restCard: {
