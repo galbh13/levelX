@@ -1470,6 +1470,16 @@ title sequence plays on every cold start.
   floating "✦ CLASS GATE ✦" gold crown ribbon above them + a breathing gold halo
   (the `gate` clock in QuestNode), so they read as prestige milestones rather than
   ordinary nodes. One shared refcounted clock.)
+  Also `ClearSweep` — the "cleared" beat on a tickable row (HomeScreen's missions
+  + daily quests): a bright bar in the row's own colour scanning across it, plus a
+  brief wash. It plays ONLY on the false→true flip (a `prev` ref), so a board that
+  loads with six finished rows fires nothing; it unmounts itself when the sweep
+  ends, so a settled card costs nothing. **Marking something done speaks in the
+  system's existing voice — a line running over the thing** (the quest gate's scan
+  bar, HoloBuild's build-front, the shimmer sweep), never a new effect; a cleared
+  row is then scanned, struck through and dropped to half opacity IN ITS OWN
+  COLOUR. Give any new row it clips (`overflow: 'hidden'`) so the bar stays inside
+  the corners.
   Also `SystemIntro` — the cold-start "The System" title sequence overlay (see
   "App identity" above); it is the only `expo-video` consumer, distinct from the
   `VideoPlayer` below.
