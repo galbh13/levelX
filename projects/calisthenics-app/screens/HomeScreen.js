@@ -18,7 +18,7 @@ import PopCheck from '../components/PopCheck';
 import ClearSweep from '../components/ClearSweep';
 import DonePulse from '../components/DonePulse';
 import QuestGate from '../components/QuestGate';
-import { hapticTap } from '../lib/haptics';
+import { hapticTap, hapticSuccess } from '../lib/haptics';
 import { CARD_W } from '../constants/layout';
 import { sessionKey, activeSessionKeys } from '../lib/workoutSession';
 import { useTourTarget } from '../lib/tourTargets';
@@ -518,6 +518,25 @@ export default function HomeScreen({ navigation }) {
   const toNext       = Math.max(0, maxLvl - lvl);
   const missionsDone = workouts.filter(w => w.completed).length;
   const dqDone       = dailyQuests.filter(q => doneTodayIds.has(q.id)).length;
+  const dqAllDone    = dailyQuests.length > 0 && dqDone === dailyQuests.length;
+
+  // ── ALL CLEAR ──────────────────────────────────────────────────────────────
+  // Clearing the LAST row of a panel is the moment worth marking — finishing your
+  // third mission should not feel like finishing your first. The panel itself
+  // answers (gold header + a gold scan), and the phone thumps once.
+  // The `armed` gate is the whole trick: `allDone` also goes false → true when the
+  // first fetch lands, so without it every visit to an already-finished board
+  // would replay the celebration. It arms only after the initial load, and the
+  // panel sweeps are likewise not mounted until then.
+  const clearFx = useRef({ armed: false, m: false, q: false });
+  useEffect(() => {
+    if (loading) return;
+    const c = clearFx.current;
+    if (c.armed && ((allDone && !c.m) || (dqAllDone && !c.q))) hapticSuccess();
+    c.armed = true;
+    c.m = allDone;
+    c.q = dqAllDone;
+  }, [allDone, dqAllDone, loading]);
 
   // Split the class name ("CLASS II") into a kicker + the rank token, so the rank
   // can sit big inside the crest medallion and "CLASS" reads as a spaced kicker
@@ -666,12 +685,24 @@ export default function HomeScreen({ navigation }) {
           <Animated.View style={[styles.sectionsRow, d.sectionsRow, enterStyle(gridAnim)]}>
 
             {/* Today's Missions */}
-            <View ref={tourMissionsRef} collapsable={false} style={[styles.sectionPanel, d.sectionPanel]}>
+            <View
+              ref={tourMissionsRef}
+              collapsable={false}
+              style={[styles.sectionPanel, d.sectionPanel, allDone && styles.sectionPanelClear]}
+            >
               <View style={styles.panelHeader}>
-                <View style={styles.panelHeaderBar} />
-                <Text style={[styles.panelHeaderText, d.panelHeaderText]} numberOfLines={2} ellipsizeMode="tail">
-                  TODAY'S MISSIONS
-                </Text>
+                <View style={[styles.panelHeaderBar, allDone && styles.panelHeaderBarClear]} />
+                {/* sweep={false}: the per-glyph wave drops the style off its row
+                    container, losing the title's flex:1 and shoving the chip out.
+                    A single-colour cycle keeps the layout byte-identical. */}
+                <ShimmerText
+                  text="TODAY'S MISSIONS"
+                  active={allDone}
+                  colors={GOLD}
+                  sweep={false}
+                  numberOfLines={2}
+                  style={[styles.panelHeaderText, d.panelHeaderText, allDone && styles.panelHeaderTextClear]}
+                />
                 {workouts.length > 0 && (
                   <View style={[styles.countChip, allDone && styles.countChipDone]}>
                     <Text style={[styles.countChipText, allDone && styles.countChipTextDone]}>
@@ -680,7 +711,7 @@ export default function HomeScreen({ navigation }) {
                   </View>
                 )}
               </View>
-              <View style={styles.panelDivider} />
+              <View style={[styles.panelDivider, allDone && styles.panelDividerClear]} />
 
               {workouts.length === 0 ? (
                 showOnboarding ? (
@@ -787,24 +818,40 @@ export default function HomeScreen({ navigation }) {
                   })}
                 </>
               )}
+
+              {/* The all-clear scan. LAST child so it paints over the rows (the
+                  cards are opaque), held back 300ms so it follows the row's own
+                  sweep instead of racing it, and not mounted until the first load
+                  has landed — see the `armed` note above. */}
+              {!loading && (
+                <ClearSweep done={allDone} color={SL.gold} duration={700} delay={300} radius={12} />
+              )}
             </View>
 
             {/* Daily Quests */}
-            <View style={[styles.sectionPanel, d.sectionPanel]}>
+            <View style={[styles.sectionPanel, d.sectionPanel, dqAllDone && styles.sectionPanelClear]}>
               <View style={styles.panelHeader}>
-                <View style={styles.panelHeaderBar} />
-                <Text style={[styles.panelHeaderText, d.panelHeaderText]} numberOfLines={2} ellipsizeMode="tail">
-                  DAILY QUESTS
-                </Text>
+                <View style={[styles.panelHeaderBar, dqAllDone && styles.panelHeaderBarClear]} />
+                {/* sweep={false}: the per-glyph wave drops the style off its row
+                    container, losing the title's flex:1 and shoving the chip out.
+                    A single-colour cycle keeps the layout byte-identical. */}
+                <ShimmerText
+                  text="DAILY QUESTS"
+                  active={dqAllDone}
+                  colors={GOLD}
+                  sweep={false}
+                  numberOfLines={2}
+                  style={[styles.panelHeaderText, d.panelHeaderText, dqAllDone && styles.panelHeaderTextClear]}
+                />
                 {dailyQuests.length > 0 && (
-                  <View style={[styles.countChip, dqDone === dailyQuests.length && styles.countChipDone]}>
-                    <Text style={[styles.countChipText, dqDone === dailyQuests.length && styles.countChipTextDone]}>
+                  <View style={[styles.countChip, dqAllDone && styles.countChipDone]}>
+                    <Text style={[styles.countChipText, dqAllDone && styles.countChipTextDone]}>
                       {dqDone}/{dailyQuests.length}
                     </Text>
                   </View>
                 )}
               </View>
-              <View style={styles.panelDivider} />
+              <View style={[styles.panelDivider, dqAllDone && styles.panelDividerClear]} />
 
               {dailyQuests.length > 0 ? (
                 dailyQuests.map(q => {
@@ -829,6 +876,10 @@ export default function HomeScreen({ navigation }) {
                 })
               ) : (
                 <Text style={styles.emptyHint}>No daily quests yet.</Text>
+              )}
+
+              {!loading && (
+                <ClearSweep done={dqAllDone} color={SL.gold} duration={700} delay={300} radius={12} />
               )}
             </View>
           </Animated.View>
@@ -1259,9 +1310,34 @@ const styles = StyleSheet.create({
     borderColor: SL.border,
     backgroundColor: 'rgba(74,158,191,0.08)',
   },
+  // ── ALL CLEAR ──────────────────────────────────────────────────────────────
+  // A fully cleared panel goes GOLD — the app's existing word for "nothing left
+  // to earn here" (MAXED chains, class gates, hidden challenges). Ice is progress;
+  // gold is completion. The whole panel says it at once, so the individual rows
+  // don't have to shout.
+  sectionPanelClear: {
+    borderColor: 'rgba(255,215,0,0.45)',
+    shadowColor: SL.gold,
+    shadowOpacity: 0.3,
+  },
+  panelHeaderBarClear: {
+    backgroundColor: SL.gold,
+    shadowColor: SL.gold,
+  },
+  panelHeaderTextClear: {
+    color: SL.gold,
+  },
+  panelDividerClear: {
+    backgroundColor: SL.gold,
+    opacity: 0.35,
+  },
   countChipDone: {
-    borderColor: SL.accent,
-    backgroundColor: 'rgba(74,158,191,0.18)',
+    borderColor: SL.gold,
+    backgroundColor: 'rgba(255,215,0,0.16)',
+    shadowColor: SL.gold,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.7,
+    shadowRadius: 8,
   },
   countChipText: {
     fontFamily: F.heading,
@@ -1270,7 +1346,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   countChipTextDone: {
-    color: SL.accent,
+    color: SL.gold,
   },
   panelDivider: {
     height: 1,

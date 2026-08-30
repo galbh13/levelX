@@ -1169,9 +1169,9 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
 - **The type color runs the WHOLE length of a workout (2026-08-30).** The rule
   above is no longer HomeScreen's alone — `accentFor` is now `categoryLabel(cat)
   ? categoryMeta(cat).color : null` (EVERY typed category, not just
-  accessory/legs) in `WorkoutsScreen`, `WorkoutModeScreen` and
-  `WorkoutDetailScreen` too, so one workout is one colour from the week strip's
-  accent dot → its row on the day panel → the quest gate → the live session.
+  accessory/legs) in `WorkoutsScreen` and `WorkoutModeScreen` too, so one workout
+  is one colour from the week strip's accent dot → its row on the day panel → the
+  quest gate → the live session.
   · **Day panel row:** whole frame tinted (`borderColor` at `tc + '66'`, full
     `tc` once complete, `borderLeftColor` + glow always `tc`) + the title in `tc`.
   · **Workout Mode:** title, timer pill, purpose bar, progress fill (a
@@ -1179,10 +1179,15 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
     card / letter badge / NOW tag / superset bracket, and the tappable exercise
     names. Done = green and skipped = muted are untouched — those are states of
     the EXERCISE, not the workout's identity.
-  · **Workout Detail:** purpose bar, letter badges, exercise-name links, the
-    SUPERSET chip.
   An untyped/legacy workout returns `null` from `accentFor` and every patch is
   `null` too, so the stylesheet's ice theme stands unchanged.
+  · **`WorkoutDetailScreen` is DELIBERATELY EXCLUDED** (tried in rose, reverted
+    the same day). The type colour marks a workout in a LIST — WHICH of today's
+    sessions this is — and then carries the live session. READING a workout is
+    the app's own chrome and stays ice, like every other detail screen. Don't
+    re-tint it. Its purpose rail is full-height (`alignSelf: 'stretch'` on an
+    `alignItems: 'stretch'` row, same as Workout Mode's), not an 18px stub beside
+    a five-line note.
 - **The Workouts day panel is a READ-ONLY board (2026-08-30).** Its rows no
   longer carry DONE / UNDO / a shimmering ✓ COMPLETED badge, and no longer show
   the workout's `purpose` (same reason as the mission rows — the description is

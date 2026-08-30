@@ -13,7 +13,7 @@ import { Animated, Easing, StyleSheet, View } from 'react-native';
 // with six already-finished rows doesn't fire six celebrations. Native-driver
 // (opacity + translateX), and it unmounts itself the moment it's done, so a
 // settled card costs nothing.
-export default function ClearSweep({ done, color = '#4A9EBF', duration = 460 }) {
+export default function ClearSweep({ done, color = '#4A9EBF', duration = 460, delay = 0, radius = 0 }) {
   const t = useRef(new Animated.Value(0)).current;
   const [w, setW] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -26,11 +26,11 @@ export default function ClearSweep({ done, color = '#4A9EBF', duration = 460 }) 
     t.setValue(0);
     setPlaying(true);
     const anim = Animated.timing(t, {
-      toValue: 1, duration, easing: Easing.out(Easing.cubic), useNativeDriver: true,
+      toValue: 1, duration, delay, easing: Easing.out(Easing.cubic), useNativeDriver: true,
     });
     anim.start(({ finished }) => { if (finished) setPlaying(false); });
     return () => anim.stop();
-  }, [done, duration, t]);
+  }, [done, duration, delay, t]);
 
   const BAR = 30;
   const x      = t.interpolate({ inputRange: [0, 1], outputRange: [-BAR, (w || 260) + BAR] });
@@ -42,7 +42,7 @@ export default function ClearSweep({ done, color = '#4A9EBF', duration = 460 }) 
     // before the first tap — the bar has nowhere to travel otherwise.
     <View
       pointerEvents="none"
-      style={StyleSheet.absoluteFill}
+      style={[StyleSheet.absoluteFill, radius ? { borderRadius: radius, overflow: 'hidden' } : null]}
       onLayout={e => setW(e.nativeEvent.layout.width)}
     >
       {playing && w > 0 && (

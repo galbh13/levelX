@@ -11,7 +11,7 @@ import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
 import CoachText, { parseCoachText } from '../components/CoachText';
 import { buildGalleryIndex, resolveGuide } from '../lib/exerciseGuide';
-import { categoryLabel, categoryMeta } from '../lib/workouts';
+import { categoryLabel } from '../lib/workouts';
 
 
 // Session-lifetime cache of everything the screen fetches, keyed by workout id.
@@ -33,23 +33,12 @@ const SL = {
   gold:   '#FFD700',
 };
 
-// The workout's TYPE color — same rule as the board, the quest gate and Workout
-// Mode: a HANDSTAND workout is rose everywhere it's shown. Untyped → null = ice.
-const accentFor = (category) =>
-  categoryLabel(category) ? categoryMeta(category).color : null;
-
-const rgba = (hex, a) => {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
-  if (!m) return hex;
-  const n = parseInt(m[1], 16);
-  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
-};
-
+// NOTE: this screen deliberately does NOT wear the workout's type colour. The
+// type glow marks a workout in a LIST — which of the day's sessions this is — and
+// carries through the live session. Reading the workout is the app's own chrome:
+// it stays ice, like every other detail/reading screen.
 export default function WorkoutDetailScreen({ route, navigation }) {
   const { workout, studentView } = route.params;
-  const tc       = accentFor(workout.category);   // null = the default ice theme
-  const tcText   = tc && { color: tc };
-  const tcFill   = tc && { backgroundColor: tc };
 
   // Seed everything from the cache when this workout was opened before — the
   // full content paints on the very first frame, no spinner.
@@ -171,12 +160,8 @@ export default function WorkoutDetailScreen({ route, navigation }) {
   // One exercise card. `compact` shrinks it so two fit side by side in a fork path.
   const renderExercise = (ex, compact = false) => (
     <View key={ex.id} style={[styles.exCard, compact && styles.exCardCompact]}>
-      <View style={[
-        styles.letterBadge,
-        compact && styles.letterBadgeSm,
-        tc && { borderColor: tc, backgroundColor: rgba(tc, 0.1) },
-      ]}>
-        <Text style={[styles.letterText, compact && styles.letterTextSm, tcText]}>{ex.letter}</Text>
+      <View style={[styles.letterBadge, compact && styles.letterBadgeSm]}>
+        <Text style={[styles.letterText, compact && styles.letterTextSm]}>{ex.letter}</Text>
       </View>
       <View style={styles.exBody}>
         <TouchableOpacity
@@ -184,19 +169,14 @@ export default function WorkoutDetailScreen({ route, navigation }) {
           hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
           activeOpacity={0.7}
         >
-          <Text style={[
-            styles.exName,
-            styles.exNameLink,
-            compact && styles.exNameSm,
-            tc && { color: tc, textShadowColor: rgba(tc, 0.5) },
-          ]}>
-            {ex.name?.toUpperCase()} <Text style={[styles.exNameHint, tcText]}>ⓘ</Text>
+          <Text style={[styles.exName, styles.exNameLink, compact && styles.exNameSm]}>
+            {ex.name?.toUpperCase()} <Text style={styles.exNameHint}>ⓘ</Text>
           </Text>
         </TouchableOpacity>
         {ex.variation ? <CoachText text={ex.variation} style={styles.exVariation} prefix="※ " /> : null}
         <View style={styles.metaRow}>
           {ex.superset_group != null ? (
-            <View style={[styles.metaChip, { borderColor: tc ?? SL.accent }]}>
+            <View style={[styles.metaChip, { borderColor: SL.accent }]}>
               <Text style={styles.metaChipText}>⇄ SUPERSET</Text>
             </View>
           ) : null}
@@ -234,7 +214,7 @@ export default function WorkoutDetailScreen({ route, navigation }) {
       <ScreenHeader title={workoutTitle} onBack={() => navigation.goBack()} />
       {workoutPurpose ? (
         <View style={styles.purposeRow}>
-          {parseCoachText(workoutPurpose).some(p => p.label) ? null : <View style={[styles.purposeAccent, tcFill]} />}
+          {parseCoachText(workoutPurpose).some(p => p.label) ? null : <View style={styles.purposeAccent} />}
           <CoachText text={workoutPurpose} style={styles.purposeText} containerStyle={styles.purposeFlex} />
         </View>
       ) : null}
@@ -353,7 +333,10 @@ export default function WorkoutDetailScreen({ route, navigation }) {
 const styles = StyleSheet.create({
   purposeRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    // flex-start + a stretched rail: the bar runs the WHOLE height of the
+    // coach's note (Workout Mode's does the same), instead of a 18px stub
+    // floating beside a five-line paragraph.
+    alignItems: 'stretch',
     gap: 10,
     marginTop: -4,
     marginBottom: 6,
@@ -363,7 +346,8 @@ const styles = StyleSheet.create({
   purposeFlex: { flex: 1 },
   purposeAccent: {
     width: 3,
-    height: 18,
+    alignSelf: 'stretch',
+    minHeight: 18,
     backgroundColor: SL.accent,
     borderRadius: 2,
   },
