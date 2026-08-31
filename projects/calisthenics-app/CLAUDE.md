@@ -1060,14 +1060,33 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   with the variation it belongs to — `1. lean forward` / `2 feet go backwards`
   (any of `.`, `)`, `:`, `-` or just a space after the number). `parseCues()` in
   [screens/ExerciseDetailScreen.js](screens/ExerciseDetailScreen.js) strips that
-  marker and the card tints the chip + text per variation from `CUE_TINTS` (ice →
-  sea glass → periwinkle). The tints are deliberately CLOSE neighbours: they say
+  marker and the card tints the chip + text per variation from `CUE_TINTS` (deep
+  ice → white ice → periwinkle). The tints are deliberately CLOSE neighbours: they say
   "these cues belong together", not "this one is a warning". The chip then shows
   the VARIATION number, not the row index, so variation 2's cues all read "2".
   Two guards keep it from misfiring: a bare number with no text after it isn't a
   marker, and the whole list stays plain ice unless at least TWO lines carry one
   (so a lone `3 sec hold` can't repaint everything). Nothing is stored — it's
   parsed from the free text the coach already types. No schema change.
+- **The DESCRIPTION is parsed into blocks, not printed (2026-08-31).** A long
+  description rendered as one wrapped `<Text>` is a wall: a wrapped continuation
+  looks exactly like a new thought, so nothing tells the eye where an idea ends.
+  `parseDescription()` + `DescriptionBody` in
+  [screens/ExerciseDetailScreen.js](screens/ExerciseDetailScreen.js) read the
+  shape back out of the same free text — three kinds:
+  · **running lines** keep the coach's own line breaks, with a small gap between
+    them and a BIGGER gap between blocks (that difference IS the structure);
+  · **`label - explanation`** becomes a definition — the term as an ice heading
+    over a rail-bound body, so the explanation can wrap without orphaning it.
+    The label is capped at 26 chars: a dash mid-sentence is punctuation, not a
+    definition;
+  · **`important note:` / `note:` / `tip:` / `warning:`** becomes a bordered
+    callout with the word as its tag.
+  A definition whose value is JUST a number (`back cues - 1`) is the coach naming
+  a variation: it renders the matching `CUE_TINTS` chip, so the top of the card
+  is the legend for the cue colours at the bottom. All of it degrades to plain
+  spaced lines when nothing matches — the coach types exactly what he typed
+  before, and no column changed.
 - **Set ranges:** `exercises.sets` is TEXT and may be a range like `'1-2'`. The
   lower bound is the REQUIRED set count; extra sets up to the upper bound are
   OPTIONAL. Workout Mode shows all rows but renders the optional ones muted
