@@ -37,8 +37,13 @@ export const C = {
 // header on that card is already the accent, so a variation painted in it reads
 // as chrome instead of as a code. Close neighbours by design — they say "these
 // belong together", never "this one is more important".
+//
+// They are separated by HUE, not by lightness. A light and a dark shade of one
+// colour look identical inside a 26px chip — that pair was tried and read as one
+// colour — so the groups step around the cold end of the wheel instead: cyan,
+// then periwinkle, then pale aqua. Same temperature, obviously different ink.
 export const CUE_TINTS = [
-  { chip: '#6FCFE8', bg: 'rgba(111,207,232,0.15)', text: '#EAF9FF' },  // glacier
-  { chip: '#CDEFFA', bg: 'rgba(205,239,250,0.13)', text: '#F6FDFF' },  // white ice
-  { chip: '#9DB8F0', bg: 'rgba(157,184,240,0.14)', text: '#EDF1FF' },  // frost blue
+  { chip: '#5FD8F5', bg: 'rgba(95,216,245,0.18)',  text: '#E6FAFF' },  // cyan ice
+  { chip: '#AEB4FF', bg: 'rgba(174,180,255,0.18)', text: '#EFF0FF' },  // periwinkle
+  { chip: '#CFF6FF', bg: 'rgba(207,246,255,0.16)', text: '#F6FDFF' },  // pale aqua
 ];
