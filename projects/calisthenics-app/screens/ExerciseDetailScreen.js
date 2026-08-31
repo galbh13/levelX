@@ -92,9 +92,9 @@ function VideoSection({ exercise, ratio, width, height, onRatio }) {
 // instead of one long list. The tints sit close on the hue wheel on purpose: a
 // grouping signal, not a traffic light.
 const CUE_TINTS = [
-  { chip: '#4A9EBF', bg: 'rgba(74,158,191,0.14)', text: '#E8F4FF' },  // ice
-  { chip: '#4ABFA6', bg: 'rgba(74,191,166,0.14)', text: '#E2F7F1' },  // sea glass
-  { chip: '#6E93D6', bg: 'rgba(110,147,214,0.14)', text: '#E6ECFF' }, // periwinkle
+  { chip: '#4A9EBF', bg: 'rgba(74,158,191,0.14)', text: '#E8F4FF' },   // deep ice
+  { chip: '#AFE3F2', bg: 'rgba(175,227,242,0.12)', text: '#F4FCFF' },  // white ice
+  { chip: '#6E93D6', bg: 'rgba(110,147,214,0.14)', text: '#E6ECFF' },  // periwinkle
 ];
 
 // "1. text" / "2.text" / "3 text" → { variation, text }.
@@ -116,6 +116,118 @@ function parseCues(raw) {
     return lines.map(text => ({ variation: null, text }));
   }
   return parsed;
+}
+
+// ─── Description ──────────────────────────────────────────────────────────────
+// A description is free text, but the coach writes it in a recognisable shape:
+// running sentences, "label - explanation" definitions, and the odd "important
+// note:". Rendered as ONE wrapped paragraph they all look identical, and a
+// wrapped continuation is indistinguishable from a new thought — which is what
+// makes a long description feel like a wall. So we read that shape back out and
+// give each kind its own block. Nothing about how it's typed changes.
+
+// "back to wall - easier, we can stack reps" → { label, value }. The label is
+// kept SHORT on purpose: a dash mid-sentence is punctuation, not a definition.
+const DESC_PAIR = /^([^\-–—:]{2,26}?)\s*[-–—]\s+(\S.*)$/;
+const DESC_NOTE = /^(important note|important|note|tip|warning)\s*[:\-]\s*(\S.*)$/i;
+
+function parseDescription(raw) {
+  if (!raw) return [];
+  const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const blocks = [];
+  for (const line of lines) {
+    const note = line.match(DESC_NOTE);
+    if (note) { blocks.push({ kind: 'note', tag: note[1], text: note[2] }); continue; }
+
+    const pair = line.match(DESC_PAIR);
+    if (pair) {
+      const item = { label: pair[1].trim(), value: pair[2].trim() };
+      const last = blocks[blocks.length - 1];
+      // Consecutive definitions read as one list, not four loose lines.
+      if (last?.kind === 'pairs') last.items.push(item);
+      else blocks.push({ kind: 'pairs', items: [item] });
+      continue;
+    }
+
+    const last = blocks[blocks.length - 1];
+    if (last?.kind === 'text') last.lines.push(line);
+    else blocks.push({ kind: 'text', lines: [line] });
+  }
+  return blocks;
+}
+
+// A definition whose whole value is a number ("back cues - 1") is the coach
+// naming a VARIATION — the same number the cues below are tagged with. Tint it
+// to match, and the description stops being prose and starts being a legend.
+function variationOf(value) {
+  const m = value.match(/^(\d{1,2})[.)]?$/);
+  return m ? Number(m[1]) : null;
+}
+
+function tintFor(variation) {
+  return variation != null
+    ? CUE_TINTS[(variation - 1 + CUE_TINTS.length) % CUE_TINTS.length]
+    : CUE_TINTS[0];
+}
+
+function DescriptionBody({ text }) {
+  const blocks = parseDescription(text);
+  if (blocks.length === 0) return null;
+
+  return (
+    <View style={styles.descBody}>
+      {blocks.map((block, bi) => {
+        if (block.kind === 'text') {
+          return (
+            <View key={bi} style={styles.descPara}>
+              {block.lines.map((line, i) => (
+                <Text key={i} style={styles.descLine}>{line}</Text>
+              ))}
+            </View>
+          );
+        }
+
+        if (block.kind === 'note') {
+          return (
+            <View key={bi} style={styles.noteBox}>
+              <Text style={styles.noteTag}>{block.tag.toUpperCase()}</Text>
+              <Text style={styles.noteText}>{block.text}</Text>
+            </View>
+          );
+        }
+
+        return (
+          <View key={bi} style={styles.pairGroup}>
+            {block.items.map((item, i) => {
+              const variation = variationOf(item.value);
+              const tint = tintFor(variation);
+              return (
+                <View key={i} style={styles.pairRow}>
+                  <View style={[styles.pairRail, { backgroundColor: tint.chip }]} />
+                  <View style={styles.pairBody}>
+                    <Text style={[styles.pairLabel, { color: tint.chip }]}>
+                      {item.label.toUpperCase()}
+                    </Text>
+                    {variation != null ? (
+                      <View style={[styles.pairChip, {
+                        borderColor: tint.chip, backgroundColor: tint.bg,
+                      }]}>
+                        <Text style={[styles.pairChipText, { color: tint.chip }]}>
+                          {variation}
+                        </Text>
+                      </View>
+                    ) : (
+                      <Text style={styles.pairValue}>{item.value}</Text>
+                    )}
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        );
+      })}
+    </View>
+  );
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
@@ -203,7 +315,7 @@ export default function ExerciseDetailScreen({ route, navigation }) {
             <View style={styles.sectionIcon}><Text style={styles.sectionIconText}>≡</Text></View>
             <SectionTitle>DESCRIPTION</SectionTitle>
           </View>
-          <Text style={styles.bodyText}>{exercise.description}</Text>
+          <DescriptionBody text={exercise.description} />
         </View>
       )}
 
@@ -432,6 +544,47 @@ const styles = StyleSheet.create({
   },
   bodyText: {
     fontFamily: F.body, fontSize: 18, color: C.text, lineHeight: 30, letterSpacing: 0.4,
+  },
+
+  // Description blocks. The gap BETWEEN blocks is bigger than the gap between
+  // lines inside one — that difference is the whole trick: it tells the eye
+  // where a thought ends without adding a single word.
+  descBody: { gap: 20 },
+  descPara: { gap: 7 },
+  descLine: {
+    fontFamily: F.body, fontSize: 17, color: C.text, lineHeight: 26, letterSpacing: 0.4,
+  },
+
+  // "label - explanation" — the label becomes a heading, so the explanation can
+  // wrap without the reader losing which term it belongs to. The rail binds the
+  // wrapped lines back to it.
+  pairGroup: { gap: 14 },
+  pairRow: { flexDirection: 'row', alignItems: 'stretch', gap: 12 },
+  pairRail: { width: 3, borderRadius: 2, opacity: 0.7 },
+  pairBody: { flex: 1 },
+  pairLabel: {
+    fontFamily: F.heading, fontSize: 13, letterSpacing: 2.2, marginBottom: 5,
+  },
+  pairValue: {
+    fontFamily: F.body, fontSize: 17, color: C.text, lineHeight: 26, letterSpacing: 0.4,
+  },
+  // A definition whose value is just a variation number reads as a legend chip,
+  // matching the cue chips further down the card.
+  pairChip: {
+    width: 26, height: 26, borderRadius: 999, borderWidth: 1.5,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  pairChipText: { fontFamily: F.heading, fontSize: 13 },
+
+  noteBox: {
+    borderWidth: 1, borderColor: 'rgba(74,158,191,0.35)', borderRadius: 12,
+    backgroundColor: 'rgba(74,158,191,0.07)', padding: 14, gap: 6,
+  },
+  noteTag: {
+    fontFamily: F.heading, fontSize: 11, color: C.iceGlow, letterSpacing: 2.4,
+  },
+  noteText: {
+    fontFamily: F.body, fontSize: 17, color: C.text, lineHeight: 26, letterSpacing: 0.4,
   },
 
   cueList: { gap: 16 },
