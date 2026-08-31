@@ -85,6 +85,39 @@ function VideoSection({ exercise, ratio, width, height, onRatio }) {
   );
 }
 
+// ─── Coaching cues ────────────────────────────────────────────────────────────
+// Cues are often written per VARIATION of the same movement — every line carries
+// the variation it belongs to ("1. lean forward", "2 feet go backwards"). We strip
+// that marker and tint the cue by its variation, so it reads as two sets of cues
+// instead of one long list. The tints sit close on the hue wheel on purpose: a
+// grouping signal, not a traffic light.
+const CUE_TINTS = [
+  { chip: '#4A9EBF', bg: 'rgba(74,158,191,0.14)', text: '#E8F4FF' },  // ice
+  { chip: '#4ABFA6', bg: 'rgba(74,191,166,0.14)', text: '#E2F7F1' },  // sea glass
+  { chip: '#6E93D6', bg: 'rgba(110,147,214,0.14)', text: '#E6ECFF' }, // periwinkle
+];
+
+// "1. text" / "2.text" / "3 text" → { variation, text }.
+const CUE_PREFIX = /^(\d{1,2})(?:[.):\-]\s*|\s+)/;
+
+function parseCues(raw) {
+  if (!raw) return [];
+  const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const parsed = lines.map((line) => {
+    const m = line.match(CUE_PREFIX);
+    const body = m ? line.slice(m[0].length).trim() : line;
+    // A bare number with nothing after it isn't a variation marker.
+    if (!m || !body) return { variation: null, text: line };
+    return { variation: Number(m[1]), text: body };
+  });
+  // Only read the numbers as variation markers when at least two lines carry one
+  // — a single stray "3 sec hold" shouldn't repaint the whole list.
+  if (parsed.filter(c => c.variation != null).length < 2) {
+    return lines.map(text => ({ variation: null, text }));
+  }
+  return parsed;
+}
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function ExerciseDetailScreen({ route, navigation }) {
@@ -106,9 +139,7 @@ export default function ExerciseDetailScreen({ route, navigation }) {
   // applied — otherwise the info (description) page flashes for a frame first.
   const [jumped, setJumped] = useState(false);
 
-  const cues = exercise.coaching_cues
-    ? exercise.coaching_cues.split('\n').filter(line => line.trim().length > 0)
-    : [];
+  const cues = parseCues(exercise.coaching_cues);
 
   // Once we know the page width, jump to the video page (rightmost) without a
   // visible scroll animation. useLayoutEffect so the jump (and the reveal below)
@@ -183,14 +214,25 @@ export default function ExerciseDetailScreen({ route, navigation }) {
             <SectionTitle>COACHING CUES</SectionTitle>
           </View>
           <View style={styles.cueList}>
-            {cues.map((cue, i) => (
-              <View key={i} style={styles.cueRow}>
-                <View style={styles.cueIndex}>
-                  <Text style={styles.cueIndexText}>{i + 1}</Text>
+            {cues.map((cue, i) => {
+              const tint = cue.variation != null
+                ? CUE_TINTS[(cue.variation - 1 + CUE_TINTS.length) % CUE_TINTS.length]
+                : CUE_TINTS[0];
+              return (
+                <View key={i} style={styles.cueRow}>
+                  <View style={[styles.cueIndex, {
+                    borderColor: tint.chip,
+                    backgroundColor: tint.bg,
+                    shadowColor: tint.chip,
+                  }]}>
+                    <Text style={[styles.cueIndexText, { color: tint.chip }]}>
+                      {cue.variation != null ? cue.variation : i + 1}
+                    </Text>
+                  </View>
+                  <Text style={[styles.cueText, { color: tint.text }]}>{cue.text}</Text>
                 </View>
-                <Text style={styles.cueText}>{cue.trim()}</Text>
-              </View>
-            ))}
+              );
+            })}
           </View>
         </View>
       )}

@@ -907,6 +907,29 @@ Two layers, resolved at read time in [lib/schedule.js](lib/schedule.js)
   editing an existing one). `WORKOUT_CATEGORIES` + `categoryLabel()` live in
   lib/workouts. (From-scratch authoring, `CreateWorkoutScreen`, was REMOVED
   2026-08-13 — new workouts now come only from a library import.)
+  **Per-player customization + RETURN TO NORMAL (2026-08-30).** A player's copy is
+  theirs alone — editing it in `WorkoutEditScreen` touches only that `workouts` row
+  and its `exercises`, never the library — so the same program can be tuned per
+  player. The copy now REMEMBERS its origin (`workouts.source_template_id`) and
+  records when a coach last edited it (`workouts.customized_at`); with both set,
+  the My Workouts card shows a gold **RETURN TO NORMAL** pill (coach-only, beside
+  DELETE) that discards the customization and rebuilds the workout from the
+  **current** library version. Rules that matter:
+  · **It reuses the SAME `workouts` row** rather than delete-and-reimport, so the
+    player's `weekly_workout_template` days (and anything else keyed on
+    `workout_id`) survive the revert — only the contents are swapped.
+  · **Library edits still don't propagate on their own.** Revert is the ONE way a
+    copy picks up newer library content, and it is per-workout and manual.
+  · Both columns are stripped-and-retried on write (`writeWorkoutTolerant` in
+    [lib/workouts.js](lib/workouts.js)), same defensive shape as `insertExercises` —
+    an unmigrated live DB loses the button, never the ability to edit workouts.
+  · **`replaceWorkoutExercises()` is the ONE delete-then-insert path** (including
+    the pause that lets the delete commit). `WorkoutEditScreen`'s save and the
+    revert both go through it, so that timing workaround can't drift between them;
+    `updateWorkoutMeta()` is likewise the one place the link columns are written,
+    and `customized_at` rides along on the save's EXISTING metadata update rather
+    than costing a second round trip. Migration
+    `migrations/20260830_workout_template_link.sql`.
   Gallery example workouts store exercises/branches INLINE (JSONB). (The admin gallery `ExerciseGalleryScreen`
   is the AUTHORING tool — exercises tab + example-workout create/edit/delete — and is
   not where players import from.)
@@ -1033,6 +1056,18 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   name matching is fragile (imported/free-typed workout names drift from the catalog).
   Workout Edit + the gallery example builder store `gallery_id` when an exercise is picked from the
   library, so any workout authored/re-saved after 2026-07-01 links exactly.
+- **Coaching cues are grouped BY VARIATION (2026-08-31).** A cue line may open
+  with the variation it belongs to — `1. lean forward` / `2 feet go backwards`
+  (any of `.`, `)`, `:`, `-` or just a space after the number). `parseCues()` in
+  [screens/ExerciseDetailScreen.js](screens/ExerciseDetailScreen.js) strips that
+  marker and the card tints the chip + text per variation from `CUE_TINTS` (ice →
+  sea glass → periwinkle). The tints are deliberately CLOSE neighbours: they say
+  "these cues belong together", not "this one is a warning". The chip then shows
+  the VARIATION number, not the row index, so variation 2's cues all read "2".
+  Two guards keep it from misfiring: a bare number with no text after it isn't a
+  marker, and the whole list stays plain ice unless at least TWO lines carry one
+  (so a lone `3 sec hold` can't repaint everything). Nothing is stored — it's
+  parsed from the free text the coach already types. No schema change.
 - **Set ranges:** `exercises.sets` is TEXT and may be a range like `'1-2'`. The
   lower bound is the REQUIRED set count; extra sets up to the upper bound are
   OPTIONAL. Workout Mode shows all rows but renders the optional ones muted
