@@ -252,9 +252,20 @@ export default function AddExerciseScreen({ navigation, route }) {
         <Text style={styles.label}>
           DESCRIPTION <Text style={styles.optional}>(optional)</Text>
         </Text>
+        {/* The card reads this text back as blocks — see parseDescription in
+            ExerciseDetailScreen. Teaching the shape HERE is what makes that
+            worth having: the coach can't use a format he can't see. */}
+        <Text style={styles.hint}>
+          One idea per line. {'\n'}
+          <Text style={styles.hintCode}>term - explanation</Text> becomes a definition ·{' '}
+          <Text style={styles.hintCode}>note:</Text> /{' '}
+          <Text style={styles.hintCode}>common mistake:</Text> become callouts ·{' '}
+          <Text style={styles.hintCode}>1.</Text> starts a numbered list ·{' '}
+          <Text style={styles.hintCode}>back cues - 1</Text> shows the cue colour it names.
+        </Text>
         <TextInput
           style={[styles.input, styles.multiline]}
-          placeholder="What is this exercise and why it matters..."
+          placeholder={'there are 2 ways to perform this\nback to wall - easier, you can stack reps\nbelly to wall - harder, trains the lean\nimportant note: hands width sets the difficulty'}
           placeholderTextColor={SL.muted}
           value={description}
           onChangeText={setDescription}
@@ -267,9 +278,16 @@ export default function AddExerciseScreen({ navigation, route }) {
         <Text style={styles.label}>
           COACHING CUES <Text style={styles.optional}>(optional — one per line)</Text>
         </Text>
+        <Text style={styles.hint}>
+          Plain lines are numbered 1, 2, 3. To split the cues between two
+          variations, REPEAT the number —{' '}
+          <Text style={styles.hintCode}>1.</Text> on every back-to-wall cue,{' '}
+          <Text style={styles.hintCode}>2.</Text> on every belly-to-wall cue — and each
+          group gets its own colour.
+        </Text>
         <TextInput
           style={[styles.input, styles.multiline]}
-          placeholder={'Keep elbows close\nDead hang start\nFull range of motion'}
+          placeholder={'1. control the arch\n1. lean forward as much as possible\n2. feet go backwards as you lean\n2. more distance from the wall'}
           placeholderTextColor={SL.muted}
           value={coachingCues}
           onChangeText={setCoachingCues}
@@ -335,6 +353,11 @@ const styles = StyleSheet.create({
     fontFamily: F.body, fontSize: 15, color: SL.muted,
     textTransform: 'none', letterSpacing: 0.5,
   },
+  hint: {
+    fontFamily: F.body, fontSize: 15, color: SL.muted, lineHeight: 24,
+    letterSpacing: 0.3, marginTop: -4, marginBottom: 12,
+  },
+  hintCode: { color: SL.accent },
 
   input: {
     backgroundColor: SL.panel, borderWidth: 1.5, borderColor: SL.border, borderRadius: 12,

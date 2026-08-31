@@ -164,31 +164,52 @@ function WorkoutCard({ workout, expanded, onToggle, onEdit, onDelete }) {
   );
 }
 
+// Filters stay put between visits. Editing an exercise leaves the gallery and
+// comes back to it, and re-picking the same class / type every time is pure
+// friction during a long session spent inside one class or movement type.
+const stickyFilters = {
+  activeTab:       null,
+  exClassId:       null,
+  movFilter:       'All',
+  workoutsClassId: null,
+  workoutCategory: 'main',
+};
+
 // ─── Screen ───────────────────────────────────────────────────────────────────
 
 export default function ExerciseGalleryScreen({ route, navigation }) {
   const selectionMode = route.params?.selectionMode ?? false;
   const { addExercise, pendingExercises } = useCoach();
 
-  const [activeTab,       setActiveTab]       = useState(route.params?.initialTab ?? 'exercises');
+  const [activeTab,       setActiveTab]       = useState(route.params?.initialTab ?? stickyFilters.activeTab ?? 'exercises');
   const [classes,         setClasses]         = useState([]);
   const [exercises,       setExercises]       = useState([]);
   const [exampleWorkouts, setExampleWorkouts] = useState([]);
 
   // Exercises tab filters
   const [search,    setSearch]    = useState('');
-  const [movFilter, setMovFilter] = useState('All');
-  const [exClassId, setExClassId] = useState(null);
+  const [movFilter, setMovFilter] = useState(stickyFilters.movFilter);
+  const [exClassId, setExClassId] = useState(stickyFilters.exClassId);
 
   // Workouts tab
-  const [workoutsClassId,  setWorkoutsClassId]  = useState(null);
-  const [workoutCategory,  setWorkoutCategory]  = useState('main'); // main | side | accessory | legs
+  const [workoutsClassId,  setWorkoutsClassId]  = useState(stickyFilters.workoutsClassId);
+  const [workoutCategory,  setWorkoutCategory]  = useState(stickyFilters.workoutCategory); // main | side | accessory | legs
   const [workoutSearch,    setWorkoutSearch]    = useState('');
   const [expandedWorkout,  setExpandedWorkout]  = useState(null);
 
   // UI
   const [loading,  setLoading]  = useState(true);
   const [addedMap, setAddedMap] = useState({});
+
+  // Remember the current filters so the next mount of this screen opens where
+  // this one left off.
+  useEffect(() => {
+    stickyFilters.activeTab       = activeTab;
+    stickyFilters.exClassId       = exClassId;
+    stickyFilters.movFilter       = movFilter;
+    stickyFilters.workoutsClassId = workoutsClassId;
+    stickyFilters.workoutCategory = workoutCategory;
+  }, [activeTab, exClassId, movFilter, workoutsClassId, workoutCategory]);
 
   useEffect(() => {
     Promise.all([loadClasses(), loadExercises(), loadExampleWorkouts()])
@@ -214,7 +235,11 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
       .order('order_index');
     const rows = data ?? [];
     setClasses(rows);
-    if (rows.length > 0) setWorkoutsClassId(rows[0].id);
+    // Keep a remembered class if it still exists; otherwise fall back to the first.
+    if (rows.length > 0) {
+      setWorkoutsClassId(prev => (rows.some(r => r.id === prev) ? prev : rows[0].id));
+      setExClassId(prev => (rows.some(r => r.id === prev) ? prev : null));
+    }
   }
 
   async function loadExercises() {

@@ -9,7 +9,7 @@ import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
 import { ShimmerFrame, BLUE } from '../components/Shimmer';
-import { WORKOUT_CATEGORIES, insertExercises } from '../lib/workouts';
+import { WORKOUT_CATEGORIES, updateWorkoutMeta, replaceWorkoutExercises } from '../lib/workouts';
 
 // ─── Theme ──────────────────────────────────────────────────────────────────
 // Matches the admin example-workout builder so the two editors look identical.
@@ -286,29 +286,25 @@ export default function WorkoutEditScreen({ route, navigation }) {
 
     setSaving(true);
 
-    // 1. Update workout metadata
+    // 1. Update workout metadata. `customized_at` rides along on the SAME write:
+    // this edit is exactly what marks a library copy as diverged from its
+    // template, so My Workouts can offer RETURN TO NORMAL.
     const branches = forkEnabled
       ? [{ key: 'a', label: branchA.trim() || 'OPTION A' }, { key: 'b', label: branchB.trim() || 'OPTION B' }]
       : null;
-    const { error: workoutError } = await supabase
-      .from('workouts')
-      .update({ title: title.trim(), purpose: purpose.trim(), branches, category })
-      .eq('id', workout.id);
+    const { error: workoutError } = await updateWorkoutMeta(workout.id, {
+      title:         title.trim(),
+      purpose:       purpose.trim(),
+      branches,
+      category,
+      customized_at: new Date().toISOString(),
+    });
     if (workoutError) { setErrorMsg('Save failed: ' + workoutError.message); setSaving(false); return; }
 
     // 2. Replace the exercise list (delete all, then insert fresh)
-    const { error: delError } = await supabase
-      .from('exercises')
-      .delete()
-      .eq('workout_id', workout.id);
-    if (delError) { setErrorMsg('Delete failed: ' + delError.message); setSaving(false); return; }
-
-    // Small delay so the delete commits before the insert.
-    await new Promise(r => setTimeout(r, 300));
-
-    if (valid.length > 0) {
+    const rows = valid.length ? (() => {
       const groups = computeGroups(valid);
-      const rows = valid.map((e, i) => ({
+      return valid.map((e, i) => ({
         workout_id:     workout.id,
         letter:         String.fromCharCode(65 + i),
         name:           e.name.trim(),
@@ -320,8 +316,13 @@ export default function WorkoutEditScreen({ route, navigation }) {
         superset_group: groups[i],
         branch:         forkEnabled ? (e.branch ?? null) : null,
       }));
-      const { error: insertError } = await insertExercises(rows);
-      if (insertError) { setErrorMsg('Insert failed: ' + insertError.message); setSaving(false); return; }
+    })() : [];
+
+    const { error: exError, stage } = await replaceWorkoutExercises(workout.id, rows);
+    if (exError) {
+      setErrorMsg((stage === 'delete' ? 'Delete failed: ' : 'Insert failed: ') + exError.message);
+      setSaving(false);
+      return;
     }
 
     setSaving(false);

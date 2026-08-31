@@ -7,10 +7,13 @@ import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
 import { DAY_LABELS } from '../lib/schedule';
-import { WORKOUT_CATEGORIES, UNTYPED_CATEGORY } from '../lib/workouts';
+import {
+  WORKOUT_CATEGORIES, UNTYPED_CATEGORY, isCustomizedCopy, revertWorkoutToTemplate,
+} from '../lib/workouts';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
+import SystemConfirm from '../components/SystemConfirm';
 
 const DOW_FULL = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'];
 // First letter of each weekday for the compact at-a-glance week strip on each card.
@@ -93,6 +96,11 @@ export default function AllWorkoutsScreen({ navigation }) {
   const [assignWorkout, setAssignWorkout] = useState(null);   // workout being assigned
   const [pickedDays,    setPickedDays]    = useState([]);     // dows 0..6 selected
   const [savingAssign,  setSavingAssign]  = useState(false);
+
+  // Workout id currently being reverted to its library version (spins its pill),
+  // and the workout the RETURN TO NORMAL confirm is open for.
+  const [reverting,    setReverting]    = useState(null);
+  const [revertTarget, setRevertTarget] = useState(null);
 
   const fetchWorkouts = useCallback(async () => {
     if (!student) return;
@@ -222,6 +230,23 @@ export default function AllWorkoutsScreen({ navigation }) {
     }
   };
 
+  // RETURN TO NORMAL — discard this player's customizations and rebuild the
+  // workout from the CURRENT library version. Confirmed through the in-app
+  // SystemConfirm (the system's own voice) rather than window.confirm /
+  // Alert.alert, which drop an OS box on top of the app.
+  const doRevert = async () => {
+    const workout = revertTarget;
+    setRevertTarget(null);
+    setReverting(workout.id);
+    try {
+      await revertWorkoutToTemplate(workout);
+      await fetchWorkouts();
+    } catch (e) {
+      alert('Could not return to normal: ' + (e.message ?? 'Something went wrong.'));
+    }
+    setReverting(null);
+  };
+
   function renderWorkout(item) {
     const meta = CAT_META[catKey(item)];
     const assignedDays = (daysByWorkout[item.id] ?? []).slice().sort((a, b) => a - b);
@@ -261,7 +286,20 @@ export default function AllWorkoutsScreen({ navigation }) {
               ) : null}
             </View>
             {isCoach && (
-              <PillButton label="DELETE" tone="danger" size="sm" onPress={() => handleDelete(item.id)} />
+              <View style={styles.cardActions}>
+                {/* Only for a library copy this coach has since edited for THIS
+                    player — a from-scratch workout has no "normal" to go back to. */}
+                {isCustomizedCopy(item) && (
+                  <PillButton
+                    label="RETURN TO NORMAL"
+                    size="sm"
+                    loading={reverting === item.id}
+                    disabled={reverting != null}
+                    onPress={() => setRevertTarget(item)}
+                  />
+                )}
+                <PillButton label="DELETE" tone="danger" size="sm" onPress={() => handleDelete(item.id)} />
+              </View>
             )}
           </View>
 
@@ -437,6 +475,19 @@ export default function AllWorkoutsScreen({ navigation }) {
           </View>
         </View>
       </Modal>
+
+      {/* RETURN TO NORMAL confirm */}
+      <SystemConfirm
+        visible={!!revertTarget}
+        title="RETURN TO NORMAL"
+        message={
+          `Discard the custom version of "${revertTarget?.title ?? ''}" for this player ` +
+          'and reload the current library version? The weekly plan days stay as they are.'
+        }
+        confirmLabel="RETURN"
+        onConfirm={doRevert}
+        onCancel={() => setRevertTarget(null)}
+      />
     </ScreenFrame>
   );
 }
@@ -607,6 +658,9 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   titleCol: { flex: 1, gap: 3 },
+  // Wraps so RETURN TO NORMAL drops under DELETE on a narrow card instead of
+  // squeezing the title column to nothing.
+  cardActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8 },
   cardTitle: {
     fontFamily: F.heading,
     fontSize: 21,

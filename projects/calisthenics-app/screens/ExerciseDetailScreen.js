@@ -4,7 +4,7 @@ import {
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { F } from '../constants/fonts';
-import { C } from '../constants/colors';
+import { C, CUE_TINTS } from '../constants/colors';
 import ScreenFrame from '../components/ScreenFrame';
 import VideoPlayer from '../components/VideoPlayer';
 
@@ -89,39 +89,37 @@ function VideoSection({ exercise, ratio, width, height, onRatio }) {
 // Cues are often written per VARIATION of the same movement — every line carries
 // the variation it belongs to ("1. lean forward", "2 feet go backwards"). We strip
 // that marker and tint the cue by its variation, so it reads as two sets of cues
-// instead of one long list. The tints sit close on the hue wheel on purpose: a
-// grouping signal, not a traffic light.
+// instead of one long list.
 //
-// They are also deliberately OFF the app's accent (`C.iceGlow` #4A9EBF). Every
-// label, header and rail on this card is already that blue, so a variation
-// painted in it reads as chrome rather than as a code — the eye can't tell the
-// legend from the furniture. These are brighter, colder ice: the same family,
-// one step out of the interface.
-const CUE_TINTS = [
-  { chip: '#6FCFE8', bg: 'rgba(111,207,232,0.15)', text: '#EAF9FF' },  // glacier
-  { chip: '#CDEFFA', bg: 'rgba(205,239,250,0.13)', text: '#F6FDFF' },  // white ice
-  { chip: '#9DB8F0', bg: 'rgba(157,184,240,0.14)', text: '#EDF1FF' },  // frost blue
-];
+// A NUMBER ONLY MEANS "VARIATION" WHEN IT REPEATS. "1,1,1,2,2,2" is two groups
+// of cues for two ways of doing the movement; "1,2,3,4,5" is an ordinary
+// numbered list and must stay one colour — painting those five rows in cycling
+// tints invents a grouping the coach never wrote. Ordered lists therefore keep
+// the plain accent chip; only real groups get a tint.
+const NEUTRAL_TINT = { chip: C.iceGlow, bg: 'rgba(74,158,191,0.14)', text: C.text };
 
-// "1. text" / "2.text" / "3 text" → { variation, text }.
+// "1. text" / "2.text" / "3 text" → the leading marker.
 const CUE_PREFIX = /^(\d{1,2})(?:[.):\-]\s*|\s+)/;
 
 function parseCues(raw) {
   if (!raw) return [];
   const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  const parsed = lines.map((line) => {
+  const items = lines.map((line) => {
     const m = line.match(CUE_PREFIX);
     const body = m ? line.slice(m[0].length).trim() : line;
-    // A bare number with nothing after it isn't a variation marker.
-    if (!m || !body) return { variation: null, text: line };
-    return { variation: Number(m[1]), text: body };
+    // A bare number with nothing after it isn't a marker, it's the whole cue.
+    if (!m || !body) return { marker: null, text: line };
+    return { marker: Number(m[1]), text: body };
   });
-  // Only read the numbers as variation markers when at least two lines carry one
-  // — a single stray "3 sec hold" shouldn't repaint the whole list.
-  if (parsed.filter(c => c.variation != null).length < 2) {
-    return lines.map(text => ({ variation: null, text }));
-  }
-  return parsed;
+  const markers = items.filter(i => i.marker != null).map(i => i.marker);
+  const grouped = markers.length >= 2 && new Set(markers).size < markers.length;
+  return items.map(i => ({ ...i, variation: grouped ? i.marker : null }));
+}
+
+function tintFor(variation) {
+  return variation != null
+    ? CUE_TINTS[(variation - 1 + CUE_TINTS.length) % CUE_TINTS.length]
+    : NEUTRAL_TINT;
 }
 
 // ─── Description ──────────────────────────────────────────────────────────────
@@ -132,48 +130,97 @@ function parseCues(raw) {
 // makes a long description feel like a wall. So we read that shape back out and
 // give each kind its own block. Nothing about how it's typed changes.
 
-// "back to wall - easier, we can stack reps" → { label, value }. The label is
-// kept SHORT on purpose: a dash mid-sentence is punctuation, not a definition.
-const DESC_PAIR = /^([^\-–—:]{2,26}?)\s*[-–—]\s+(\S.*)$/;
-const DESC_NOTE = /^(important note|important|note|tip|warning)\s*[:\-]\s*(\S.*)$/i;
+// A step or a bullet, written at the head of the line.
+const DESC_STEP   = /^(\d{1,2})[.)]\s+(\S.*)$/;
+const DESC_BULLET = /^[-*•]\s+(\S.*)$/;
 
-function parseDescription(raw) {
-  if (!raw) return [];
-  const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  const blocks = [];
-  for (const line of lines) {
-    const note = line.match(DESC_NOTE);
-    if (note) { blocks.push({ kind: 'note', tag: note[1], text: note[2] }); continue; }
+// "far hands width - more muscles working" → { label, value }. The label has to
+// look like a TERM, not the first half of a sentence: a dash mid-sentence is
+// punctuation ("…return to the base position - that's one rep"), and treating
+// that as a definition mangles the line. Hence the two limits below, which are
+// sized off real descriptions — "close hand width (about shoulder width)" is a
+// genuine term at 39 characters and six words, so both caps sit just above it.
+const DESC_PAIR = /^([^:]{2,40}?)\s+[-–—]\s+(\S.*)$/;
+// The same thing written with a colon: "important note: hands width…".
+const DESC_PAIR_COLON = /^([^:]{2,40}?):\s+(\S.*)$/;
+const PAIR_MAX_WORDS = 6;
 
-    const pair = line.match(DESC_PAIR);
-    if (pair) {
-      const item = { label: pair[1].trim(), value: pair[2].trim() };
-      const last = blocks[blocks.length - 1];
-      // Consecutive definitions read as one list, not four loose lines.
-      if (last?.kind === 'pairs') last.items.push(item);
-      else blocks.push({ kind: 'pairs', items: [item] });
-      continue;
-    }
+// Some labels aren't defining a term, they're raising their voice. They get a
+// callout instead of a definition — the whole point of writing them is that
+// they should not read like the line above.
+const WARN_WORDS = /\b(mistake|mistakes|avoid|warning|careful|danger|never)\b/i;
+const NOTE_WORDS = /\b(note|important|remember|goal|tip|tips|key|attention|focus)\b/i;
 
-    const last = blocks[blocks.length - 1];
-    if (last?.kind === 'text') last.lines.push(line);
-    else blocks.push({ kind: 'text', lines: [line] });
-  }
-  return blocks;
+// A description that arrives as one 400-character block can at least be broken
+// at its own full stops. Only for genuinely long lines — a two-sentence line is
+// already readable and splitting it would just add noise.
+const SOFT_SPLIT_AT = 170;
+
+function softSplit(line) {
+  if (line.length < SOFT_SPLIT_AT) return [line];
+  const parts = line.split(/\.\s+/);
+  if (parts.length < 2) return [line];
+  return parts.map((p, i) => (i < parts.length - 1 ? `${p}.` : p)).filter(Boolean);
 }
 
 // A definition whose whole value is a number ("back cues - 1") is the coach
-// naming a VARIATION — the same number the cues below are tagged with. Tint it
-// to match, and the description stops being prose and starts being a legend.
+// naming a VARIATION — the same number the cues below are tagged with.
 function variationOf(value) {
   const m = value.match(/^(\d{1,2})[.)]?$/);
   return m ? Number(m[1]) : null;
 }
 
-function tintFor(variation) {
-  return variation != null
-    ? CUE_TINTS[(variation - 1 + CUE_TINTS.length) % CUE_TINTS.length]
-    : CUE_TINTS[0];
+function isTermLike(label) {
+  return label.length <= 40 && label.split(/\s+/).length <= PAIR_MAX_WORDS;
+}
+
+function parseDescription(raw) {
+  if (!raw) return [];
+  const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const blocks = [];
+
+  // Consecutive same-kind lines join one block; anything else starts a new one.
+  const push = (kind, item, key = 'items') => {
+    const last = blocks[blocks.length - 1];
+    if (last?.kind === kind) last[key].push(item);
+    else blocks.push({ kind, [key]: [item] });
+  };
+
+  for (const line of lines) {
+    const step = line.match(DESC_STEP);
+    if (step) { push('steps', { n: step[1], text: step[2] }); continue; }
+
+    const bullet = line.match(DESC_BULLET);
+    if (bullet) { push('bullets', { text: bullet[1] }); continue; }
+
+    const pair = line.match(DESC_PAIR) || line.match(DESC_PAIR_COLON);
+    if (pair && isTermLike(pair[1])) {
+      const label = pair[1].trim();
+      const value = pair[2].trim();
+      // A legend line ("hs form key points - 2") wins over the callout words:
+      // its value is a variation number, so it is naming a group, not shouting.
+      if (variationOf(value) == null) {
+        if (WARN_WORDS.test(label)) { blocks.push({ kind: 'warn', tag: label, text: value }); continue; }
+        if (NOTE_WORDS.test(label)) { blocks.push({ kind: 'note', tag: label, text: value }); continue; }
+      }
+      push('pairs', { label, value });
+      continue;
+    }
+
+    for (const part of softSplit(line)) push('text', part, 'lines');
+  }
+  return blocks;
+}
+
+function Callout({ tag, text, color }) {
+  return (
+    <View style={[styles.noteBox, {
+      borderColor: `${color}55`, backgroundColor: `${color}12`,
+    }]}>
+      <Text style={[styles.noteTag, { color }]}>{tag.toUpperCase()}</Text>
+      <Text style={styles.noteText}>{text}</Text>
+    </View>
+  );
 }
 
 function DescriptionBody({ text }) {
@@ -194,10 +241,23 @@ function DescriptionBody({ text }) {
         }
 
         if (block.kind === 'note') {
+          return <Callout key={bi} tag={block.tag} text={block.text} color={C.iceGlow} />;
+        }
+        if (block.kind === 'warn') {
+          return <Callout key={bi} tag={block.tag} text={block.text} color={C.mistake} />;
+        }
+
+        if (block.kind === 'steps' || block.kind === 'bullets') {
           return (
-            <View key={bi} style={styles.noteBox}>
-              <Text style={styles.noteTag}>{block.tag.toUpperCase()}</Text>
-              <Text style={styles.noteText}>{block.text}</Text>
+            <View key={bi} style={styles.listBlock}>
+              {block.items.map((item, i) => (
+                <View key={i} style={styles.listRow}>
+                  <Text style={styles.listMark}>
+                    {block.kind === 'steps' ? `${item.n}.` : '▪'}
+                  </Text>
+                  <Text style={styles.listText}>{item.text}</Text>
+                </View>
+              ))}
             </View>
           );
         }
@@ -333,9 +393,7 @@ export default function ExerciseDetailScreen({ route, navigation }) {
           </View>
           <View style={styles.cueList}>
             {cues.map((cue, i) => {
-              const tint = cue.variation != null
-                ? CUE_TINTS[(cue.variation - 1 + CUE_TINTS.length) % CUE_TINTS.length]
-                : CUE_TINTS[0];
+              const tint = tintFor(cue.variation);
               return (
                 <View key={i} style={styles.cueRow}>
                   <View style={[styles.cueIndex, {
@@ -344,7 +402,7 @@ export default function ExerciseDetailScreen({ route, navigation }) {
                     shadowColor: tint.chip,
                   }]}>
                     <Text style={[styles.cueIndexText, { color: tint.chip }]}>
-                      {cue.variation != null ? cue.variation : i + 1}
+                      {cue.variation ?? cue.marker ?? i + 1}
                     </Text>
                   </View>
                   <Text style={[styles.cueText, { color: tint.text }]}>{cue.text}</Text>
@@ -555,7 +613,10 @@ const styles = StyleSheet.create({
   // Description blocks. The gap BETWEEN blocks is bigger than the gap between
   // lines inside one — that difference is the whole trick: it tells the eye
   // where a thought ends without adding a single word.
-  descBody: { gap: 20 },
+  // A capped measure: past ~75 characters a line is hard to track back to the
+  // start of the next one. On a phone the card is already narrower than this,
+  // so it only ever bites on a wide screen.
+  descBody: { gap: 20, maxWidth: 640 },
   descPara: { gap: 7 },
   descLine: {
     fontFamily: F.body, fontSize: 17, color: C.text, lineHeight: 26, letterSpacing: 0.4,
@@ -581,6 +642,20 @@ const styles = StyleSheet.create({
     justifyContent: 'center', alignItems: 'center',
   },
   pairChipText: { fontFamily: F.heading, fontSize: 13 },
+
+  // Steps ("1. …") and bullets. The marker sits in its own column so a wrapped
+  // line lands under the TEXT, not under the number — a hanging indent is what
+  // makes a list scannable rather than just indented.
+  listBlock: { gap: 9 },
+  listRow: { flexDirection: 'row', gap: 10 },
+  listMark: {
+    fontFamily: F.heading, fontSize: 14, color: C.iceGlow,
+    lineHeight: 26, minWidth: 20,
+  },
+  listText: {
+    fontFamily: F.body, fontSize: 17, color: C.text, lineHeight: 26,
+    letterSpacing: 0.4, flex: 1,
+  },
 
   noteBox: {
     borderWidth: 1, borderColor: 'rgba(74,158,191,0.35)', borderRadius: 12,
