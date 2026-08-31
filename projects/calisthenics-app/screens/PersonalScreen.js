@@ -1,5 +1,6 @@
 import { View, Text, StyleSheet } from 'react-native';
 import { F } from '../constants/fonts';
+import { C } from '../constants/colors';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import { useTourTarget } from '../lib/tourTargets';
@@ -14,8 +15,9 @@ import { useTourTarget } from '../lib/tourTargets';
 // The five pillars (sleep, nutrition, recovery, socialize, mentality) had a node
 // each here, but there is nothing behind them yet — the coaching content still
 // has to be recorded. Rather than ship five nodes that go nowhere, the screen
-// says COMING SOON until that content exists; the pillar list comes back with it.
-const PURPLE = '#A66BFF';
+// carries one word: COMING SOON, big, in the house accent (C.deepBlue) so the
+// empty tab still reads as part of the system. The pillars come back with the
+// content.
 
 export default function PersonalScreen() {
   // Element the guided tour measures + points its arrow at.
@@ -28,11 +30,7 @@ export default function PersonalScreen() {
 
         <View style={styles.body}>
           <View ref={tourSystemRef} style={styles.center}>
-            <Text style={styles.title}>COMING SOON</Text>
-            <Text style={styles.text}>
-              Sleep, nutrition, recovery, socialize, mentality — the coaching
-              around your training lands here in the next update.
-            </Text>
+            <Text style={styles.title}>COMING{'\n'}SOON</Text>
           </View>
         </View>
       </View>
@@ -43,14 +41,11 @@ export default function PersonalScreen() {
 const styles = StyleSheet.create({
   card: { flex: 1 },
   body: { flex: 1, paddingHorizontal: 24, paddingTop: 18, paddingBottom: 26 },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 14 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   title: {
-    fontFamily: F.heading, fontSize: 26, color: PURPLE,
-    letterSpacing: 4, textAlign: 'center',
-    textShadowColor: 'rgba(166,107,255,0.5)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 14,
-  },
-  text: {
-    fontFamily: F.bodyMed, fontSize: 15, color: '#8a7ab0',
-    letterSpacing: 0.5, lineHeight: 22, textAlign: 'center', maxWidth: 300,
+    fontFamily: F.heading, fontSize: 54, lineHeight: 64, color: C.deepBlue,
+    letterSpacing: 6, textAlign: 'center',
+    textShadowColor: 'rgba(74,158,191,0.55)',
+    textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 22,
   },
 });
