@@ -91,10 +91,16 @@ function VideoSection({ exercise, ratio, width, height, onRatio }) {
 // that marker and tint the cue by its variation, so it reads as two sets of cues
 // instead of one long list. The tints sit close on the hue wheel on purpose: a
 // grouping signal, not a traffic light.
+//
+// They are also deliberately OFF the app's accent (`C.iceGlow` #4A9EBF). Every
+// label, header and rail on this card is already that blue, so a variation
+// painted in it reads as chrome rather than as a code — the eye can't tell the
+// legend from the furniture. These are brighter, colder ice: the same family,
+// one step out of the interface.
 const CUE_TINTS = [
-  { chip: '#4A9EBF', bg: 'rgba(74,158,191,0.14)', text: '#E8F4FF' },   // deep ice
-  { chip: '#AFE3F2', bg: 'rgba(175,227,242,0.12)', text: '#F4FCFF' },  // white ice
-  { chip: '#6E93D6', bg: 'rgba(110,147,214,0.14)', text: '#E6ECFF' },  // periwinkle
+  { chip: '#6FCFE8', bg: 'rgba(111,207,232,0.15)', text: '#EAF9FF' },  // glacier
+  { chip: '#CDEFFA', bg: 'rgba(205,239,250,0.13)', text: '#F6FDFF' },  // white ice
+  { chip: '#9DB8F0', bg: 'rgba(157,184,240,0.14)', text: '#EDF1FF' },  // frost blue
 ];
 
 // "1. text" / "2.text" / "3 text" → { variation, text }.

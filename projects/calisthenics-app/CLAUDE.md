@@ -1060,9 +1060,12 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   with the variation it belongs to — `1. lean forward` / `2 feet go backwards`
   (any of `.`, `)`, `:`, `-` or just a space after the number). `parseCues()` in
   [screens/ExerciseDetailScreen.js](screens/ExerciseDetailScreen.js) strips that
-  marker and the card tints the chip + text per variation from `CUE_TINTS` (deep
-  ice → white ice → periwinkle). The tints are deliberately CLOSE neighbours: they say
-  "these cues belong together", not "this one is a warning". The chip then shows
+  marker and the card tints the chip + text per variation from `CUE_TINTS`
+  (glacier → white ice → frost blue). Two rules hold that palette: the tints are
+  deliberately CLOSE neighbours — they say "these cues belong together", not
+  "this one is a warning" — and none of them is `C.iceGlow`. Every label and rail
+  on the card is already the accent blue, so a variation painted in it reads as
+  chrome instead of as a code. The chip then shows
   the VARIATION number, not the row index, so variation 2's cues all read "2".
   Two guards keep it from misfiring: a bare number with no text after it isn't a
   marker, and the whole list stays plain ice unless at least TWO lines carry one
