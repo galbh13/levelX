@@ -1056,6 +1056,14 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   name matching is fragile (imported/free-typed workout names drift from the catalog).
   Workout Edit + the gallery example builder store `gallery_id` when an exercise is picked from the
   library, so any workout authored/re-saved after 2026-07-01 links exactly.
+- **A NUMBER ONLY MEANS "VARIATION" WHEN IT REPEATS (2026-08-31).** The single
+  most important rule on the exercise card. `1,1,1,2,2` in the cues is two
+  groups of cues for two ways of doing the movement; `1,2,3,4,5` is an ordinary
+  numbered list. Tinting the second one invents a grouping the coach never
+  wrote, so `parseCues` marks variations only when a marker REPEATS
+  (`new Set(markers).size < markers.length`); an ordered list keeps the neutral
+  accent chip. The same instinct applies anywhere else a number is read as
+  meaning: check that the shape you're reacting to is actually there twice.
 - **Coaching cues are grouped BY VARIATION (2026-08-31).** A cue line may open
   with the variation it belongs to — `1. lean forward` / `2 feet go backwards`
   (any of `.`, `)`, `:`, `-` or just a space after the number). `parseCues()` in
@@ -1079,17 +1087,33 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   shape back out of the same free text — three kinds:
   · **running lines** keep the coach's own line breaks, with a small gap between
     them and a BIGGER gap between blocks (that difference IS the structure);
-  · **`label - explanation`** becomes a definition — the term as an ice heading
-    over a rail-bound body, so the explanation can wrap without orphaning it.
-    The label is capped at 26 chars: a dash mid-sentence is punctuation, not a
-    definition;
-  · **`important note:` / `note:` / `tip:` / `warning:`** becomes a bordered
-    callout with the word as its tag.
+  · **`label - explanation`** (or `label: explanation`) becomes a definition —
+    the term as an ice heading over a rail-bound body, so the explanation can
+    wrap without orphaning it. The label must LOOK like a term: **≤ 40 chars AND
+    ≤ 6 words**, sized off the real catalog (`close hand width (about shoulder
+    width)` is a genuine term at 39/6). Both caps exist because a dash
+    mid-sentence is punctuation — `…return to the base position - that's one
+    rep` must stay a sentence;
+  · **a label carrying `mistake`/`avoid`/`warning`/`never`** becomes a callout in
+    `C.mistake` (rose — "careful", never `alarmRed`, which means the system is
+    failing), and one carrying `note`/`important`/`remember`/`goal`/`tip`/`key`
+    becomes an ice callout. These labels aren't defining a term, they're raising
+    their voice, and a callout is what that looks like;
+  · **`1.` / `2.` at the start of a line** is a numbered step, **`-` / `*` / `•`**
+    a bullet — both render with a hanging indent (the marker in its own column,
+    so wrapped text lands under the text);
+  · a line over 170 chars is broken at its own full stops, and `descBody` caps
+    the measure at 640 so a wide screen stops running 110-character lines.
   A definition whose value is JUST a number (`back cues - 1`) is the coach naming
   a variation: it renders the matching `CUE_TINTS` chip, so the top of the card
-  is the legend for the cue colours at the bottom. All of it degrades to plain
-  spaced lines when nothing matches — the coach types exactly what he typed
-  before, and no column changed.
+  is the legend for the cue colours at the bottom — and that legend OUTRANKS the
+  callout words above (`hs form key points - 2` names a group, it isn't a note).
+  All of it degrades to plain spaced lines when nothing matches — the coach
+  types exactly what he typed before, and no column changed.
+  **`AddExerciseScreen` states the format under both fields**, and its
+  placeholders are worked examples. That is not decoration: a format the coach
+  can't see is a format he can't use, so any new rule here gets a line there in
+  the same task.
 - **Set ranges:** `exercises.sets` is TEXT and may be a range like `'1-2'`. The
   lower bound is the REQUIRED set count; extra sets up to the upper bound are
   OPTIONAL. Workout Mode shows all rows but renders the optional ones muted
