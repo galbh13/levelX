@@ -1,4 +1,4 @@
-import { useContext, useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Platform, StyleSheet, Text, View } from 'react-native';
 import { NavigationContext } from '@react-navigation/native';
 import { WebView } from 'react-native-webview';
@@ -56,6 +56,21 @@ function attr(url) {
 // pulling the whole file down.
 // The page also posts the clip's real aspect ratio back to RN as soon as the
 // metadata is in, so the caller can reshape the box around a portrait clip.
+//
+// Two things make it feel instant instead of "a black box with a play button":
+//
+//  • Android's WebView decodes metadata but paints NOTHING until the clip is
+//    played — so a paused player is a black rectangle, and the movement you came
+//    to look at is invisible until you commit to it. A hair-width seek forces a
+//    decode of one frame, and that frame is what gets painted. It is the poster
+//    image, taken from the clip itself (a storage .mp4 has no thumbnail to point
+//    a `poster` attribute at).
+//
+//  • Tapping the frame plays it, first tap. The native controls otherwise cost
+//    two taps — one to reveal them, one to hit play. Taps in the control bar's
+//    strip are left alone so scrubbing still belongs to the controls, and
+//    play() here is inside a real click handler, so the user-gesture gate
+//    (mediaPlaybackRequiresUserAction) is satisfied.
 function videoPage(url, preload) {
   return `<!DOCTYPE html><html><head>
 <meta charset="utf-8">
@@ -72,8 +87,24 @@ function videoPage(url, preload) {
     if (!v.videoWidth || !v.videoHeight || !window.ReactNativeWebView) return;
     window.ReactNativeWebView.postMessage(JSON.stringify({ type:'ratio', ratio: v.videoWidth / v.videoHeight }));
   }
-  v.addEventListener('loadedmetadata', post);
-  if (v.readyState >= 1) post();
+  // Force one frame to decode so the paused player shows the movement, not black.
+  var painted = false;
+  function paintFirstFrame(){
+    if (painted || !v.duration) return;
+    painted = true;
+    try { v.currentTime = Math.min(0.05, v.duration / 2); } catch (e) {}
+  }
+  v.addEventListener('loadedmetadata', function(){ post(); paintFirstFrame(); });
+  v.addEventListener('loadeddata', post);
+  if (v.readyState >= 1) { post(); paintFirstFrame(); }
+
+  // One tap on the frame plays. The bottom strip is the native control bar —
+  // leave those taps to it, or scrubbing a paused clip would start playback.
+  document.addEventListener('click', function(e){
+    var r = v.getBoundingClientRect();
+    if (e.clientY > r.bottom - 56) return;
+    if (v.paused) { var pr = v.play(); if (pr && pr.catch) pr.catch(function(){}); }
+  });
 })();
 </script>
 </body></html>`;
@@ -94,6 +125,17 @@ export default function VideoPlayer({ url, width, height = 220, style, onRatio, 
   const focused = useScreenFocused();
   const webRef = useRef(null);
   const videoRef = useRef(null);
+
+  // The page is built ONCE per clip. It used to be rebuilt inline on every
+  // render, and a fresh source object makes the WebView reload — which is what
+  // the "it shows the frame, then goes black and takes a second" bug was: the
+  // player reports its aspect ratio, the caller resizes the box around it, that
+  // re-render handed the WebView a new source, and the clip started over from
+  // nothing. Same html, same identity, no reload.
+  const source = useMemo(
+    () => ({ html: videoPage(url, preload), baseUrl: originOf(url) }),
+    [url, preload],
+  );
 
   function pause() {
     if (Platform.OS === 'web') videoRef.current?.pause?.();
@@ -160,7 +202,7 @@ export default function VideoPlayer({ url, width, height = 220, style, onRatio, 
   return (
     <WebView
       ref={webRef}
-      source={{ html: videoPage(url, preload), baseUrl: originOf(url) }}
+      source={source}
       originWhitelist={['*']}
       style={box}
       onMessage={(e) => {
@@ -171,6 +213,9 @@ export default function VideoPlayer({ url, width, height = 220, style, onRatio, 
       }}
       allowsFullscreenVideo
       allowsInlineMediaPlayback
+      // The decoded still frame is composited like a playing one; on the software
+      // layer some devices paint the paused surface black regardless.
+      androidLayerType="hardware"
       // Playback needs a tap. This is what keeps clips silent at app start.
       mediaPlaybackRequiresUserAction
     />
