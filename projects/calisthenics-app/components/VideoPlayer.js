@@ -71,15 +71,25 @@ function attr(url) {
 //    strip are left alone so scrubbing still belongs to the controls, and
 //    play() here is inside a real click handler, so the user-gesture gate
 //    (mediaPlaybackRequiresUserAction) is satisfied.
-function videoPage(url, preload) {
+function videoPage(url, preload, fit, radius) {
   return `<!DOCTYPE html><html><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <style>
   html,body{margin:0;padding:0;height:100%;background:${C.lockedBg};overflow:hidden}
-  video{width:100%;height:100%;display:block;object-fit:contain;background:${C.lockedBg}}
+  /* The rounding lives on this wrapper, never on the <video> itself — a rounded
+     video element paints BLACK on some GPUs (see the web branch below). A
+     clipping parent gets the same corners with none of that risk, and it also
+     covers Android, where the WebView draws its own content and ignores the
+     borderRadius set on the RN view around it. translateZ pins it to its own
+     layer so the clip is applied by the compositor. */
+  .frame{position:absolute;inset:0;border-radius:${radius}px;overflow:hidden;
+         transform:translateZ(0);background:${C.lockedBg}}
+  video{width:100%;height:100%;display:block;object-fit:${fit};background:${C.lockedBg}}
 </style></head><body>
+<div class="frame">
 <video src="${attr(url)}" controls preload="${preload}" playsinline webkit-playsinline></video>
+</div>
 <script>
 (function(){
   var v = document.querySelector('video');
@@ -121,7 +131,14 @@ const PAUSE_JS = `(function(){var v=document.querySelector('video');if(v)v.pause
 
 // `preload` — 'metadata' (default: first frame + dimensions only) or 'auto' for
 // a player that's about to be looked at and should be ready to hit play.
-export default function VideoPlayer({ url, width, height = 220, style, onRatio, preload = 'metadata' }) {
+// `fit` — 'contain' (default: the whole clip, letterboxed) or 'cover' (the clip
+// FILLS the box, edges cropped). Callers that hand over a box shaped like the
+// clip want 'cover'; a fixed-height row in a list wants 'contain'.
+// `radius` — corner rounding, applied where it's actually safe (see videoPage).
+export default function VideoPlayer({
+  url, width, height = 220, style, onRatio, preload = 'metadata',
+  fit = 'contain', radius = 12,
+}) {
   const focused = useScreenFocused();
   const webRef = useRef(null);
   const videoRef = useRef(null);
@@ -132,10 +149,24 @@ export default function VideoPlayer({ url, width, height = 220, style, onRatio, 
   // player reports its aspect ratio, the caller resizes the box around it, that
   // re-render handed the WebView a new source, and the clip started over from
   // nothing. Same html, same identity, no reload.
+  // `fit` is deliberately NOT a dependency. Callers flip it once the clip's real
+  // ratio comes back (letterboxed guess → filling the frame), and rebuilding the
+  // page for that would reload the WebView — the flash this memo exists to stop.
+  // The page is built with whatever fit it had at mount and restyled in place
+  // below.
+  const initialFit = useRef(fit).current;
   const source = useMemo(
-    () => ({ html: videoPage(url, preload), baseUrl: originOf(url) }),
-    [url, preload],
+    () => ({ html: videoPage(url, preload, initialFit, radius), baseUrl: originOf(url) }),
+    [url, preload, initialFit, radius],
   );
+
+  // Restyle in place — no reload, no lost buffer, no restart.
+  useEffect(() => {
+    if (Platform.OS === 'web' || fit === initialFit) return;
+    webRef.current?.injectJavaScript?.(
+      `(function(){var v=document.querySelector('video');if(v)v.style.objectFit=${JSON.stringify(fit)};})();true;`
+    );
+  }, [fit, initialFit]);
 
   function pause() {
     if (Platform.OS === 'web') videoRef.current?.pause?.();
@@ -173,7 +204,7 @@ export default function VideoPlayer({ url, width, height = 220, style, onRatio, 
           width: width ?? '100%',
           height,
           display: 'block',
-          objectFit: 'contain',
+          objectFit: fit,
           backgroundColor: C.lockedBg,
           // NOTE: no borderRadius on the <video> itself — a rounded <video> makes
           // Chromium/Edge paint the frame BLACK on some GPUs (audio/timeline still
@@ -187,7 +218,7 @@ export default function VideoPlayer({ url, width, height = 220, style, onRatio, 
     );
   }
 
-  const box = [{ width: width ?? '100%', height, borderRadius: 12, backgroundColor: C.lockedBg }, style];
+  const box = [{ width: width ?? '100%', height, borderRadius: radius, backgroundColor: C.lockedBg }, style];
 
   // Offscreen: a same-sized placeholder, so nothing loads and the layout doesn't
   // jump when the screen comes into view.

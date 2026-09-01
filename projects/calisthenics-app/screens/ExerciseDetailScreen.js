@@ -24,6 +24,26 @@ function fitWithin(boxW, boxH, ratio) {
   return { w, h };
 }
 
+// How far past "fits entirely" a clip must be scaled to FILL a box — 1 is a clip
+// already shaped like the box, 2 means half of it ends up outside.
+function fillZoom(boxW, boxH, ratio) {
+  const boxRatio = boxW / boxH;
+  return Math.max(boxRatio / ratio, ratio / boxRatio);
+}
+
+// A phone clip in a phone-shaped frame loses a sliver of its edges and looks like
+// the app was built around it — the coach frames the movement in the middle, and
+// background is what gets trimmed. Past this much zoom the crop stops being a
+// trim (a landscape clip in this tall frame would keep its middle third and throw
+// the rest away), so those letterbox instead. The movement always stays readable.
+const MAX_FILL_ZOOM = 1.75;
+
+// The video page's frame: how far the clip sits off the screen edge, and how
+// round its corners are. Shared by the box that gets measured out here and the
+// page rendered inside the WebView, so the two agree on one shape.
+const VIDEO_INSET  = 8;
+const VIDEO_RADIUS = 18;
+
 function SectionTitle({ children }) {
   return <Text style={styles.sectionTitle}>{children}</Text>;
 }
@@ -31,7 +51,7 @@ function SectionTitle({ children }) {
 // ─── Video renderer ───────────────────────────────────────────────────────────
 // Priority: storage video (video_url) > YouTube embed (youtube_url) > placeholder
 
-function VideoSection({ exercise, ratio, width, height, onRatio }) {
+function VideoSection({ exercise, ratio, width, height, onRatio, fit = 'contain' }) {
   const storageUrl = exercise.video_url;
   const embedUrl   = getYouTubeEmbedUrl(exercise.youtube_url);
 
@@ -47,6 +67,10 @@ function VideoSection({ exercise, ratio, width, height, onRatio }) {
         width={width}
         height={height}
         onRatio={onRatio}
+        // Fills the frame when the clip is shaped like it — the caller decides,
+        // since only it knows the box it just measured.
+        fit={fit}
+        radius={VIDEO_RADIUS}
         // Both pages mount up front — buffer now so the clip is ready the
         // instant the user swipes over to it.
         preload="auto"
@@ -304,8 +328,12 @@ export default function ExerciseDetailScreen({ route, navigation }) {
   // the movement, not authoring the catalog — hide EDIT so it can't be changed there.
   const hideEdit = route.params?.hideEdit ?? false;
 
-  // Default to 16:9 until the real video metadata loads, then snap to its ratio.
-  const [ratio, setRatio] = useState(16 / 9);
+  // Guess PORTRAIT until the clip's real metadata lands, then snap to its ratio.
+  // The guess used to be 16:9, which put a landscape letterbox on screen for the
+  // fraction of a second before the (invariably phone-shot, portrait) clip
+  // reported itself and the frame snapped full-bleed. Guessing the shape the
+  // clips actually are means the common case never moves at all.
+  const [ratio, setRatio] = useState(9 / 16);
   // Measured size of the pager area — each page fills exactly this.
   const [size, setSize] = useState(null);
   // 0 = info (left screen), 1 = video (right screen). Land on the video first.
@@ -416,7 +444,14 @@ export default function ExerciseDetailScreen({ route, navigation }) {
   );
 
   const videoPage = size && (() => {
-    const { w, h } = fitWithin(size.width - 24, size.height - 24, ratio);
+    // The clip owns the whole page, inset just enough for its rounded corners to
+    // sit off the screen frame. It FILLS that box — edges cropped — whenever it's
+    // shaped closely enough for the crop to be a trim; otherwise it falls back to
+    // sitting whole inside it.
+    const boxW = size.width  - VIDEO_INSET * 2;
+    const boxH = size.height - VIDEO_INSET * 2;
+    const fills = fillZoom(boxW, boxH, ratio) <= MAX_FILL_ZOOM;
+    const { w, h } = fills ? { w: boxW, h: boxH } : fitWithin(boxW, boxH, ratio);
     return (
       <View style={[styles.videoPage, { width: size.width, height: size.height }]}>
         <View style={[styles.videoWrap, { width: w, height: h }]}>
@@ -425,6 +460,7 @@ export default function ExerciseDetailScreen({ route, navigation }) {
             ratio={ratio}
             width={w}
             height={h}
+            fit={fills ? 'cover' : 'contain'}
             onRatio={setRatio}
           />
         </View>
@@ -526,7 +562,7 @@ const styles = StyleSheet.create({
   },
   videoWrap: {
     backgroundColor: C.lockedBg,
-    borderRadius: 14, overflow: 'hidden',
+    borderRadius: VIDEO_RADIUS, overflow: 'hidden',
     borderWidth: 1, borderColor: C.cardBorder,
   },
   noVideo: {
