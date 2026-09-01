@@ -500,14 +500,30 @@ export default function WorkoutModeScreen({ route, navigation }) {
     const { data: existing } = await supabase
       .from('workout_override_workouts')
       .select('id').eq('student_id', user.id).eq('specific_date', dateStr).limit(1);
-    if (!existing?.length) {
+    let ids;
+    if (existing?.length) {
+      // The date already carries its own rows (Home materialized it when the
+      // session started, or the coach edited the day). Do NOT pour the weekday
+      // skeleton back in — that re-adds workouts the day deliberately dropped.
+      // Only THIS workout needs a row to write the completion onto.
+      ids = [workout.id];
+    } else {
       const dow = new Date(dateStr + 'T00:00:00').getDay();
       const { data: tmpl } = await supabase
         .from('weekly_workout_template')
         .select('workout_id, day_of_week').eq('student_id', user.id);
-      const ids = (tmpl ?? []).filter(t => t.day_of_week === dow).map(t => t.workout_id);
-      await materializeDay({ studentId: user.id, coachId: user.id, dateStr, templateWorkoutIds: ids });
+      ids = (tmpl ?? []).filter(t => t.day_of_week === dow).map(t => t.workout_id);
     }
+    // Always include the workout being finished: a session can be started from a
+    // workout the weekday skeleton doesn't carry, and without a row for it the
+    // update below matched nothing and the finish silently didn't stick.
+    // materializeDay only inserts what the date is MISSING, so this never doubles.
+    await materializeDay({
+      studentId: user.id,
+      coachId:   user.id,
+      dateStr,
+      templateWorkoutIds: [...ids, workout.id],
+    });
     await supabase.from('workout_override_workouts')
       .update({ completed: true })
       .eq('student_id', user.id).eq('specific_date', dateStr).eq('workout_id', workout.id);

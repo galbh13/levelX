@@ -7,7 +7,7 @@ import {
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { computeLvl } from '../lib/computeLvl';
-import { materializeDay, isDateOverridden } from '../lib/schedule';
+import { materializeDay, isDateOverridden, dedupeOverrideRows } from '../lib/schedule';
 import { categoryMeta, categoryLabel, WORKOUT_CATEGORIES } from '../lib/workouts';
 import { F } from '../constants/fonts';
 import { useAppDimensions, NATIVE_SCALE } from '../constants/layout';
@@ -308,7 +308,7 @@ export default function WorkoutsScreen({ navigation, route }) {
       const workouts = workoutsRes.data ?? [];
       setAllWorkouts(workouts);
       setWorkoutsById(Object.fromEntries(workouts.map(w => [w.id, w])));
-      setOverrideWorkouts(overridesRes.data ?? []);
+      setOverrideWorkouts(dedupeOverrideRows(overridesRes.data ?? []));
       setTemplateRows(templateRes.data ?? []);
 
       setDailyQuestIds((dqRes.data ?? []).map(q => q.id));
@@ -514,6 +514,18 @@ export default function WorkoutsScreen({ navigation, route }) {
     return runDayEdit(dateStr, nextIds, async () => {
       const tid = await resolveTargetId();
       await ensureMaterialized(dateStr);  // copy skeleton first so siblings are kept
+      // ensureMaterialized may have JUST copied this very workout in from the
+      // weekday skeleton, and the picker's "not already on this date" check ran
+      // against the pre-materialize UI state. Inserting blind on top of that is
+      // how a day ended up listing the same mission twice. Ask the date what it
+      // holds now, and only add what's actually missing.
+      const { data: onDate, error: readErr } = await supabase
+        .from('workout_override_workouts')
+        .select('workout_id')
+        .eq('student_id', tid)
+        .eq('specific_date', dateStr);
+      if (readErr) throw new Error(readErr.message);
+      if ((onDate ?? []).some(r => r.workout_id === workoutId)) return;
       const { error } = await supabase
         .from('workout_override_workouts')
         .insert({ student_id: tid, coach_id: tid, specific_date: dateStr, workout_id: workoutId });

@@ -10,7 +10,7 @@ import { computeLvl, computeClassMax } from '../lib/computeLvl';
 import { evaluatePrestige, prestigeStars } from '../lib/prestige';
 import { DEFAULT_JOB } from '../lib/jobs';
 import { israelToday } from '../lib/israelDate';
-import { materializeDay } from '../lib/schedule';
+import { materializeDay, dedupeOverrideRows } from '../lib/schedule';
 import { categoryLabel, categoryMeta } from '../lib/workouts';
 import { ShimmerText, ShimmerFill, GOLD } from '../components/Shimmer';
 import ScreenFrame, { FRAME_PAD } from '../components/ScreenFrame';
@@ -24,6 +24,10 @@ import { sessionKey, activeSessionKeys } from '../lib/workoutSession';
 import { useTourTarget } from '../lib/tourTargets';
 import { useTour } from '../context/TourContext';
 import { lighten, rgba } from '../lib/colorMix';
+// Master switch for the guided walkthrough. OFF until the tutorial is ready to
+// ship — the TUTORIAL pill is the only way it can be started, so hiding it makes
+// the tour unreachable without ripping any of it out.
+const TUTORIAL_ENABLED = false;
 
 // EVERY typed mission glows in its own type color — the same hex the launcher
 // window wears, so the row you tap and the window that opens are one thing.
@@ -235,6 +239,8 @@ export default function HomeScreen({ navigation }) {
 
   // Elements the guided tour measures + points its arrow at.
   const tourLevelRef    = useTourTarget('home.level');
+  // Mission ids with a completion write in flight — see toggleWorkout.
+  const togglingRef = useRef(new Set());
   const tourMissionsRef = useTourTarget('home.missions');
   // The FIRST mission row — the tour circles just one mission (not the whole panel)
   // to teach "tap a single mission". Falls back to the panel on a rest day.
@@ -372,7 +378,10 @@ export default function HomeScreen({ navigation }) {
       setDoneTodayIds(new Set((dqDoneRes.data ?? []).map(r => r.daily_quest_id)));
 
       // Per-date override wins for today; otherwise fall back to the weekly skeleton.
-      const overrides = overridesRes.data ?? [];
+      // Deduped first: a date that got the same workout inserted twice used to
+      // paint the same mission twice on the board (one row live, one idle), and
+      // ticking one left the other staring back. One row per workout, always.
+      const overrides = dedupeOverrideRows(overridesRes.data ?? []);
       const resolved = overrides.length > 0
         ? overrides.map(o => ({ workout_id: o.workout_id, overrideId: o.id, completed: o.completed ?? false }))
         : (templateRes.data ?? []).map(t => ({ workout_id: t.workout_id, overrideId: null, completed: false }));
@@ -447,6 +456,22 @@ export default function HomeScreen({ navigation }) {
 
   // Toggle a workout's completion straight from Home (same write WorkoutsScreen uses).
   async function toggleWorkout(workout) {
+    // One tap at a time PER MISSION. The materialize path below is several
+    // awaits long, and until it finishes `workout.overrideId` is still null in
+    // the state this row was rendered from — so a second tap took the same
+    // branch and materialized the day again. That is how one PANCAKE became two.
+    // Keyed by workout id (not a single flag) so ticking two different missions
+    // quickly still works.
+    if (togglingRef.current.has(workout.id)) return;
+    togglingRef.current.add(workout.id);
+    try {
+      await runToggleWorkout(workout);
+    } finally {
+      togglingRef.current.delete(workout.id);
+    }
+  }
+
+  async function runToggleWorkout(workout) {
     hapticTap();
     // Real override row → just flip completed (optimistic).
     if (workout.overrideId) {
@@ -526,13 +551,23 @@ export default function HomeScreen({ navigation }) {
 
       {/* Top row: HOW IT WORKS (replay the walkthrough) + Sign Out */}
       <View style={styles.topBar}>
-        <TouchableOpacity
-          style={styles.helpBtn}
-          activeOpacity={0.8}
-          onPress={openTour}
-        >
-          <Text style={styles.helpLabel}>TUTORIAL</Text>
-        </TouchableOpacity>
+        {/* The walkthrough is silenced for the Play Store release — it isn't
+            finished, so the pill is hidden and there is no way to start it.
+            Flip TUTORIAL_ENABLED back to true to bring it back; the tour itself
+            (GuidedTour, TourContext, the tour targets) is left untouched. The
+            empty <View> keeps Sign Out pinned to the right of this
+            space-between row. */}
+        {TUTORIAL_ENABLED ? (
+          <TouchableOpacity
+            style={styles.helpBtn}
+            activeOpacity={0.8}
+            onPress={openTour}
+          >
+            <Text style={styles.helpLabel}>TUTORIAL</Text>
+          </TouchableOpacity>
+        ) : (
+          <View />
+        )}
 
         <TouchableOpacity
           style={styles.signOutBtn}
@@ -703,7 +738,10 @@ export default function HomeScreen({ navigation }) {
                         // in-progress) left home.mission1 unregistered and the
                         // step fell back to drawing a circle in empty space.
                         <View
-                          key={workout.overrideId}
+                          // Template-derived rows have NO overrideId (it's null on
+                          // every one of them), so keying on it alone gave every
+                          // mission on an un-materialized day the same key.
+                          key={workout.overrideId ?? `tpl-${workout.id}-${mi}`}
                           ref={mi === 0 ? tourMission1Ref : undefined}
                           collapsable={false}
                         >
@@ -718,7 +756,9 @@ export default function HomeScreen({ navigation }) {
                     const tc = accentFor(workout.category); // type glow, null when untyped
                     return (
                     <TouchableOpacity
-                      key={workout.overrideId}
+                      // Same key rule as the live variant above: template-derived
+                      // rows all have overrideId null, so they'd share one key.
+                      key={workout.overrideId ?? `tpl-${workout.id}-${mi}`}
                       ref={mi === 0 ? tourMission1Ref : undefined}
                       style={[
                         styles.missionCard,

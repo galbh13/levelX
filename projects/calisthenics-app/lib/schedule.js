@@ -58,7 +58,7 @@ export function getWeekDays(offset = 0) {
  * Per-date overrides win; otherwise the weekday's template rows are virtual.
  */
 export function resolveDayWorkouts({ dateStr, dayOfWeek, overrideRows, templateRows, workoutsById }) {
-  const dayOverrides = (overrideRows ?? []).filter(o => o.specific_date === dateStr);
+  const dayOverrides = dedupeOverrideRows((overrideRows ?? []).filter(o => o.specific_date === dateStr));
   if (dayOverrides.length > 0) {
     return dayOverrides
       .map(o => ({
@@ -88,12 +88,41 @@ export function isDateOverridden(dateStr, overrideRows) {
 /**
  * Copy a weekday's template workouts into per-date override rows for `dateStr`
  * (completed=false), so the date can carry completion / be edited independently.
- * No-op-safe: ignores duplicates. Returns the inserted rows (or []).
+ * Idempotent: only the workout_ids the date is MISSING get inserted. Returns
+ * every override row the date has afterwards (existing + inserted), or [].
+ *
+ * It used to be a blind `.insert(rows)` whose comment claimed it ignored
+ * duplicates — wishful thinking, since nothing in the DB rejects a second
+ * identical row. Anything that materialized the same date twice (two taps on
+ * Home's mission checkbox, the second landing before the first refetch; or a
+ * stale screen still treating the day as template-derived after the coach had
+ * already overridden it) silently doubled the day, and the player watched their
+ * one mission become two. Callers had to guard it themselves — the coach screen
+ * still carries its own `materializedRef` latch — but Home did not, so the
+ * guard now lives here, where every caller gets it.
  */
 export async function materializeDay({ studentId, coachId, dateStr, templateWorkoutIds }) {
   const ids = [...new Set(templateWorkoutIds ?? [])];
   if (ids.length === 0) return [];
-  const rows = ids.map(workout_id => ({
+
+  // Read first: whatever the date already carries wins, and is never re-inserted.
+  const { data: existing, error: readErr } = await supabase
+    .from('workout_override_workouts')
+    .select('id, specific_date, workout_id, completed')
+    .eq('student_id', studentId)
+    .eq('specific_date', dateStr);
+  if (readErr) {
+    // Can't prove the date is empty → do NOT insert. A day left on its template
+    // skeleton is recoverable; a doubled day is the thing being fixed here.
+    console.error('[schedule] materializeDay read:', readErr);
+    return [];
+  }
+
+  const have    = new Set((existing ?? []).map(r => r.workout_id));
+  const missing = ids.filter(id => !have.has(id));
+  if (missing.length === 0) return existing ?? [];
+
+  const rows = missing.map(workout_id => ({
     student_id:    studentId,
     coach_id:      coachId,
     specific_date: dateStr,
@@ -103,6 +132,34 @@ export async function materializeDay({ studentId, coachId, dateStr, templateWork
     .from('workout_override_workouts')
     .insert(rows)
     .select('id, specific_date, workout_id, completed');
-  if (error) { console.error('[schedule] materializeDay:', error); return []; }
-  return data ?? [];
+  if (error) { console.error('[schedule] materializeDay:', error); return existing ?? []; }
+  return [...(existing ?? []), ...(data ?? [])];
+}
+
+/**
+ * Collapse duplicate override rows — same (date, workout) more than once.
+ *
+ * Nothing in the DB used to stop a date from carrying the same workout twice, so
+ * every path that inserted without looking first (a second materialize landing
+ * before the first refetch; ADD WORKOUT on a day whose skeleton was materialized
+ * in the same breath) left the player staring at their one mission listed twice.
+ * The inserting paths are all guarded now and a unique index backs it up, but
+ * rows created BEFORE that fix are already sitting in players' days — so every
+ * read collapses them, and the board reads right even on a dirty date.
+ *
+ * A completed twin wins over an unfinished one: if the player ticked either copy,
+ * the day is done. Otherwise the lowest id wins, so the survivor is stable across
+ * refetches (the same row keeps the overrideId the UI writes to).
+ */
+export function dedupeOverrideRows(rows) {
+  const best = new Map();
+  for (const r of rows ?? []) {
+    const k = `${r.specific_date ?? ''}|${r.workout_id}`;
+    const prev = best.get(k);
+    if (!prev) { best.set(k, r); continue; }
+    const win = (r.completed && !prev.completed) ||
+                (!!r.completed === !!prev.completed && String(r.id) < String(prev.id));
+    if (win) best.set(k, r);
+  }
+  return [...best.values()];
 }

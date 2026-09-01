@@ -610,6 +610,11 @@ also written by `materializeDay` when a template day is first completed/edited.
 | `feedback_is_read` | boolean | Legacy read flag (unused) |
 | `created_at` | timestamptz | Auto |
 
+**Unique:** `(student_id, specific_date, workout_id)` — a date carries a workout
+at most once (`migrations/20260901_override_workouts_unique_per_day.sql`, which
+also collapsed the duplicates that existed before it). Insert paths read the date
+first (`materializeDay`, ADD WORKOUT) so the index is a backstop, not the guard.
+
 **Used by:** WorkoutsScreen (per-date overrides + completion), HomeScreen (today's
 missions), WorkoutDetailScreen.
 

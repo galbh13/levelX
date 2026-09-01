@@ -204,8 +204,8 @@ former coach screens are reused **scoped to the player's own profile**:
   3. **1 Tier II skill** (`requireTier2Side`) — fully complete ≥1 Tier-2 SIDE
      chain (detected structurally, same rule as the tier grouping below).
   4. **1 side quest** (`requireAnySide`) — fully complete ≥1 side chain of ANY
-     tier. Used by Handstand III, whose side quests (SEVEN / MEXICAN HANDSTAND /
-     TIGERBAND) have no cross-chain gate, so there is no Tier 2 to ask for.
+     tier. Used by Handstand III, whose side quests (SEVEN / MEXICAN HANDSTAND)
+     have no cross-chain gate, so there is no Tier 2 to ask for.
   Handstand III (`handstand[2]`, LVL 90) names two of its main nodes on UPGRADE
   chains — `pike_press` (One Pike Press) and `extreme_combo` (the 2-rounds node)
   — plus SHAPES' final `6 Tuck + 6 Straddle`. Upgrade rows are seeded
@@ -941,6 +941,17 @@ Rule: a date shows its override rows if any exist, else the weekday's template
 weekday template into override rows for that date). HomeScreen & WorkoutsScreen
 read via this resolution; never query one table alone for "what's on a day". EXP
 was removed (2026-06-05) — completing a workout/quest awards nothing now.
+
+**A date carries a workout at most ONCE (2026-09-01).** Nothing used to enforce
+that, and a doubled row showed the player the same mission twice — tick one, the
+twin stays open. Three layers now hold the line, and all three must stay:
+`materializeDay` inserts only the workout_ids a date is MISSING (never a blind
+insert); ADD WORKOUT re-reads the date after materializing (the picker's check ran
+against pre-materialize state); and `dedupeOverrideRows` collapses twins on every
+read, so a day dirtied before the fix still reads right. The DB backstops it with
+a unique index on `(student_id, specific_date, workout_id)`
+(`migrations/20260901_override_workouts_unique_per_day.sql`) — so any NEW insert
+path must read the date first or it will error, not silently double the day.
 
 **9-week retention window (2026-06-18).** WorkoutsScreen's week ruler only travels
 4 weeks back … 4 weeks forward (9 weeks total); the nav arrows are clamped to that
