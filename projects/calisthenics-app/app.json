@@ -13,6 +13,7 @@
       "backgroundColor": "#050912"
     },
     "ios": {
+      "bundleIdentifier": "com.levelx.app",
       "supportsTablet": true
     },
     "android": {
@@ -33,11 +34,20 @@
     },
     "plugins": [
       "expo-font",
-      "expo-video"
+      "expo-video",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "The System uses your photo library so you can set your player portrait and upload your check-up and signature clips for your coach.",
+          "cameraPermission": "The System uses your camera so you can film your check-up and signature clips for your coach."
+        }
+      ]
     ],
     "updates": {
       "url": "https://u.expo.dev/a030e9a0-893e-41e2-8d62-306e32485a57"
     },
-    "runtimeVersion": "07c63e4cb5e84bbf0516780f79dada6931589db8"
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    }
   }
 }
