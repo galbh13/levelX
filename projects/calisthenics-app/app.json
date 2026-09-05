@@ -13,11 +13,11 @@
       "backgroundColor": "#050912"
     },
     "ios": {
-      "bundleIdentifier": "com.levelx.app",
+      "bundleIdentifier": "com.thesystem.app",
       "supportsTablet": true
     },
     "android": {
-      "package": "com.levelx.app",
+      "package": "com.thesystem.app",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#050912"
