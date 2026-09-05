@@ -5,6 +5,7 @@ import {
   ActivityIndicator, Linking,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
+import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
@@ -39,6 +40,13 @@ const SL = {
 // it stays ice, like every other detail/reading screen.
 export default function WorkoutDetailScreen({ route, navigation }) {
   const { workout, studentView } = route.params;
+
+  // Who may EDIT is decided by the navigator, not by the caller's params:
+  // `isAdmin` is true only under the coach-side CoachProvider (AdminNavigator).
+  // The player's Workouts stack also holds WorkoutDetail — and AllWorkouts, which
+  // opens it WITHOUT `studentView` — so the old param-only gate leaked the edit
+  // CTA into a player's account. The coach context can't be reached from there.
+  const { isAdmin: isCoach = false } = useCoach() ?? {};
 
   // Seed everything from the cache when this workout was opened before — the
   // full content paints on the very first frame, no spinner.
@@ -309,14 +317,14 @@ export default function WorkoutDetailScreen({ route, navigation }) {
               finishing a Workout Mode session, and it's reported there and on the
               day board. This screen is just the workout. The coach gets the one
               action there is. */}
-          {studentView ? null : (
+          {isCoach ? (
             <PillButton
               label="EDIT WORKOUT"
               size="lg"
               onPress={() => navigation.navigate('WorkoutEdit', { workout, exercises })}
               style={{ marginTop: 8, alignSelf: 'center' }}
             />
-          )}
+          ) : null}
 
           <View style={{ height: 32 }} />
         </ScrollView>

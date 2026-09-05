@@ -4,6 +4,7 @@
 //   cd projects/calisthenics-app/supabase/functions/invite-player
 //   node preview.mjs            # → preview.html + preview.txt
 //   node preview.mjs --stores   # same, but with both store links live
+//   node preview.mjs --agreement # with the Dropbox Sign signing link live
 //
 // Node ≥22 runs the .ts import directly (type stripping). Nothing here talks to
 // Supabase, Gmail or the network — `welcome-email.ts` is pure on purpose.
@@ -19,6 +20,10 @@ const withStores = process.argv.includes('--stores');
 // once ONBOARDING_URL is set. The copy under the button is the same either way.
 const withBooking = process.argv.includes('--booking');
 
+// `--agreement` previews the mail once AGREEMENT_URL points at the Dropbox Sign
+// template link: the dead chip becomes a SIGN THE AGREEMENT button.
+const withAgreement = process.argv.includes('--agreement');
+
 const { subject, text, html } = buildWelcomeEmail({
   email: 'new.disciple@gmail.com',
   fullName: 'Ron Levi',
@@ -30,7 +35,7 @@ const { subject, text, html } = buildWelcomeEmail({
     ? 'https://calendly.com/the-handstand-system/onboarding'
     : `https://wa.me/972533453199?text=${encodeURIComponent("I'm in. Let's book my onboarding call.")}`,
   // Unset, same as production — previews the reserved "SOON" chip.
-  agreementUrl: '',
+  agreementUrl: withAgreement ? 'https://app.hellosign.com/s/EXAMPLE_TEMPLATE_LINK' : '',
   whatsappGroups: [
     {
       label: 'ANNOUNCEMENTS',

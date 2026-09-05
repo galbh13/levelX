@@ -3270,12 +3270,6 @@ const styles = StyleSheet.create({
     color: SL.bg,
   },
   pickApplyOff:    { opacity: 0.35 },
-  pickApplyText: {
-    fontFamily: F.heading,
-    fontSize: 15,
-    letterSpacing: 1.4,
-    color: SL.bg,
-  },
 
   // Queued node — tinted by direction, so a run reads at a glance.
   questCardPickAdd: {

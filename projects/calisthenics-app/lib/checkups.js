@@ -456,14 +456,6 @@ export async function deleteTemplateItem(id) {
   if (error) throw error;
 }
 
-// Persist a new order for a set of items (writes each row's order_index).
-export async function reorderTemplateItems(items = []) {
-  await Promise.all(
-    items.map((it, i) =>
-      supabase.from('checkup_template_items').update({ order_index: i }).eq('id', it.id))
-  );
-}
-
 // Copy a class's standard items onto a player so the admin can trim/edit them for
 // that player. No-op (returns existing) if the player already has overrides.
 export async function materializePlayerTemplate(playerId, classId) {

@@ -1,16 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Switch } from 'react-native';
 import {
-  fetchPlans, savePlan, deletePlan, fetchSettings, saveSettings,
+  fetchPlans, savePlan, deletePlan,
   money, CURRENCIES,
 } from '../lib/billing';
 import { F } from '../constants/fonts';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
-import { Field, Choice, Chip, SectionTitle, BIZ } from '../components/BizBits';
+import { Field, Choice, Chip, BIZ } from '../components/BizBits';
 
-// ─── Admin — PLANS & BILLING SETTINGS ───────────────────────────────────────
+// ─── Admin — PLANS ──────────────────────────────────────────────────────────
 // The price list, defined once and pointed at from every player. Editing a plan
 // changes what future charges SHOULD be — it never rewrites the ledger, so past
 // months keep the money they actually earned.
@@ -18,30 +18,24 @@ import { Field, Choice, Chip, SectionTitle, BIZ } from '../components/BizBits';
 // FREE is a switch, not a price of 0: a family/comped plan is excluded from ARPU,
 // never chased for payment and never locked out, which a zero price alone cannot
 // express.
+//
+// `billing_settings` is not edited here any more. Its three fields had no live
+// decision behind them: the business name is a constant (BUSINESS_NAME), the
+// currency is always USD, and the overdue lock was a switch that was never meant
+// to be flipped. The row still exists and the defaults in `fetchSettings` still
+// answer for it.
 
 export default function AdminPlansScreen({ navigation }) {
   const [loading, setLoading] = useState(true);
   const [plans, setPlans] = useState([]);
-  const [settings, setSettings] = useState(null);
   const [editing, setEditing] = useState(null);     // plan draft being edited/created
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  // SAVE SETTINGS state, kept separate from `busy` (which belongs to the plan
-  // modal) and from the top-of-page `error` banner: the button lives at the very
-  // bottom of a long scroll, so a failure reported 1500px above it is invisible
-  // and the button just looks dead. Both the outcome AND the reason now render
-  // next to the button itself.
-  const [saveState, setSaveState] = useState('idle');   // idle | saving | saved
-  const [saveError, setSaveError] = useState(null);
-  const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
 
   const load = useCallback(async () => {
     try {
       setError(null);
-      const [pl, st] = await Promise.all([fetchPlans(), fetchSettings()]);
-      setPlans(pl);
-      setSettings(st);
+      setPlans(await fetchPlans());
     } catch (e) {
       console.error('[AdminPlans] load:', e);
       setError(e?.message ?? 'Could not load plans.');
@@ -59,7 +53,7 @@ export default function AdminPlansScreen({ navigation }) {
         ...(editing.id ? { id: editing.id } : {}),
         name: editing.name.trim().toUpperCase(),
         price: Number(String(editing.price ?? 0).replace(/[^0-9.]/g, '')) || 0,
-        currency: editing.currency ?? settings?.default_currency ?? 'ILS',
+        currency: editing.currency ?? 'USD',
         is_free: !!editing.is_free,
         sessions_per_week: editing.sessions_per_week ? Number(editing.sessions_per_week) : null,
         description: editing.description?.trim() || null,
@@ -88,62 +82,19 @@ export default function AdminPlansScreen({ navigation }) {
     }
   }
 
-  // The row carries server-managed columns; never send them back.
-  async function persistSettings(next) {
-    const { id, updated_at, created_at, ...rest } = next;
-    await saveSettings(rest);
-  }
-
-  // Used by the controls that save the instant you touch them (currency, the
-  // overdue switch). The typed fields — business name, grace days — stay local
-  // until SAVE SETTINGS is pressed.
-  async function patchSettings(patch) {
-    const next = { ...settings, ...patch };
-    setSettings(next);
-    setSaveError(null);
-    try {
-      await persistSettings(next);
-    } catch (e) {
-      console.error('[AdminPlans] saveSettings:', e);
-      setSaveError(e?.message ?? 'Could not save settings.');
-    }
-  }
-
-  // The explicit SAVE SETTINGS press. Writes, then READS BACK from the server so
-  // what the screen shows is what was actually stored — a save that silently did
-  // nothing can't masquerade as a success.
-  async function commitSettings() {
-    if (!settings || saveState === 'saving') return;
-    setSaveState('saving');
-    setSaveError(null);
-    try {
-      await persistSettings(settings);
-      const fresh = await fetchSettings();
-      if (!alive.current) return;
-      setSettings(fresh);
-      setSaveState('saved');
-      setTimeout(() => { if (alive.current) setSaveState('idle'); }, 1800);
-    } catch (e) {
-      console.error('[AdminPlans] commitSettings:', e);
-      if (!alive.current) return;
-      setSaveError(e?.message ?? 'Could not save settings.');
-      setSaveState('idle');
-    }
-  }
-
   return (
     <ScreenFrame fill ready={!loading}>
       <View style={styles.card}>
         <ScreenHeader
           title="PLANS"
-          subtitle="Price list & billing settings"
+          subtitle="Price list"
           onBack={() => navigation.goBack()}
           right={
             <PillButton
               label="＋ NEW PLAN"
               size="sm"
               tone="jade"
-              onPress={() => setEditing({ name: '', price: '', currency: settings?.default_currency ?? 'ILS', is_free: false, active: true })}
+              onPress={() => setEditing({ name: '', price: '', currency: 'USD', is_free: false, active: true })}
             />
           }
         />
@@ -225,60 +176,6 @@ export default function AdminPlansScreen({ navigation }) {
               ))
             )}
 
-            {/* ── General settings ── */}
-            <SectionTitle>GENERAL</SectionTitle>
-            <Field
-              label="BUSINESS NAME"
-              value={settings?.business_name}
-              onChangeText={(t) => setSettings({ ...settings, business_name: t })}
-              placeholder="Your coaching business"
-            />
-            <View style={styles.fieldRow}>
-              <Field
-                label="GRACE DAYS BEFORE LOCK"
-                value={String(settings?.grace_days ?? 7)}
-                onChangeText={(t) => setSettings({ ...settings, grace_days: Number(t.replace(/[^0-9]/g, '')) || 0 })}
-                placeholder="7"
-                keyboardType="numeric"
-              />
-              <Choice
-                label="DEFAULT CURRENCY"
-                options={CURRENCIES.map((c) => ({ key: c.key, label: `${c.symbol} ${c.key}` }))}
-                value={settings?.default_currency}
-                onSelect={(k) => patchSettings({ default_currency: k ?? settings?.default_currency })}
-              />
-            </View>
-
-            <View style={styles.toggleRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.toggleLabel}>LOCK THE APP WHEN OVERDUE</Text>
-                <Text style={styles.toggleHint}>
-                  When a charge sits unpaid past the grace window, that player's account reports as locked.
-                  Free plans, trials and frozen players are never affected. Leave this OFF until payments
-                  arrive automatically — with an empty ledger it would lock people who have paid you in cash.
-                </Text>
-              </View>
-              <Switch
-                value={!!settings?.lock_on_overdue}
-                onValueChange={(v) => patchSettings({ lock_on_overdue: v })}
-                trackColor={{ false: '#12283f', true: 'rgba(225,29,72,0.5)' }}
-                thumbColor={settings?.lock_on_overdue ? BIZ.alert : '#4a6a8a'}
-              />
-            </View>
-
-            <View style={styles.saveBar}>
-              <PillButton
-                label={saveState === 'saved' ? 'SAVED' : 'SAVE SETTINGS'}
-                tone={saveState === 'saved' ? 'jade' : 'gold'}
-                loading={saveState === 'saving'}
-                onPress={commitSettings}
-              />
-              {saveError ? (
-                <Text style={styles.saveError}>{saveError}</Text>
-              ) : saveState === 'saved' ? (
-                <Text style={styles.saveOk}>Billing settings stored.</Text>
-              ) : null}
-            </View>
           </ScrollView>
         )}
       </View>
@@ -325,14 +222,5 @@ const styles = StyleSheet.create({
     fontFamily: F.body, fontSize: 13, color: '#FF6B85',
     borderWidth: 1, borderColor: 'rgba(225,29,72,0.4)', borderRadius: 10,
     padding: 12, marginBottom: 12, backgroundColor: 'rgba(225,29,72,0.08)',
-  },
-  saveBar: { marginTop: 20, alignItems: 'center', gap: 10 },
-  saveError: {
-    fontFamily: F.body, fontSize: 12, color: '#FF6B85',
-    letterSpacing: 0.5, textAlign: 'center',
-  },
-  saveOk: {
-    fontFamily: F.body, fontSize: 12, color: '#1FD79A',
-    letterSpacing: 0.5, textAlign: 'center',
   },
 });

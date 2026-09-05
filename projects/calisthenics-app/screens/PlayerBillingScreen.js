@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Switch,
+  View, Text, StyleSheet, ScrollView, ActivityIndicator,
 } from 'react-native';
 import {
-  fetchPlans, fetchPlayerBilling, savePlayerBilling, fetchPlayerContact, fetchPayments, fetchSettings,
-  addPayment, deletePayment, markPaid,
-  playerMoney, accessState, money, bagText, labelOf, todayISO, monthRange,
-  STATUSES, SOURCES, METHODS, CHURN_REASONS, CURRENCIES, PRICING, OFFERED_PLANS,
+  fetchPlans, fetchPlayerBilling, savePlayerBilling, fetchPlayerContact, fetchPayments,
+  addPayment, deletePayment,
+  playerMoney, money, bagText, planPrice, todayISO, monthRange,
+  STATUSES, CHURN_REASONS, OFFERED_PLANS,
 } from '../lib/billing';
-import { fetchEngagement, riskScore, RISK_COLORS, RISK_LABELS } from '../lib/engagement';
+import { fetchEngagement } from '../lib/engagement';
 import { F } from '../constants/fonts';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
@@ -16,29 +16,20 @@ import PillButton from '../components/PillButton';
 import { StatTile, Chip, Field, Choice, SectionTitle, BIZ } from '../components/BizBits';
 
 // ─── Admin — one player's MONEY card ────────────────────────────────────────
-// The customer file behind a roster row: when they started, what they pay, where
-// they came from, what they've paid you to date, what they still owe, why they
-// left. Reached from PlayerAdmin → MONEY & MEMBERSHIP, or from the BUSINESS
-// screen's customer list.
+// The customer file behind a roster row: when they started, what they pay, how
+// long they've been with you, what they've paid you to date, why they left.
+// Reached from the BUSINESS screen's customer list.
 //
-// The DEAL block is edit-then-SAVE (one upsert on `player_billing`); the LEDGER
-// writes immediately, since a payment is an event you record the moment it
-// happens and never "draft".
+// The price never varies — one plan, one monthly figure, nobody can buy more or
+// less — so there is nothing to tally and nothing to chase. The only monthly
+// fact worth recording is the binary one: did this month's payment arrive or
+// not. THIS MONTH below is that switch, and flipping it writes (or takes back)
+// the single ledger row that keeps LIFETIME honest.
+//
+// The DEAL block is edit-then-SAVE (one upsert on `player_billing`); the paid
+// switch writes immediately, since it is an event, not a draft.
 //
 // Admin-only — every table this touches rejects a player at the RLS level.
-
-const KIND_OPTIONS = [
-  { key: 'subscription', label: 'MONTHLY' },
-  { key: 'extra',        label: 'EXTRA / ONE-OFF' },
-  { key: 'refund',       label: 'REFUND' },
-];
-
-const ACCESS_TEXT = {
-  ok:     { label: 'ACCESS OPEN',    color: BIZ.jade },
-  grace:  { label: 'IN GRACE',       color: BIZ.gold },
-  locked: { label: 'WOULD BE LOCKED', color: BIZ.alert },
-  free:   { label: 'NEVER BILLED',   color: BIZ.muted },
-};
 
 export default function PlayerBillingScreen({ navigation, route }) {
   const player = route.params?.player ?? null;
@@ -46,14 +37,13 @@ export default function PlayerBillingScreen({ navigation, route }) {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [marking, setMarking] = useState(false);
   const [error, setError] = useState(null);
   const [plans, setPlans] = useState([]);
-  const [settings, setSettings] = useState(null);
   const [payments, setPayments] = useState([]);
   const [engagement, setEngagement] = useState(null);
   const [form, setForm] = useState(null);      // the editable player_billing row
   const [dirty, setDirty] = useState(false);
-  const [showAdd, setShowAdd] = useState(false);
 
   const set = (patch) => { setForm((f) => ({ ...f, ...patch })); setDirty(true); };
 
@@ -61,17 +51,15 @@ export default function PlayerBillingScreen({ navigation, route }) {
     if (!player?.id) return;
     try {
       setError(null);
-      const [pl, b, contact, pay, st, eng] = await Promise.all([
+      const [pl, b, contact, pay, eng] = await Promise.all([
         fetchPlans(),
         fetchPlayerBilling(player.id),
         fetchPlayerContact(player.id),   // for the no-row seed below
         fetchPayments({ playerId: player.id }),
-        fetchSettings(),
         fetchEngagement([player.id], { today }),
       ]);
       setPlans(pl);
       setPayments(pay);
-      setSettings(st);
       setEngagement(eng[player.id]);
       // No row yet → seed a sensible new-customer draft rather than a blank form.
       // PHONE and BIRTHDAY come from the profile either way (they were typed on
@@ -83,7 +71,6 @@ export default function PlayerBillingScreen({ navigation, route }) {
         status: 'active',
         started_at: today,
         billing_day: Number(today.slice(8, 10)) > 28 ? 28 : Number(today.slice(8, 10)),
-        auto_pay: false,
       });
       setDirty(!b);
     } catch (e) {
@@ -99,7 +86,6 @@ export default function PlayerBillingScreen({ navigation, route }) {
     () => plans.find((p) => p.id === form?.plan_id) ?? null,
     [plans, form?.plan_id],
   );
-  const currency = form?.currency_override || 'ILS';
   // Retired plans stay in the table for the players still linked to them; the
   // picker only offers what you sell now — falling back to every active plan if
   // the names ever drift, so this can never leave you with no plan to pick.
@@ -108,21 +94,36 @@ export default function PlayerBillingScreen({ navigation, route }) {
     const offered = live.filter((p) => OFFERED_PLANS.includes(String(p.name).toUpperCase()));
     return (offered.length ? offered : live).map((p) => ({
       key: p.id,
-      label: `${p.name} · ${p.is_free ? 'FREE' : money(PRICING[currency] ?? p.price, currency)}`,
+      label: `${p.name} · ${p.is_free ? 'FREE' : money(planPrice(p))}`,
     }));
-  }, [plans, currency]);
+  }, [plans]);
   const m = useMemo(
     () => playerMoney(form, plan, payments, today),
     [form, plan, payments, today],
   );
-  const risk = useMemo(
-    () => riskScore(engagement, form, today),
-    [engagement, form, today],
+
+  // The rows that make up this month — held so the switch can take them back off
+  // again when it gets flipped by mistake.
+  const { start: mStart, end: mEnd } = useMemo(() => monthRange(today), [today]);
+  const thisMonthRows = useMemo(
+    () => payments.filter(
+      (p) => p.status === 'paid' && p.paid_at && p.paid_at >= mStart && p.paid_at <= mEnd,
+    ),
+    [payments, mStart, mEnd],
   );
-  const access = accessState(form, plan, payments, settings, today);
+  const paidThisMonth = thisMonthRows.length > 0;
+
+  // Phone and birthday are typed on the ＋ NEW PLAYER form and arrive here
+  // already filled in. Required means required: they are how you actually reach
+  // a customer, so the card will not save with either one blank.
+  const missingContact = !String(form?.phone ?? '').trim() || !String(form?.birthday ?? '').trim();
 
   async function save() {
     if (!form || saving) return;
+    if (missingContact) {
+      setError('Phone and birthday are both required.');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -142,35 +143,34 @@ export default function PlayerBillingScreen({ navigation, route }) {
     setSaving(false);
   }
 
-  async function logPayment(row) {
+  /** Flip this month between PAID and NOT PAID — one ledger row either way. */
+  async function togglePaid() {
+    if (marking || m.free) return;
+    setMarking(true);
+    setError(null);
     try {
-      const created = await addPayment({ ...row, player_id: player.id });
-      setPayments((prev) => [created, ...prev]);
-      setShowAdd(false);
+      if (paidThisMonth) {
+        await Promise.all(thisMonthRows.map((p) => deletePayment(p.id)));
+        const gone = new Set(thisMonthRows.map((p) => p.id));
+        setPayments((prev) => prev.filter((p) => !gone.has(p.id)));
+      } else {
+        const created = await addPayment({
+          player_id: player.id,
+          amount: m.price,
+          currency: m.currency,
+          kind: 'subscription',
+          status: 'paid',
+          paid_at: today,
+          period_start: mStart,
+          period_end: mEnd,
+        });
+        setPayments((prev) => [created, ...prev]);
+      }
     } catch (e) {
-      console.error('[PlayerBilling] addPayment:', e);
-      setError(e?.message ?? 'Could not save the payment.');
+      console.error('[PlayerBilling] togglePaid:', e);
+      setError(e?.message ?? 'Could not update this month.');
     }
-  }
-
-  async function receive(p) {
-    try {
-      await markPaid(p.id);
-      setPayments((prev) => prev.map((x) => (x.id === p.id ? { ...x, status: 'paid', paid_at: today } : x)));
-    } catch (e) {
-      console.error('[PlayerBilling] markPaid:', e);
-      setError(e?.message ?? 'Could not update the payment.');
-    }
-  }
-
-  async function removePayment(p) {
-    try {
-      await deletePayment(p.id);
-      setPayments((prev) => prev.filter((x) => x.id !== p.id));
-    } catch (e) {
-      console.error('[PlayerBilling] deletePayment:', e);
-      setError(e?.message ?? 'Could not delete the payment.');
-    }
+    setMarking(false);
   }
 
   const churnedish = form?.status === 'churned' || !!form?.ended_at;
@@ -200,26 +200,14 @@ export default function PlayerBillingScreen({ navigation, route }) {
           <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent} showsVerticalScrollIndicator={false}>
             {error ? <Text style={styles.error}>{error}</Text> : null}
 
-            {/* ── The numbers ── Four that change a decision. Everything else
-                 (days, extras, risk detail) rides along as a chip or the ledger. */}
+            {/* ── The numbers ── Two, because two is all that moves: what they
+                 have been worth so far, and when the next charge lands. */}
             <View style={styles.grid}>
               <StatTile
                 label="LIFETIME"
                 value={bagText(m.lifetime)}
                 sub={`${m.months} month${m.months === 1 ? '' : 's'} · avg ${bagText(m.avgPerMonth)}`}
                 tone="gold"
-              />
-              <StatTile
-                label="THIS MONTH"
-                value={bagText(m.thisMonth)}
-                sub={m.paidThisMonth ? 'received' : 'nothing yet'}
-                tone={m.paidThisMonth ? 'jade' : 'muted'}
-              />
-              <StatTile
-                label="OWES"
-                value={bagText(m.outstanding)}
-                sub={m.daysOverdue ? `${m.daysOverdue} days overdue` : 'nothing due'}
-                tone={m.daysOverdue ? 'alert' : 'muted'}
               />
               <StatTile
                 label="NEXT CHARGE"
@@ -229,10 +217,32 @@ export default function PlayerBillingScreen({ navigation, route }) {
             </View>
 
             <View style={styles.chipRow}>
-              <Chip label={RISK_LABELS[risk.band]} color={RISK_COLORS[risk.band]} />
-              <Chip label={ACCESS_TEXT[access].label} color={ACCESS_TEXT[access].color} />
               {form.started_at ? <Chip label={`${m.days} DAYS WITH ME`} color={BIZ.muted} /> : null}
               {engagement?.lastActive ? <Chip label={`LAST ACTIVE ${engagement.lastActive}`} color={BIZ.muted} /> : null}
+            </View>
+
+            {/* ── This month ── The only payment question there is. */}
+            <SectionTitle>THIS MONTH</SectionTitle>
+            <View style={[styles.paidBox, paidThisMonth && styles.paidBoxOn]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.paidState, paidThisMonth && styles.paidStateOn]}>
+                  {m.free ? 'NOTHING TO COLLECT' : paidThisMonth ? 'PAID' : 'NOT PAID YET'}
+                </Text>
+                <Text style={styles.paidHint}>
+                  {m.free
+                    ? 'This plan is free — there is no monthly charge.'
+                    : `${money(m.price, m.currency)} for ${mStart.slice(0, 7)}${paidThisMonth ? ' · received' : ''}`}
+                </Text>
+              </View>
+              {m.free ? null : (
+                <PillButton
+                  label={paidThisMonth ? 'UNDO' : 'MARK PAID'}
+                  size="sm"
+                  tone={paidThisMonth ? 'muted' : 'jade'}
+                  loading={marking}
+                  onPress={togglePaid}
+                />
+              )}
             </View>
 
             {/* ── The deal ── */}
@@ -243,14 +253,7 @@ export default function PlayerBillingScreen({ navigation, route }) {
               value={form.status}
               onSelect={(k) => set({ status: k, ended_at: k === 'churned' ? (form.ended_at ?? today) : null })}
             />
-            {/* Currency comes first because it IS the price: the plan pills
-                below read ₪600 or $200 off whatever is picked here. */}
-            <Choice
-              label="CURRENCY"
-              options={CURRENCIES.map((c) => ({ key: c.key, label: `${c.symbol} ${c.key}` }))}
-              value={currency}
-              onSelect={(k) => set({ currency_override: k ?? 'ILS' })}
-            />
+            {/* No currency picker: everything is billed in USD. */}
             <Choice
               label="PLAN"
               options={planOptions}
@@ -278,28 +281,29 @@ export default function PlayerBillingScreen({ navigation, route }) {
                 <Field label="FROZEN UNTIL" value={form.paused_until} onChangeText={(t) => set({ paused_until: t })} placeholder="—" />
               </View>
             ) : null}
-            <View style={styles.toggleRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.toggleLabel}>AUTO-PAY</Text>
-                <Text style={styles.toggleHint}>
-                  Their card/subscription charges on its own — payments arrive from the provider, not typed here.
-                </Text>
-              </View>
-              <Switch
-                value={!!form.auto_pay}
-                onValueChange={(v) => set({ auto_pay: v })}
-                trackColor={{ false: '#12283f', true: 'rgba(31,215,154,0.5)' }}
-                thumbColor={form.auto_pay ? BIZ.jade : '#4a6a8a'}
-              />
-            </View>
 
             {/* ── The customer ── */}
             <SectionTitle>THE CUSTOMER</SectionTitle>
-            <Choice label="CAME FROM" options={SOURCES} value={form.source} onSelect={(k) => set({ source: k })} allowClear />
             <View style={styles.fieldRow}>
-              <Field label="PHONE" value={form.phone} onChangeText={(t) => set({ phone: t })} placeholder="—" />
-              <Field label="BIRTHDAY (YYYY-MM-DD)" value={form.birthday} onChangeText={(t) => set({ birthday: t })} placeholder="—" />
+              <Field
+                label="PHONE · REQUIRED"
+                value={form.phone}
+                onChangeText={(t) => set({ phone: t })}
+                placeholder="05X-XXXXXXX"
+                keyboardType="phone-pad"
+              />
+              <Field
+                label="BIRTHDAY · REQUIRED"
+                value={form.birthday}
+                onChangeText={(t) => set({ birthday: t })}
+                placeholder="YYYY-MM-DD"
+              />
             </View>
+            {missingContact ? (
+              <Text style={styles.required}>
+                Both arrive filled in from the ＋ NEW PLAYER form. Fill the blank one before saving.
+              </Text>
+            ) : null}
 
             {/* ── Exit ── */}
             {churnedish ? (
@@ -311,37 +315,6 @@ export default function PlayerBillingScreen({ navigation, route }) {
                 </View>
               </>
             ) : null}
-
-            {/* ── Ledger ── */}
-            <SectionTitle
-              right={
-                <PillButton
-                  label={showAdd ? 'CLOSE' : '＋ PAYMENT'}
-                  size="sm"
-                  tone={showAdd ? 'muted' : 'jade'}
-                  onPress={() => setShowAdd((v) => !v)}
-                />
-              }
-            >
-              PAYMENTS
-            </SectionTitle>
-
-            {showAdd ? (
-              <AddPaymentForm
-                defaultCurrency={m.currency || settings?.default_currency || 'ILS'}
-                defaultAmount={m.free ? '' : String(m.price ?? '')}
-                today={today}
-                onSubmit={logPayment}
-              />
-            ) : null}
-
-            {payments.length === 0 ? (
-              <Text style={styles.empty}>No payments recorded yet.</Text>
-            ) : (
-              payments.map((p) => (
-                <PaymentRow key={p.id} p={p} today={today} onReceive={() => receive(p)} onDelete={() => removePayment(p)} />
-              ))
-            )}
 
             <View style={styles.saveBar}>
               <PillButton
@@ -359,121 +332,6 @@ export default function PlayerBillingScreen({ navigation, route }) {
   );
 }
 
-// ─── Add-payment form ────────────────────────────────────────────────────────
-// Two shapes in one form: RECEIVED (money in hand — paid_at) and DUE (an expected
-// charge — due_at). A DUE row is what makes OUTSTANDING and the lock gate work,
-// so it must be as easy to record as a received one.
-function AddPaymentForm({ defaultCurrency, defaultAmount, today, onSubmit }) {
-  const { start, end } = monthRange(today);
-  const [amount, setAmount] = useState(defaultAmount ?? '');
-  const [currency, setCurrency] = useState(defaultCurrency);
-  const [kind, setKind] = useState('subscription');
-  const [received, setReceived] = useState(true);
-  const [date, setDate] = useState(today);
-  const [method, setMethod] = useState('bit');
-  const [label, setLabel] = useState('');
-  const [periodStart, setPeriodStart] = useState(start);
-  const [periodEnd, setPeriodEnd] = useState(end);
-  const [note, setNote] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const num = Number(String(amount).replace(/[^0-9.]/g, ''));
-  const valid = !Number.isNaN(num) && num > 0;
-
-  async function submit() {
-    if (!valid || busy) return;
-    setBusy(true);
-    await onSubmit({
-      amount: kind === 'refund' ? -Math.abs(num) : num,
-      currency,
-      kind,
-      label: label || null,
-      status: received ? 'paid' : 'pending',
-      paid_at: received ? date : null,
-      due_at: received ? null : date,
-      period_start: kind === 'subscription' ? periodStart || null : null,
-      period_end: kind === 'subscription' ? periodEnd || null : null,
-      method: received ? method : null,
-      note: note || null,
-    });
-    setBusy(false);
-  }
-
-  return (
-    <View style={styles.addBox}>
-      <View style={styles.fieldRow}>
-        <Field label="AMOUNT" value={amount} onChangeText={setAmount} placeholder="600" keyboardType="numeric" />
-        <Choice
-          label="CURRENCY"
-          options={CURRENCIES.map((c) => ({ key: c.key, label: `${c.symbol} ${c.key}` }))}
-          value={currency}
-          onSelect={(k) => setCurrency(k ?? currency)}
-        />
-      </View>
-      <Choice label="TYPE" options={KIND_OPTIONS} value={kind} onSelect={(k) => setKind(k ?? kind)} />
-      <Choice
-        label="STATE"
-        options={[{ key: 'paid', label: 'RECEIVED' }, { key: 'pending', label: 'DUE / UNPAID' }]}
-        value={received ? 'paid' : 'pending'}
-        onSelect={(k) => setReceived(k === 'paid')}
-      />
-      <View style={styles.fieldRow}>
-        <Field label={received ? 'PAID ON' : 'DUE ON'} value={date} onChangeText={setDate} placeholder={today} />
-        {kind === 'extra' ? (
-          <Field label="WHAT FOR" value={label} onChangeText={setLabel} placeholder="1-on-1 session" />
-        ) : (
-          <Field label="NOTE" value={note} onChangeText={setNote} placeholder="—" />
-        )}
-      </View>
-      {kind === 'subscription' ? (
-        <View style={styles.fieldRow}>
-          <Field label="COVERS FROM" value={periodStart} onChangeText={setPeriodStart} placeholder={start} />
-          <Field label="COVERS TO" value={periodEnd} onChangeText={setPeriodEnd} placeholder={end} />
-        </View>
-      ) : null}
-      {received ? <Choice label="METHOD" options={METHODS} value={method} onSelect={(k) => setMethod(k ?? method)} /> : null}
-      <PillButton
-        label={received ? 'RECORD PAYMENT' : 'RECORD AS DUE'}
-        tone="jade"
-        disabled={!valid}
-        loading={busy}
-        onPress={submit}
-        style={{ alignSelf: 'flex-start', marginTop: 4 }}
-      />
-    </View>
-  );
-}
-
-// ─── One ledger row ──────────────────────────────────────────────────────────
-function PaymentRow({ p, today, onReceive, onDelete }) {
-  const overdue = p.status === 'pending' && p.due_at && p.due_at < today;
-  const color = p.status === 'paid' ? BIZ.jade : overdue ? BIZ.alert : BIZ.gold;
-  const when = p.status === 'paid' ? p.paid_at : p.due_at;
-
-  return (
-    <View style={[styles.payRow, { borderColor: `${color}44` }]}>
-      <View style={styles.payHandle} />
-      <View style={styles.payMain}>
-        <Text style={[styles.payAmount, { color }]}>{money(p.amount, p.currency)}</Text>
-        <Text style={styles.payMeta} numberOfLines={1}>
-          {when ?? '—'}
-          {p.method ? ` · ${labelOf(METHODS, p.method, p.method)}` : ''}
-          {p.kind === 'extra' ? ` · ${p.label || 'EXTRA'}` : ''}
-          {p.kind === 'refund' ? ' · REFUND' : ''}
-          {p.period_start ? ` · covers ${p.period_start.slice(0, 7)}` : ''}
-          {p.auto ? ' · AUTO' : ''}
-        </Text>
-        {p.note ? <Text style={styles.payNote} numberOfLines={2}>{p.note}</Text> : null}
-      </View>
-      <Chip label={p.status === 'paid' ? 'PAID' : overdue ? 'OVERDUE' : 'DUE'} color={color} />
-      {p.status === 'pending' ? (
-        <PillButton label="MARK PAID" size="sm" tone="jade" onPress={onReceive} />
-      ) : null}
-      <Pressable onPress={onDelete} hitSlop={10}><Text style={styles.del}>✕</Text></Pressable>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   card: { flex: 1 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
@@ -485,32 +343,18 @@ const styles = StyleSheet.create({
 
   fieldRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
 
-  toggleRow: {
+  paidBox: {
     flexDirection: 'row', alignItems: 'center', gap: 14,
     borderWidth: 1, borderColor: BIZ.border, borderRadius: 12,
     backgroundColor: BIZ.panel, padding: 14, marginTop: 4,
   },
-  toggleLabel: { fontFamily: F.heading, fontSize: 13, letterSpacing: 2, color: BIZ.text },
-  toggleHint: { fontFamily: F.bodyMed, fontSize: 12, color: BIZ.muted, marginTop: 4, lineHeight: 17 },
+  paidBoxOn: { borderColor: 'rgba(31,215,154,0.45)', backgroundColor: 'rgba(31,215,154,0.06)' },
+  paidState: { fontFamily: F.heading, fontSize: 15, letterSpacing: 2, color: BIZ.text },
+  paidStateOn: { color: BIZ.jade },
+  paidHint: { fontFamily: F.bodyMed, fontSize: 12, color: BIZ.muted, marginTop: 4, lineHeight: 17 },
 
-  addBox: {
-    borderWidth: 1, borderColor: 'rgba(31,215,154,0.35)', borderRadius: 14,
-    backgroundColor: 'rgba(31,215,154,0.05)', padding: 16, marginBottom: 14,
-  },
+  required: { fontFamily: F.bodyMed, fontSize: 12, color: BIZ.gold, marginTop: 6 },
 
-  payRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    borderWidth: 1, borderRadius: 12, backgroundColor: BIZ.panel,
-    paddingVertical: 12, paddingHorizontal: 14, marginBottom: 8,
-  },
-  payHandle: { width: 3, height: 30, borderRadius: 2, backgroundColor: 'rgba(74,158,191,0.5)' },
-  payMain: { flex: 1, minWidth: 0 },
-  payAmount: { fontFamily: F.heading, fontSize: 18, letterSpacing: 0.5 },
-  payMeta: { fontFamily: F.bodyMed, fontSize: 12, color: BIZ.muted, marginTop: 3, letterSpacing: 0.3 },
-  payNote: { fontFamily: F.bodyMed, fontSize: 12, color: '#5a7a9a', marginTop: 3 },
-  del: { fontFamily: F.heading, fontSize: 16, color: '#3a5a7a', paddingHorizontal: 4 },
-
-  empty: { fontFamily: F.bodyMed, fontSize: 14, color: BIZ.muted, paddingVertical: 12 },
   error: {
     fontFamily: F.body, fontSize: 13, color: '#FF6B85',
     borderWidth: 1, borderColor: 'rgba(225,29,72,0.4)', borderRadius: 10,

@@ -30,7 +30,7 @@ import { C } from '../constants/colors';
 //     tab.
 
 // Is the screen this player sits on the one being looked at? Safe outside a
-// navigator too (JoinScreen renders bare) — there we simply say "yes".
+// navigator too (a bare, un-navigated screen) — there we simply say "yes".
 function useScreenFocused() {
   const navigation = useContext(NavigationContext);
   const [focused, setFocused] = useState(() => navigation?.isFocused?.() ?? true);

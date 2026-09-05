@@ -37,10 +37,15 @@ const FONT = "'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 // What the player actually does, in order — TITLES ONLY, no explanations. They
 // have already been on a call with the coach and been placed; this is a checklist
-// for someone who is already in, not a walkthrough for a stranger. The call comes
-// FIRST because it is the thing that starts them, and everything else can happen
-// while they wait for it.
+// for someone who is already in, not a walkthrough for a stranger.
+//
+// THE AGREEMENT IS STEP ONE (coach's call, 2026-09-02). Nothing else starts until
+// it is signed — no call, no training — so it goes above the booking link rather
+// than sitting in the footer as an afterthought. The call is second because it is
+// the thing that actually starts them; everything below it can happen while they
+// wait for their slot.
 const STEPS: string[] = [
+  'Sign your coaching agreement',
   'Book your onboarding call',
   'Download the app',
   'Sign in and set your own password',
@@ -72,8 +77,12 @@ export type WelcomeEmailInput = {
    */
   onboardingCallUrl: string;
   /**
-   * The coaching agreement / terms of service, as a downloadable file. Empty
-   * until the document exists — renders as a dead chip, same as the stores.
+   * The coaching agreement, as a LINK THE PLAYER SIGNS — a Dropbox Sign template
+   * link, not a PDF to read. Opening it drops them straight into the document
+   * with their own signature fields; the executed copy is then filed in the
+   * coach's Dropbox Sign account and emailed to both sides.
+   *
+   * Empty until the link exists — renders as a dead chip, same as the stores.
    */
   agreementUrl?: string;
   whatsappGroups: WhatsAppGroup[];
@@ -157,9 +166,18 @@ export function buildWelcomeEmail(input: WelcomeEmailInput) {
     '  Everyone receives that same starter. The app will ask you to replace it',
     '  the moment you sign in.',
     '',
-    rule('YOUR FIRST FOUR STEPS'),
+    rule('YOUR FIRST FIVE STEPS'),
     '',
     ...STEPS.map((title, i) => `  ${i + 1}. ${title}`),
+    '',
+    rule('THE AGREEMENT'),
+    '',
+    agreementUrl
+      ? `  Sign it here:  ${agreementUrl}`
+      : '  Coming with your onboarding call.',
+    ...(agreementUrl ? ['  Please sign it before your onboarding call.'] : []),
+    '',
+    rule('YOUR ONBOARDING CALL'),
     '',
     `  Schedule an onboarding call:  ${onboardingCallUrl}`,
     `  ${onboardingNote}`,
@@ -174,12 +192,6 @@ export function buildWelcomeEmail(input: WelcomeEmailInput) {
       '',
       ...whatsappGroups.flatMap((g) => [`  ${g.label} — ${g.blurb}`, `     ${g.url}`, '']),
     ] : []),
-    rule('THE AGREEMENT'),
-    '',
-    agreementUrl
-      ? `  Read it here:  ${agreementUrl}`
-      : '  Coming with your onboarding call.',
-    '',
     'Gal Benhamo',
   ].join('\n');
 
@@ -262,14 +274,25 @@ export function buildWelcomeEmail(input: WelcomeEmailInput) {
           <div style="font-family:${FONT};color:${DIM};font-size:15px;line-height:1.65;padding:14px 2px 34px;">Everyone receives that same starter. The app will ask you to replace it the moment you sign in.</div>
 
           <!-- Steps -->
-          ${sectionLabel('YOUR FIRST FOUR STEPS')}
+          ${sectionLabel('YOUR FIRST FIVE STEPS')}
           <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">
             ${stepsHtml}
           </table>
 
-          <!-- The one action. Not "open the app" — the app comes from a store and
-               the call is what actually starts them. -->
+          <!-- The two actions, in the order the steps just listed them: sign,
+               then book. Each keeps its own section label — without them the two
+               pills stack under one heading and read as alternatives rather than
+               as one thing after another. A dead chip until AGREEMENT_URL is set. -->
           ${gap(10)}
+          ${sectionLabel('THE AGREEMENT')}
+          ${agreementUrl
+            ? btn(agreementUrl, 'SIGN THE AGREEMENT', CYAN, true)
+            : btnDead('THE AGREEMENT &middot; SOON')}
+          ${agreementUrl
+            ? `<div style="font-family:${FONT};color:${DIM};font-size:15px;line-height:1.65;text-align:center;padding:14px 0 32px;">Please sign it before your onboarding call. Your own signed copy arrives by email the moment you do.</div>`
+            : gap(32)}
+
+          ${sectionLabel('YOUR ONBOARDING CALL')}
           ${btn(onboardingCallUrl, 'SCHEDULE AN ONBOARDING CALL', CYAN, true)}
           <div style="font-family:${FONT};color:${DIM};font-size:15px;line-height:1.65;text-align:center;padding:14px 0 32px;">${onboardingNote}</div>
 
@@ -280,12 +303,6 @@ export function buildWelcomeEmail(input: WelcomeEmailInput) {
           <!-- Community -->
           ${whatsappHtml}
 
-          <!-- The agreement. A dead chip until the document exists — the slot is
-               reserved so nobody has to redesign the footer to add it later. -->
-          ${sectionLabel('THE AGREEMENT')}
-          ${agreementUrl
-            ? btn(agreementUrl, 'DOWNLOAD THE AGREEMENT', CYAN, true)
-            : btnDead('THE AGREEMENT &middot; SOON')}
           ${gap(6)}
 
           <!-- Sign-off.

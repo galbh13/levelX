@@ -109,27 +109,20 @@ export default function PlayerAdminScreen({ navigation, route }) {
     {
       key: 'checkup',
       label: 'CHECK-UP',
-      desc: 'Review, feedback & customize their check-up',
       onPress: () => navigation.navigate('PlayerCheckup', { player }),
-    },
-    {
-      key: 'money',
-      label: 'MONEY & MEMBERSHIP',
-      desc: 'Dates, plan, payments, lifetime value & churn risk',
-      onPress: () => navigation.navigate('PlayerBilling', { player }),
     },
     {
       key: 'week',
       label: 'WORKOUTS MANAGEMENT',
-      desc: 'Their live schedule & completions',
       onPress: () => navigation.navigate('WorkoutsList', { studentId: player?.id }),
     },
     {
       key: 'skills',
       label: 'SKILLS · CLASS · LEVEL',
-      desc: 'Class, level, prestige & quest trees',
       onPress: () => navigation.navigate('SkillsList', { studentId: player?.id }),
     },
+    // MONEY & MEMBERSHIP is intentionally omitted here — billing is reached by
+    // tapping the customer row on the BUSINESS screen.
     // WORKOUTS · SCHEDULE and DAILY QUESTS are intentionally omitted here — both
     // are reachable from WORKOUTS MANAGEMENT (WorkoutsScreen → Training Forge / daily
     // quests), so separate hub tiles were redundant.
@@ -338,12 +331,13 @@ const JobSwitch = ({ jobs, value, onSelect, disabled }) => (
 
 // ─── Action tile ────────────────────────────────────────────────────────────
 // One tappable destination — a clean menu row: a single accent handle as the
-// anchor (identical on every row — no icons, no numbers), then the label +
-// description and a chevron. Single accent, so the four rows read as one calm,
-// uniform set. Owns:
+// anchor (identical on every row — no icons, no numbers), then the label and a
+// chevron. Single accent, so the rows read as one calm, uniform set. There is
+// no description line: the only person who sees this screen is the coach, who
+// knows what each destination is. Owns:
 //   • entrance  — staggered slide-up + fade-in cascade on mount
 //   • press     — a subtle scale-down + chevron nudge (no layout shift)
-const ActionTile = ({ index, label, desc, onPress }) => {
+const ActionTile = ({ index, label, onPress }) => {
   const enter = useRef(new Animated.Value(0)).current;   // 0 → 1 entrance
   const press = useRef(new Animated.Value(0)).current;   // 0 idle → 1 pressed
 
@@ -375,7 +369,6 @@ const ActionTile = ({ index, label, desc, onPress }) => {
           <View style={styles.handle} />
           <View style={styles.tileText}>
             <Text style={styles.label} numberOfLines={1}>{label}</Text>
-            <Text style={styles.desc} numberOfLines={1}>{desc}</Text>
           </View>
           <Animated.Text style={[styles.chevron, { transform: [{ translateX: chevronX }] }]}>
             ›
@@ -633,7 +626,9 @@ const styles = StyleSheet.create({
   // single splash of colour that anchors the label (replaces the numeral).
   handle: {
     width: 4,
-    height: 34,
+    // Sized to the single label line it now stands beside — a 34px handle was
+    // measured against a label + description.
+    height: 22,
     borderRadius: 2,
     backgroundColor: ACCENT,
     shadowColor: ACCENT,
@@ -648,13 +643,6 @@ const styles = StyleSheet.create({
     color: C.text,
     letterSpacing: 1.5,
     textTransform: 'uppercase',
-  },
-  desc: {
-    fontFamily: F.bodyMed,
-    fontSize: 13,
-    color: '#5a7a9a',
-    letterSpacing: 0.4,
-    marginTop: 5,
   },
   chevron: {
     fontFamily: F.heading,

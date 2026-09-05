@@ -13,8 +13,8 @@ import {
   fetchHunterProfile, uploadAvatar, uploadSignatureVideo, removeSignatureVideo,
 } from '../lib/profile';
 
-// Player Card accent — a bright, near-white icy blue (matches the MY PLAYER CARD
-// tile on the Community tab). Really icy, so the card reads as the identity anchor.
+// Player Card accent — a bright, near-white icy blue. Really icy, so the card
+// reads as the identity anchor.
 const ACCENT = '#CDF3FF';
 const GOLD   = '#FFD700';
 
@@ -51,8 +51,14 @@ function fitWithin(boxW, boxH, ratio) {
 // Viewing your OWN card (userId === signed-in user) unlocks edit affordances —
 // tap the portrait to change it, and the SIGNATURE page holds the ＋ ADD /
 // REPLACE / REMOVE actions (so "to share your signature you swipe left, then add
-// the video"). The NAME is never editable. Reached from your Community tab (own)
-// or by tapping a member on the group leaderboard / roster (theirs, read-only).
+// the video"). The NAME is never editable.
+//
+// ENTRY POINT: the PLAYER CARD panel on the PROFILE tab, which passes the signed-in
+// player's own id (2026-09-04). Before that it hung off the community group roster,
+// and when that layer was deleted this screen was left with no way in at all —
+// hence the re-home. The read-only branch (`userId !== meId`) is kept: nothing
+// reaches it today, but it is what makes the card safe to point at ANOTHER player,
+// which is the whole reason a card like this exists.
 export default function HunterStatusScreen({ navigation, route }) {
   const userId = route.params?.userId ?? null;
   const [meId, setMeId] = useState(null);

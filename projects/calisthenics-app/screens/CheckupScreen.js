@@ -115,6 +115,11 @@ export default function CheckupScreen() {
   // Kept in memory (the row itself is untouched in the DB) so the new form always
   // has a way BACK — starting a new check-up by accident used to be a one-way door.
   const [prevSubmission, setPrevSubmission] = useState(null);
+  // The NEW check-up a player put aside by tapping BACK TO MY CHECK-UP. Going back
+  // to the sent one is a look, not a decision: everything typed, filmed and saved
+  // is held here (nothing deleted, on the device or in the DB) so RESUME puts the
+  // form back exactly as it was. Throwing it away is its own, separate tap.
+  const [parkedNew, setParkedNew] = useState(null);
   // Pending in-app confirmation: { title, message, confirmLabel, onConfirm }.
   // Nothing on this screen is confirmed by an OS dialog — see SystemConfirm.
   const [confirm, setConfirm] = useState(null);
@@ -140,6 +145,9 @@ export default function CheckupScreen() {
   // out of it. Tells the (re)load NOT to drop the player back into the submitted
   // view just because their last row is still the submitted one.
   const newSessionRef = useRef(false);
+  // Mirrors parkedNew for the loader: while a new check-up is parked, a re-focus
+  // must not re-derive the screen and wipe what is being held for it.
+  const parkedRef = useRef(null);
 
   const fetchCheckup = useCallback(async () => {
     if (!loadedRef.current) setLoading(true);
@@ -169,6 +177,23 @@ export default function CheckupScreen() {
 
       await purgeExpiredCheckups(user.id);
       setLastFeedback(await fetchLatestFeedback(user.id));
+
+      // A new check-up is parked: the player is LOOKING at the sent one while the
+      // unsent one waits. Re-deriving the screen from the DB here would either
+      // yank them into the parked form or blank it — so refresh the template and
+      // the feedback (done above) and leave every compose map exactly as it is.
+      if (parkedRef.current) {
+        const held = parkedRef.current;
+        setCheckup(held.prev.checkup);
+        setSubAnswers(held.prev.subAnswers);
+        setSubVideos(held.prev.subVideos);
+        setSubNotes(held.prev.subNotes ?? []);
+        setComposing(false);
+        loadedRef.current = true;
+        hydratedRef.current = true;
+        setLoading(false);
+        return;
+      }
 
       const { data: latest } = await supabase
         .from('checkups')
@@ -458,7 +483,7 @@ export default function CheckupScreen() {
         })
       );
 
-      const { data, error } = await supabase
+      const { error } = await supabase
         .from('checkups')
         .update({ submitted_at: new Date().toISOString() })
         .eq('id', draft.id)
@@ -477,14 +502,24 @@ export default function CheckupScreen() {
       await clearCheckupDraft(user.id);
       setSavedAt(null);
 
-      // Reload submitted view from what we just wrote.
-      await fetchCheckup();
-      setCheckup(data);
       draftRef.current = { answers: {}, notes: {}, prompts: {} };   // nothing left to autosave
+
+      // The check-up just sent IS the player's check-up now — every trace of the
+      // compose session goes BEFORE the reload. Clearing these after it was the
+      // bug: fetchCheckup still saw newSessionRef and re-opened a blank form over
+      // the submitted row, which is the EDIT state, with nothing in it.
       newSessionRef.current = false;
-      setPrevSubmission(null);        // the new submission IS the check-up now
+      parkedRef.current = null;
+      setParkedNew(null);
+      setPrevSubmission(null);
       setAnswers({});
       setExNotes({});
+      setExVideos({});
+      setOrphanVideos([]);
+      setComposing(false);
+
+      // Reload the submitted view from what we just wrote.
+      await fetchCheckup();
       refreshCheckupDot();   // this week's check-up is in → drop the tab dot
     } catch (e) {
       setErrorMsg(e.message ?? 'Could not submit. Please try again.');
@@ -500,16 +535,13 @@ export default function CheckupScreen() {
       const stash = checkup?.submitted_at
       ? { checkup, subAnswers, subVideos, subNotes }
       : null;
-    const go = () => {
+    const go = async () => {
       setErrorMsg('');
       if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
-      clearCheckupDraft(userIdRef.current);
-      draftRef.current = { answers: {}, notes: {}, prompts: {} };
-      setSavedAt(null);
       setCheckup(null);
       setAnswers({});
-      setExVideos({});
       setExNotes({});
+      setExVideos({});
       setOrphanVideos([]);
       setSubAnswers([]);
       setSubVideos([]);
@@ -517,6 +549,13 @@ export default function CheckupScreen() {
       newSessionRef.current = !!stash;
       setPrevSubmission(stash);
       setComposing(true);
+      // Words the player saved on this device are the whole point of SAVE
+      // PROGRESS — the new check-up opens ON them, it does not wipe them.
+      const held = await loadCheckupDraft(userIdRef.current);
+      const draft = remapDraftKeys(held, [...questions, ...exercises]);
+      setAnswers(draft?.answers ?? {});
+      setExNotes(draft?.notes ?? {});
+      setSavedAt(held?.updatedAt ?? null);
     };
     if (stash && !checkup.feedback_at) {
       setConfirm({
@@ -530,20 +569,65 @@ export default function CheckupScreen() {
     }
   }
 
-  // The way OUT of a new check-up started by mistake: throw away the blank one
-  // (and the draft row a clip may have created) and put the submitted check-up
-  // back on screen exactly as it was.
-  function backToSubmitted() {
+  // The way BACK to the sent check-up — a look, not a decision. The new one is
+  // PARKED, not thrown away: the text is written out to the device first, the
+  // clips (and the draft row they created) are left alone, and everything on
+  // screen is held in parkedNew so RESUME restores it untouched.
+  async function backToSubmitted() {
     const prev = prevSubmission;
     if (!prev) return;
-    const started = hasDraftText || Object.values(exVideos).some(v => v?.length);
+    setErrorMsg('');
+    await flushDraft();
+    const held = {
+      prev,
+      checkup,
+      answers, exVideos, exNotes, orphanVideos,
+    };
+    parkedRef.current = held;
+    setParkedNew(held);
+    newSessionRef.current = false;
+    setPrevSubmission(null);
+    setCheckup(prev.checkup);
+    setSubAnswers(prev.subAnswers);
+    setSubVideos(prev.subVideos);
+    setSubNotes(prev.subNotes ?? []);
+    setComposing(false);
+  }
+
+  // Pick the parked check-up back up, exactly as it was left.
+  function resumeNew() {
+    const held = parkedRef.current ?? parkedNew;
+    if (!held) return;
+    setErrorMsg('');
+    parkedRef.current = null;
+    setParkedNew(null);
+    newSessionRef.current = true;
+    setPrevSubmission(held.prev);
+    setCheckup(held.checkup);
+    setAnswers(held.answers);
+    setExVideos(held.exVideos);
+    setExNotes(held.exNotes);
+    setOrphanVideos(held.orphanVideos ?? []);
+    setSubAnswers([]);
+    setSubVideos([]);
+    setSubNotes([]);
+    setComposing(true);
+  }
+
+  // Throw the new check-up away for good — the only destructive path, and it says
+  // so. Works both from inside the form and from the sent view while it is parked.
+  function discardNew() {
+    const held = parkedRef.current ?? parkedNew;
+    const prev = held?.prev ?? prevSubmission;
+    if (!prev) return;
+    const draftRow = held ? held.checkup : checkup;
     const go = async () => {
       setErrorMsg('');
       if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
       // A clip added to the new check-up already created its row — drop it, or it
       // would stay the player's latest check-up and hide the submitted one.
-      if (checkup?.id && !checkup.submitted_at && checkup.id !== prev.checkup.id) {
-        await discardDraftCheckup(checkup.id);
+      if (draftRow?.id && !draftRow.submitted_at && draftRow.id !== prev.checkup.id) {
+        await discardDraftCheckup(draftRow.id);
       }
       await clearCheckupDraft(userIdRef.current);
       draftRef.current = { answers: {}, notes: {}, prompts: {} };
@@ -553,6 +637,8 @@ export default function CheckupScreen() {
       setExNotes({});
       setOrphanVideos([]);
       newSessionRef.current = false;
+      parkedRef.current = null;
+      setParkedNew(null);
       setPrevSubmission(null);
       setCheckup(prev.checkup);
       setSubAnswers(prev.subAnswers);
@@ -560,17 +646,13 @@ export default function CheckupScreen() {
       setSubNotes(prev.subNotes ?? []);
       setComposing(false);
     };
-    if (started) {
-      setConfirm({
-        title: 'GO BACK',
-        message: 'Return to the check-up you already sent? What you put into this new one will be discarded.',
-        confirmLabel: '←  GO BACK, DISCARD THIS',
-        tone: 'danger',
-        onConfirm: go,
-      });
-    } else {
-      go();
-    }
+    setConfirm({
+      title: 'DISCARD NEW CHECK-UP',
+      message: 'Delete everything in the new check-up — answers, notes and clips? Your sent check-up is not affected.',
+      confirmLabel: '✕  DISCARD IT',
+      tone: 'danger',
+      onConfirm: go,
+    });
   }
 
   // Re-open the SUBMITTED check-up for editing (same row): pour its saved answers,
@@ -743,7 +825,7 @@ export default function CheckupScreen() {
               {!!prevSubmission && (
                 <View style={styles.backNotice}>
                   <Text style={styles.backNoticeText}>
-                    NEW CHECK-UP — your sent one is still saved
+                    NEW CHECK-UP — going back keeps this one saved
                   </Text>
                   <PillButton
                     label="←  BACK TO MY CHECK-UP"
@@ -931,15 +1013,26 @@ export default function CheckupScreen() {
                 />
               </View>
               {!!prevSubmission && (
-                <PillButton
-                  label="←  BACK TO MY CHECK-UP"
-                  onPress={backToSubmitted}
-                  disabled={submitting || !!uploadingId}
-                  tone="muted"
-                  variant="outline"
-                  size="md"
-                  style={{ marginTop: 12 }}
-                />
+                <>
+                  <PillButton
+                    label="←  BACK TO MY CHECK-UP"
+                    onPress={backToSubmitted}
+                    disabled={submitting || !!uploadingId}
+                    tone="muted"
+                    variant="outline"
+                    size="md"
+                    style={{ marginTop: 12 }}
+                  />
+                  <PillButton
+                    label="✕  DISCARD THIS NEW CHECK-UP"
+                    onPress={discardNew}
+                    disabled={submitting || !!uploadingId}
+                    tone="danger"
+                    variant="outline"
+                    size="md"
+                    style={{ marginTop: 12 }}
+                  />
+                </>
               )}
               {editing && (
                 <PillButton
@@ -1039,24 +1132,54 @@ export default function CheckupScreen() {
                 </>
               )}
 
-              {/* Edit is always shown, but locked once the coach has reviewed. */}
-              <PillButton
-                label={reviewed ? 'COACH REVIEWED · EDIT NOT AVAILABLE' : '✎  EDIT MY CHECK-UP'}
-                onPress={editSubmission}
-                disabled={reviewed}
-                variant="solid"
-                tone={reviewed ? 'muted' : 'accent'}
-                size="lg"
-                style={styles.submitBtn}
-              />
-              <PillButton
-                label="＋  START NEW CHECK-UP"
-                onPress={startNew}
-                tone={reviewed ? 'accent' : 'muted'}
-                variant={reviewed ? 'solid' : 'outline'}
-                size="lg"
-                style={{ marginTop: 14 }}
-              />
+              {/* A new check-up is waiting where it was left — the way back to it
+                  is the main action here, and throwing it away is a separate tap. */}
+              {parkedNew ? (
+                <>
+                  <View style={styles.backNotice}>
+                    <Text style={styles.backNoticeText}>
+                      YOUR NEW CHECK-UP IS SAVED — NOT SENT YET
+                    </Text>
+                  </View>
+                  <PillButton
+                    label="→  BACK TO MY NEW CHECK-UP"
+                    onPress={resumeNew}
+                    variant="solid"
+                    tone="accent"
+                    size="lg"
+                    style={styles.submitBtn}
+                  />
+                  <PillButton
+                    label="✕  DISCARD THE NEW CHECK-UP"
+                    onPress={discardNew}
+                    tone="danger"
+                    variant="outline"
+                    size="md"
+                    style={{ marginTop: 14 }}
+                  />
+                </>
+              ) : (
+                <>
+                  {/* Edit is always shown, but locked once the coach has reviewed. */}
+                  <PillButton
+                    label={reviewed ? 'COACH REVIEWED · EDIT NOT AVAILABLE' : '✎  EDIT MY CHECK-UP'}
+                    onPress={editSubmission}
+                    disabled={reviewed}
+                    variant="solid"
+                    tone={reviewed ? 'muted' : 'accent'}
+                    size="lg"
+                    style={styles.submitBtn}
+                  />
+                  <PillButton
+                    label="＋  START NEW CHECK-UP"
+                    onPress={startNew}
+                    tone={reviewed ? 'accent' : 'muted'}
+                    variant={reviewed ? 'solid' : 'outline'}
+                    size="lg"
+                    style={{ marginTop: 14 }}
+                  />
+                </>
+              )}
             </>
           )}
         </ScrollView>

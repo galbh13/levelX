@@ -70,14 +70,14 @@ link that 404s. Setting the secret turns it into a live button — no code chang
 |---|---|---|
 | `PLAY_URL` | ANDROID | The Google Play listing |
 | `IOS_URL` | IPHONE | The App Store listing |
-| `AGREEMENT_URL` | DOWNLOAD THE AGREEMENT | The coaching agreement / terms of service (host the PDF anywhere public) |
+| `AGREEMENT_URL` | SIGN THE AGREEMENT | The Dropbox Sign **template link** the player signs (see "The coaching agreement" below) |
 | `ONBOARDING_URL` | SCHEDULE AN ONBOARDING CALL | A booking page. **Already works unset** — it falls back to the coach's WhatsApp with the message pre-typed |
 
 ```bash
 npx supabase secrets set \
   PLAY_URL="https://play.google.com/store/apps/details?id=com.levelx.app" \
   IOS_URL="https://apps.apple.com/app/id0000000000" \
-  AGREEMENT_URL="https://.../the-system-agreement.pdf"
+  AGREEMENT_URL="https://app.hellosign.com/s/xxxxxxxx"
 
 npx supabase functions deploy invite-player   # secrets are read at boot
 ```
@@ -96,7 +96,49 @@ and no network, so it renders locally with nothing configured:
 cd supabase/functions/invite-player
 node preview.mjs            # → preview.html + preview.txt (gitignored)
 node preview.mjs --stores    # with both store links live
+node preview.mjs --agreement # with the signing link live
 ```
+
+## 3b. The coaching agreement (Dropbox Sign)
+
+The **SIGN THE AGREEMENT** button in the welcome email points at a Dropbox Sign
+**template link**: one public URL, the same for every player. Opening it drops
+them into the agreement with their own signature fields — they type their name
+and email, sign, done. No account, no app.
+
+### Making the link
+
+1. <https://app.hellosign.com/home/createReusableDocs> → your template
+   (**handstand online coaching**) → the **···** menu → **Create link**.
+2. Copy the URL it gives you (`https://app.hellosign.com/s/…`).
+3. `npx supabase secrets set AGREEMENT_URL="https://app.hellosign.com/s/…"`
+4. `npx supabase functions deploy invite-player`
+
+The link is a shareable token, exactly like the WhatsApp group links: anyone
+holding it can sign. That is fine — a signed agreement from someone who was
+never invited is a curiosity, not a risk, and every signature is attributed by
+the email address the signer typed. Reset it in Dropbox Sign if it ever leaks
+somewhere unwanted, then set the secret again.
+
+### Where the signatures end up
+
+| Where | What is there | How it gets there |
+|---|---|---|
+| **Dropbox Sign → Documents** | The legal record: the executed PDF, the audit trail (IP, timestamps, email verification), every signer's copy | Automatic. This is the system of record. |
+| **the.handstand.system@gmail.com** | A copy of the completed PDF, emailed the moment the last party signs | Automatic. Dropbox Sign mails the sender. |
+| **The player's own inbox** | Their copy of the same PDF | Automatic. |
+
+**Supabase stores nothing about the agreement, deliberately.** There is no
+`agreements` table and no webhook, because there is nothing to gain from one:
+the coach's own inbox already gets the signed PDF the moment it is signed, and
+Dropbox Sign's Documents tab is the searchable list of who has signed. Chasing
+that into Postgres would also cost real money — Dropbox Sign sells the web app
+and the API as two separate subscriptions, the **$15/mo Essentials** plan carries
+**no API key**, and callbacks are an API feature. API plans start around
+**$75/mo**.
+
+**The operational rule:** no signed agreement in the inbox = they have not
+signed = they do not start. That is the whole check.
 
 ## 4. Deploy
 

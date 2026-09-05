@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TextInput, StyleSheet } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
@@ -19,7 +19,7 @@ const WORDMARK = 'The System';
 // pressing LOGIN dissolves this card from the TOP DOWN with <HoloDissolve>, and
 // the landing card's <HoloBuild> then clears from the BOTTOM UP — the same
 // build-front travelling the whole way, so the two screens read as one motion.
-export default function LoginScreen({ onJoin }) {
+export default function LoginScreen() {
   const [email, setEmail]       = useState('');
   const [password, setPassword] = useState('');
   const [error, setError]       = useState('');
@@ -115,23 +115,6 @@ export default function LoginScreen({ onJoin }) {
             textStyle={styles.loginBtnText}
           />
         </View>
-
-        {/* The funnel. There is no self-serve sign-up, so anyone who installed
-           the app off the store is stuck on this card — this is the only door
-           they have. Deliberately quiet: a member signing in should never
-           mistake it for the action. */}
-        {onJoin ? (
-          <TouchableOpacity
-            onPress={onJoin}
-            disabled={leaving}
-            activeOpacity={0.7}
-            style={styles.joinLink}
-            hitSlop={{ top: 14, bottom: 14, left: 20, right: 20 }}
-          >
-            <Text style={styles.joinLinkText}>I don't have an account</Text>
-            <View style={styles.joinUnderline} />
-          </TouchableOpacity>
-        ) : null}
       </View>
     </ScreenFrame>
   );
@@ -182,11 +165,4 @@ const styles = StyleSheet.create({
     borderWidth: 1.5, borderColor: '#FF4444', borderRadius: 10, padding: 14,
   },
   errorText: { fontFamily: F.bodyMed, fontSize: 16, color: '#FF6B6B', letterSpacing: 0.4, lineHeight: 23 },
-
-  joinLink: { marginTop: 40, alignSelf: 'center', alignItems: 'center' },
-  joinLinkText: { fontFamily: F.bodyMed, fontSize: 19, color: '#5f8199', letterSpacing: 1 },
-  joinUnderline: {
-    height: 1, alignSelf: 'stretch', marginTop: 3,
-    backgroundColor: 'rgba(95,129,153,0.45)',
-  },
 });

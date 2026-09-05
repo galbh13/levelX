@@ -132,6 +132,8 @@ The central user table. One row per auth user.
 | `avatar_path` | text | Storage path of the portrait inside `profile-media` — kept so a REPLACE upload can delete the previous file (these are permanent, so uploads replace instead of accumulate). |
 | `signature_video_url` | text | **Signature-move clip** — H.264 delivery URL of the player's one showcase video, **hosted on Cloudinary** (NOT Supabase). `NULL` = none. Cloudinary transcodes the phone's HEVC recording to H.264 so it plays on desktop browsers too. |
 | `signature_video_path` | text | The clip's **Cloudinary `public_id`** (e.g. `signatures/abc123`). Legacy rows (pre-Cloudinary) instead hold a Supabase `profile-media` path (`<uid>/signature-…`). |
+| `bio` | text | **The player's own words on the PROFILE tab** — who they are as a player. Free text (client-capped at 600 chars), written by the player on the PLAYER & GOALS node; nothing is derived from it. `NULL` = not written yet. Added in `migrations/20260904_profile_bio_goal.sql`. |
+| `end_goal` | text | **The outcome the player is chasing**, same node and same rules as `bio`. Added in `migrations/20260904_profile_bio_goal.sql`. |
 | `must_change_password` | boolean | **The invited player is still on the shared starter password.** `NOT NULL DEFAULT false`; set `true` for every account created by the `invite-player` edge function. While it's true, `App.js` renders `SetPasswordScreen` instead of the app (no skip, no navigator); setting a password clears it. Added in `migrations/20260825_invite_player.sql`. See "Player invites" below. |
 | `created_at` | timestamptz | Auto |
 
@@ -936,11 +938,19 @@ Admin-authored challenges. Added in `migrations/20260607_challenges.sql`.
 **Used by:** nothing (orphaned — see the UI REMOVED note above).
 
 ### Community — `community_groups` / `community_group_members` / `community_challenges`
+> **NO CODE TOUCHES ANY `community_*` TABLE (or `coach_messages`) SINCE
+> 2026-09-04.** The whole community layer — its four screens and
+> `lib/community.js` — was deleted; see CLAUDE.md "Community — DELETED". The
+> tables, their migrations and their rows were deliberately KEPT: they hold real
+> history and cost nothing idle. Everything below documents what the schema is,
+> not something the app runs. Dropping them needs an explicit call and a
+> migration, and there is no undo.
+
 The **Community** feature (2026-07-17). A group is a small set of players; each
 group has its own challenges only its members see. A player can belong to MANY
-groups. The **admin owns the structure** (creates groups, sets members, authors
-challenges); players get a read-only COMMUNITY tab. Added in
-`migrations/20260717_community.sql`. Helpers in [lib/community.js](lib/community.js).
+groups. The **admin owned the structure** (created groups, set members, authored
+challenges); players got a read-only COMMUNITY tab. Added in
+`migrations/20260717_community.sql`. Helpers lived in the deleted `lib/community.js`.
 (Distinct from the orphaned `challenges` table above — that is a different,
 removed feature.)
 
@@ -1248,7 +1258,17 @@ The price list. Pointed at by `player_billing.plan_id`.
 
 Seeded with STANDARD / ELITE / FAMILY / TRIAL **only on a virgin install**
 (`where not exists (select 1 from billing_plans)`), so re-running never clobbers
-real plans.
+real plans. **That guard is why a live DB can be missing STANDARD entirely** —
+any database that already held one plan row skipped the whole seed.
+
+**Two plans, one currency (2026-09-03).** `20260903_usd_only_standard_350.sql`
+settles the price list as data: it inserts `STANDARD` if the name is absent, then
+forces it to **$350 / USD / active**, sets FAMILY to USD, and retires (`active =
+false`) every other name. `billing_settings.default_currency` goes to `'USD'` and
+any `player_billing.currency_override = 'ILS'` is nulled. **`payments` is not
+touched** — a shekel row is history and stays a shekel row. The app reads the
+price through `planPrice()` (`PRICING` keyed by plan NAME) and falls back to this
+`price` column, so a plan added later on the PLANS screen prices itself.
 
 ### `player_billing`
 One row per player — the customer file. **No row = never commercially onboarded**
@@ -1311,10 +1331,16 @@ Exactly **one row** (`id boolean primary key default true check (id)`).
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `default_currency` | text | `ILS` / `USD` |
+| `default_currency` | text | `ILS` / `USD` — forced to `USD`; nothing offers a choice any more |
 | `grace_days` | smallint | How long a due charge may sit unpaid before lock (default 7) |
 | `lock_on_overdue` | boolean | **Default `false`** — leave off until payments arrive automatically, or it locks people who paid you in cash |
-| `business_name` | text | Shown as the BUSINESS screen subtitle |
+| `business_name` | text | **Legacy.** The BUSINESS subtitle is the `BUSINESS_NAME` constant in `lib/billing.js` |
+
+**Nothing in the app WRITES this row any more (2026-09-03).** The GENERAL editor
+on the PLANS screen was removed — none of the four fields carried a live
+decision. The row and `fetchSettings()`'s defaults remain because
+`my_access_state()` and `accessState()` still read `grace_days` /
+`lock_on_overdue`.
 
 ### `public.my_access_state()`
 SECURITY DEFINER function, `execute` granted to `authenticated`. The **only**

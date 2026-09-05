@@ -4,11 +4,10 @@ import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator } from
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import {
-  fetchPlans, fetchAllBilling, fetchPayments, fetchSettings,
-  businessSummary, playerMoney, bagText, money, labelOf,
-  SOURCES, STATUSES, todayISO,
+  fetchPlans, fetchAllBilling, fetchPayments,
+  businessSummary, playerMoney, bagText, money, labelOf, isPaused,
+  BUSINESS_NAME, STATUSES, todayISO,
 } from '../lib/billing';
-import { fetchEngagement, riskScore, RISK_COLORS, RISK_LABELS } from '../lib/engagement';
 import { F } from '../constants/fonts';
 import { C } from '../constants/colors';
 import ScreenFrame from '../components/ScreenFrame';
@@ -20,13 +19,16 @@ import { StatTile, Chip, SectionTitle, BIZ } from '../components/BizBits';
 // The money view of the roster. Three bands, top to bottom:
 //
 //   1. KPIs      — MRR (what should arrive), COLLECTED (what did, this month),
-//                  OUTSTANDING, ARPU, avg customer lifespan, 90-day churn.
-//   2. CHANNELS  — lifetime revenue AND average lifespan per acquisition source.
-//                  Read together they answer "where do my long customers come
-//                  from" — the question that decides where the next hour goes.
-//   3. CUSTOMERS — one row per player: plan, LTV, days with you, what they owe,
-//                  and a churn-risk chip computed from their TRAINING activity
-//                  (see lib/engagement.js). Tap through to their money card.
+//                  lifetime revenue, avg customer lifespan and the roster count.
+//   2. CUSTOMERS — one row per player: status, plan, LTV, days with you and
+//                  avg/month. Tap through to their money card.
+//
+// DEBT AND RISK ARE NOT SHOWN HERE, and that is the coach's call (2026-09-04):
+// everyone on this roster pays, so an OWES badge marks nobody, and an AT RISK /
+// HEALTHY chip is a judgement he doesn't want sitting on a player's name. Both
+// chips are gone, and so are the sort keys they explained — the list now reads
+// biggest customer first, then alphabetical. `lib/engagement.js` still exists
+// and still backs the risk math; this screen simply no longer queries it.
 //
 // Everything here is admin-only at the RLS level — a player cannot read any of
 // these tables (migration 20260825_business_billing.sql).
@@ -39,7 +41,7 @@ const FILTERS = [
   { key: 'all',     label: 'ALL' },
   { key: 'active',  label: 'ACTIVE' },
   { key: 'churned', label: 'FINISHED' },
-  { key: 'unset',   label: 'NOT SET UP' },
+  { key: 'paused',  label: 'PAUSED' },
 ];
 
 export default function AdminBusinessScreen({ navigation }) {
@@ -49,8 +51,6 @@ export default function AdminBusinessScreen({ navigation }) {
   const [billings, setBillings] = useState({});
   const [plans, setPlans] = useState([]);
   const [payments, setPayments] = useState([]);
-  const [settings, setSettings] = useState(null);
-  const [engagement, setEngagement] = useState({});
   const [filter, setFilter] = useState('all');
   const [error, setError] = useState(null);
 
@@ -67,19 +67,15 @@ export default function AdminBusinessScreen({ navigation }) {
       if (rErr) throw rErr;
       const list = roster ?? [];
 
-      const [b, pl, pay, st, eng] = await Promise.all([
+      const [b, pl, pay] = await Promise.all([
         fetchAllBilling(),
         fetchPlans(),
         fetchPayments(),
-        fetchSettings(),
-        fetchEngagement(list.map((p) => p.id), { today }),
       ]);
       setPlayers(list);
       setBillings(b);
       setPlans(pl);
       setPayments(pay);
-      setSettings(st);
-      setEngagement(eng);
     } catch (e) {
       console.error('[AdminBusiness] load:', e);
       // The most likely cause by far is the migration not being applied yet.
@@ -109,34 +105,31 @@ export default function AdminBusinessScreen({ navigation }) {
     [players, billings, plans, payments, today],
   );
 
-  // One derived row per player — money + risk, ready to sort and filter.
+  // One derived row per player — money only, ready to sort and filter.
   const rows = useMemo(() => {
     return players.map((p) => {
       const b = billings[p.id] ?? null;
       const plan = b?.plan_id ? planById[b.plan_id] : null;
       const pays = payByPlayer[p.id] ?? [];
-      const m = playerMoney(b, plan, pays, today);
-      const risk = b && b.status !== 'churned' && !b.ended_at
-        ? riskScore(engagement[p.id], b, today)
-        : { score: 0, band: 'new', reason: '' };
-      return { player: p, billing: b, plan, money: m, risk };
+      return { player: p, billing: b, plan, money: playerMoney(b, plan, pays, today) };
     });
-  }, [players, billings, planById, payByPlayer, engagement, today]);
+  }, [players, billings, planById, payByPlayer, today]);
 
   const filtered = useMemo(() => {
     const churnedRow = (r) => r.billing?.status === 'churned' || !!r.billing?.ended_at;
     let list = rows;
     if (filter === 'active')  list = rows.filter((r) => r.billing && !churnedRow(r));
     if (filter === 'churned') list = rows.filter(churnedRow);
-    if (filter === 'unset')   list = rows.filter((r) => !r.billing);
-    // Money first, then the people about to leave, then everyone else.
+    if (filter === 'paused')  list = rows.filter((r) => isPaused(r.billing, today));
+    // Biggest customer first, then alphabetical. The list used to lead on WHO
+    // OWES and then on churn risk — neither is shown any more (see the header
+    // note), and an ordering nothing on screen explains is just a mystery.
     return [...list].sort((a, b) => {
-      const owed = (r) => r.money.outstanding.ILS + r.money.outstanding.USD;
-      if (owed(b) !== owed(a)) return owed(b) - owed(a);
-      if (b.risk.score !== a.risk.score) return b.risk.score - a.risk.score;
-      return (b.money.lifetime.ILS + b.money.lifetime.USD) - (a.money.lifetime.ILS + a.money.lifetime.USD);
+      const ltv = (r) => r.money.lifetime.ILS + r.money.lifetime.USD;
+      if (ltv(b) !== ltv(a)) return ltv(b) - ltv(a);
+      return (a.player.full_name ?? '').localeCompare(b.player.full_name ?? '');
     });
-  }, [rows, filter]);
+  }, [rows, filter, today]);
 
   function openPlayer(row) {
     setSelectedStudent(row.player);
@@ -148,7 +141,7 @@ export default function AdminBusinessScreen({ navigation }) {
       <View style={styles.card}>
         <ScreenHeader
           title="BUSINESS"
-          subtitle={settings?.business_name || 'Money · retention · customers'}
+          subtitle={BUSINESS_NAME}
           onBack={() => navigation.goBack()}
           right={
             <PillButton
@@ -190,11 +183,6 @@ export default function AdminBusinessScreen({ navigation }) {
                 sub={monthName(today)}
                 tone="gold"
               />
-              <StatTile
-                label="ARPU"
-                value={bagText(summary.arpu)}
-                sub="per paying customer"
-              />
             </View>
 
             <View style={styles.grid}>
@@ -210,42 +198,11 @@ export default function AdminBusinessScreen({ navigation }) {
                 sub={summary.churned ? `${summary.churned} left so far` : 'no one has left yet'}
               />
               <StatTile
-                label="CHURN (90D)"
-                value={`${summary.churnRate}%`}
-                sub={`${summary.churned90} left in 90 days`}
-                tone={summary.churnRate >= 20 ? 'alert' : 'muted'}
-              />
-              <StatTile
                 label="ROSTER"
                 value={String(summary.total)}
                 sub={`${summary.active} active · ${summary.paused} paused · ${summary.churned} finished`}
               />
             </View>
-
-            {/* ── Acquisition channels ── */}
-            <SectionTitle>WHERE THEY COME FROM</SectionTitle>
-            {summary.sources.length === 0 ? (
-              <Text style={styles.empty}>No sources recorded yet — set one on each player.</Text>
-            ) : (
-              <View style={styles.table}>
-                <View style={[styles.trow, styles.thead]}>
-                  <Text style={[styles.th, styles.colSource]}>CHANNEL</Text>
-                  <Text style={[styles.th, styles.colNum]}>PLAYERS</Text>
-                  <Text style={[styles.th, styles.colMoney]}>REVENUE</Text>
-                  <Text style={[styles.th, styles.colNum]}>AVG STAY</Text>
-                </View>
-                {summary.sources.map((s) => (
-                  <View key={s.source} style={styles.trow}>
-                    <Text style={[styles.td, styles.colSource]} numberOfLines={1}>
-                      {s.source === 'unknown' ? 'NOT RECORDED' : labelOf(SOURCES, s.source, s.source.toUpperCase())}
-                    </Text>
-                    <Text style={[styles.td, styles.colNum]}>{s.count}</Text>
-                    <Text style={[styles.td, styles.colMoney, styles.tdGold]}>{bagText(s.revenue)}</Text>
-                    <Text style={[styles.td, styles.colNum]}>{s.avgDays ? `${s.avgDays}d` : '—'}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
 
             {/* ── Customers ── */}
             <SectionTitle>CUSTOMERS</SectionTitle>
@@ -268,10 +225,6 @@ export default function AdminBusinessScreen({ navigation }) {
               ))
             )}
 
-            <Text style={styles.footnote}>
-              Risk is computed from training activity in the last 28 days — workouts completed,
-              daily quests, and the last check-up. It moves BEFORE the money does.
-            </Text>
           </ScrollView>
         )}
       </View>
@@ -281,9 +234,8 @@ export default function AdminBusinessScreen({ navigation }) {
 
 // ─── One customer row ────────────────────────────────────────────────────────
 function CustomerRow({ row, onPress }) {
-  const { player, billing, plan, money: m, risk } = row;
+  const { player, billing, plan, money: m } = row;
   const churned = billing?.status === 'churned' || !!billing?.ended_at;
-  const owes = m.outstanding.ILS || m.outstanding.USD;
 
   return (
     <Pressable onPress={onPress} style={[styles.row, churned && styles.rowDim]}>
@@ -300,10 +252,6 @@ function CustomerRow({ row, onPress }) {
               <Chip label="NOT SET UP" color={BIZ.muted} />
             )}
             {plan ? <Chip label={plan.name} color={m.free ? BIZ.muted : BIZ.accent} /> : null}
-            {billing && !churned ? (
-              <Chip label={RISK_LABELS[risk.band]} color={RISK_COLORS[risk.band]} />
-            ) : null}
-            {owes ? <Chip label={`OWES ${bagText(m.outstanding)}`} color={BIZ.alert} solid /> : null}
           </View>
         </View>
         <Text style={styles.chevron}>›</Text>
@@ -351,23 +299,6 @@ const styles = StyleSheet.create({
   errorText: { fontFamily: F.body, fontSize: 14, color: '#FF6B85' },
   errorHint: { fontFamily: F.bodyMed, fontSize: 12, color: BIZ.muted, marginTop: 6 },
 
-  table: {
-    borderWidth: 1, borderColor: BIZ.border, borderRadius: 12,
-    backgroundColor: BIZ.panel, overflow: 'hidden',
-  },
-  trow: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingVertical: 11, paddingHorizontal: 14, gap: 10,
-    borderTopWidth: 1, borderTopColor: 'rgba(74,158,191,0.12)',
-  },
-  thead: { borderTopWidth: 0, backgroundColor: 'rgba(74,158,191,0.07)' },
-  th: { fontFamily: F.heading, fontSize: 11, letterSpacing: 2, color: BIZ.muted },
-  td: { fontFamily: F.bodyMed, fontSize: 14, color: BIZ.text },
-  tdGold: { fontFamily: F.body, color: BIZ.gold },
-  colSource: { flex: 2 },
-  colNum: { flex: 1, textAlign: 'right' },
-  colMoney: { flex: 1.4, textAlign: 'right' },
-
   filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 },
   filterPill: {
     borderRadius: 999, borderWidth: 1, borderColor: 'rgba(74,158,191,0.25)',
@@ -408,9 +339,5 @@ const styles = StyleSheet.create({
   empty: {
     fontFamily: F.bodyMed, fontSize: 14, color: BIZ.muted,
     paddingVertical: 14, letterSpacing: 0.4,
-  },
-  footnote: {
-    fontFamily: F.bodyMed, fontSize: 12, color: BIZ.muted,
-    marginTop: 18, lineHeight: 18, letterSpacing: 0.3,
   },
 });

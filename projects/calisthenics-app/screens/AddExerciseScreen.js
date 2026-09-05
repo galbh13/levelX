@@ -413,9 +413,6 @@ const styles = StyleSheet.create({
   videoUploadedText: {
     fontFamily: F.heading, fontSize: 16, color: SL.accent, letterSpacing: 1.5,
   },
-  videoUploadedSub: {
-    fontFamily: F.bodyMed, fontSize: 11, color: SL.muted, letterSpacing: 0.3, marginTop: 2,
-  },
   videoRemoveBtn: {
     paddingHorizontal: 16, paddingVertical: 9,
     borderWidth: 1, borderColor: 'rgba(138,176,204,0.35)', borderRadius: 999,

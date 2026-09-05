@@ -64,11 +64,19 @@ const ONBOARDING_MESSAGE = "I'm in. Let's book my onboarding call.";
 const ONBOARDING_URL = Deno.env.get('ONBOARDING_URL')
   || `https://wa.me/${COACH_WHATSAPP}?text=${encodeURIComponent(ONBOARDING_MESSAGE)}`;
 
-// ── The coaching agreement / terms of service ────────────────────────────────
-// The document does not exist yet. Unset, the mail reserves its slot as a dead
-// "THE AGREEMENT · SOON" chip rather than a link to nothing. Host the PDF
-// anywhere public (Supabase storage, Drive, the site) and point this at it:
-//   npx supabase secrets set AGREEMENT_URL=https://.../the-system-agreement.pdf
+// ── The coaching agreement ───────────────────────────────────────────────────
+// A DROPBOX SIGN TEMPLATE LINK, not a PDF: one public URL, the same for every
+// player, that drops them into the agreement with their own signature fields.
+// Dropbox Sign → Templates → the template → ··· → Create link.
+//   npx supabase secrets set AGREEMENT_URL=https://app.hellosign.com/s/xxxxxxxx
+// Unset, the mail reserves its slot as a dead "THE AGREEMENT · SOON" chip.
+//
+// The signed PDF is filed in the coach's Dropbox Sign account and emailed to
+// BOTH SIDES — which is the whole tracking system. Nothing about the agreement
+// is stored in Supabase on purpose: notifying it would need a Dropbox Sign API
+// subscription (separate from, and far dearer than, the $15/mo app plan), to
+// learn something the coach's own inbox already tells him. No agreement in the
+// inbox = not signed. See supabase/functions/README.md § "The coaching agreement".
 const AGREEMENT_URL = Deno.env.get('AGREEMENT_URL') ?? '';
 
 // The WhatsApp community, as two buttons near the bottom of the welcome email.

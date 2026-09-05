@@ -29,13 +29,11 @@ import SkillsScreen      from './screens/SkillsScreen';
 import WorkoutsScreen    from './screens/WorkoutsScreen';
 import CheckupScreen      from './screens/CheckupScreen';
 import LoginScreen           from './screens/LoginScreen';
-import JoinScreen            from './screens/JoinScreen';
 import SetPasswordScreen     from './screens/SetPasswordScreen';
 import AdminDashboard        from './screens/AdminDashboard';
 import PlayerAdminScreen     from './screens/PlayerAdminScreen';
 import AdminCheckupScreen    from './screens/AdminCheckupScreen';
 import AdminCheckupTemplateScreen from './screens/AdminCheckupTemplateScreen';
-import StudentDetailScreen   from './screens/StudentDetailScreen';
 import WorkoutDetailScreen   from './screens/WorkoutDetailScreen';
 import WorkoutModeScreen     from './screens/WorkoutModeScreen';
 import WorkoutSummaryScreen  from './screens/WorkoutSummaryScreen';
@@ -49,12 +47,7 @@ import EliteWorkoutsScreen     from './screens/EliteWorkoutsScreen';
 import DailyQuestScreen        from './screens/CoachDailyQuestScreen';
 import QuestTreeScreen         from './screens/QuestTreeScreen';
 import PersonalScreen          from './screens/PersonalScreen';
-import CommunityGroupScreen    from './screens/CommunityGroupScreen';
-import CommunityChatScreen     from './screens/CommunityChatScreen';
 import HunterStatusScreen      from './screens/HunterStatusScreen';
-import SystemScreen            from './screens/SystemScreen';
-import AdminCommunityScreen    from './screens/AdminCommunityScreen';
-import AdminGroupScreen        from './screens/AdminGroupScreen';
 import AdminCheckupInboxScreen from './screens/AdminCheckupInboxScreen';
 import AdminBusinessScreen     from './screens/AdminBusinessScreen';
 import AdminPlansScreen        from './screens/AdminPlansScreen';
@@ -157,7 +150,7 @@ const INDICATOR_W = 34;
 // The label a tab SHOWS, when it differs from its route name. The route name is
 // the app's internal address (navigate('Personal'), the guided tour, swipeAtRoot)
 // and renaming it would ripple everywhere — so only the reading changes here.
-const TAB_LABEL = { Personal: 'SYSTEM' };
+const TAB_LABEL = { Personal: 'PROFILE' };
 
 // How long the bar takes to rise, and the safety net if the build never fires.
 const BAR_RISE_MS = 300;
@@ -375,9 +368,10 @@ function SkillsNavigator() {
   );
 }
 
-// Workouts stack now carries the full self-coaching authoring flow: the player
-// schedules / creates / edits their own workouts (Manage = StudentDetailScreen
-// scoped to self) and manages their own daily quests.
+// Workouts stack carries the self-coaching authoring flow: the player schedules
+// and edits their own workouts and manages their own daily quests. (The Manage
+// hub / StudentDetailScreen that used to sit here was deleted 2026-09-04 — it had
+// been orphaned since the Training Forge was retired.)
 function WorkoutsNavigator() {
   return (
     <WorkoutsStack.Navigator screenOptions={{ headerShown: false }}>
@@ -385,7 +379,6 @@ function WorkoutsNavigator() {
       <WorkoutsStack.Screen name="WorkoutDetail"   component={WorkoutDetailScreen} />
       <WorkoutsStack.Screen name="WorkoutMode"     component={WorkoutModeScreen} />
       <WorkoutsStack.Screen name="WorkoutSummary"  component={WorkoutSummaryScreen} />
-      <WorkoutsStack.Screen name="Manage" component={StudentDetailScreen} options={({ route }) => (route.params?.fromForge ? { animation: 'none', presentation: 'transparentModal' } : { animation: 'default' })} />
       <WorkoutsStack.Screen name="WorkoutEdit"     component={WorkoutEditScreen} />
       <WorkoutsStack.Screen name="ExerciseGallery" component={ExerciseGalleryScreen} />
       <WorkoutsStack.Screen name="ExerciseDetail"  component={ExerciseDetailScreen} />
@@ -400,13 +393,19 @@ function WorkoutsNavigator() {
   );
 }
 
-// The System stack (route name `Personal`, label SYSTEM): the five out-of-training
-// pillars — sleep, nutrition, recovery, socialize, mentality.
+// The Profile stack (route name `Personal`, label PROFILE): the player's own page
+// — portrait, the PLAYER & GOALS node they write themselves, the PLAYER CARD node
+// (their status card + signature move) and the locked THE SYSTEM node.
+//
+// HunterStatus lives HERE now (2026-09-04). It used to be registered in the admin
+// stack alone, reachable only from the community group roster — so when that layer
+// was deleted the Player Card would have been left with no way in at all. The
+// PROFILE tab is its natural home: it is the player's own identity page.
 function PersonalNavigator() {
   return (
     <PersonalStack.Navigator screenOptions={{ headerShown: false }}>
       <PersonalStack.Screen name="PersonalList" component={PersonalScreen} />
-      <PersonalStack.Screen name="System"       component={SystemScreen} />
+      <PersonalStack.Screen name="HunterStatus" component={HunterStatusScreen} />
     </PersonalStack.Navigator>
   );
 }
@@ -429,16 +428,11 @@ function AdminNavigator() {
         <AdminStack.Screen name="WorkoutsList"      component={WorkoutsScreen} />
         <AdminStack.Screen name="SkillsList"        component={SkillsScreen} />
         <AdminStack.Screen name="QuestTree"         component={QuestTreeScreen} />
-        <AdminStack.Screen name="Manage" component={StudentDetailScreen} options={({ route }) => (route.params?.fromForge ? { animation: 'none', presentation: 'transparentModal' } : { animation: 'default' })} />
         <AdminStack.Screen name="DailyQuest" component={DailyQuestScreen} options={{ presentation: 'transparentModal', animation: 'fade' }} />
         <AdminStack.Screen name="AllWorkouts"       component={AllWorkoutsScreen} />
         <AdminStack.Screen name="EliteWorkouts"     component={EliteWorkoutsScreen} />
         <AdminStack.Screen name="WorkoutEdit"       component={WorkoutEditScreen} />
         <AdminStack.Screen name="WorkoutDetail"     component={WorkoutDetailScreen} />
-        <AdminStack.Screen name="AdminCommunity"    component={AdminCommunityScreen} />
-        <AdminStack.Screen name="AdminGroup"        component={AdminGroupScreen} />
-        <AdminStack.Screen name="CommunityChat"     component={CommunityChatScreen} />
-        <AdminStack.Screen name="HunterStatus"      component={HunterStatusScreen} />
         <AdminStack.Screen name="CheckupInbox"      component={AdminCheckupInboxScreen} />
         {/* Business layer — admin-only money surfaces (migration 20260825_business_billing). */}
         <AdminStack.Screen name="Business"          component={AdminBusinessScreen} />
@@ -451,8 +445,8 @@ function AdminNavigator() {
 }
 
 // Seeds the shared "selected student" context with the logged-in player's own
-// profile. Self-coaching screens (StudentDetail/Manage, DailyQuest)
-// were originally written for a coach acting on a student; pointing that subject
+// profile. Self-coaching screens (WorkoutsScreen, DailyQuest) were originally
+// written for a coach acting on a student; pointing that subject
 // at the player themselves makes the player their own coach with zero rewrites.
 function SelfStudentSync() {
   const { setSelectedStudent } = useCoach();
@@ -634,10 +628,6 @@ export default function App() {
 
   const [session, setSession] = useState(undefined); // undefined = loading
   const [role, setRole]       = useState(null);
-  // Logged-out only: swaps the login card for the recruitment page. Plain state
-  // rather than a route because the logged-out tree has NO navigator (see the
-  // comment on the `!session` branch below).
-  const [joining, setJoining] = useState(false);
   // An invited player still holding the shared starter password — the app is
   // blocked behind SetPasswordScreen until they pick their own.
   const [mustChangePw, setMustChangePw] = useState(false);
@@ -754,9 +744,7 @@ export default function App() {
       return (
         <ScaledRoot>
           <NavigationContainer theme={NAV_THEME}>
-            {joining
-              ? <JoinScreen onBack={() => setJoining(false)} />
-              : <LoginScreen onJoin={() => setJoining(true)} />}
+            <LoginScreen />
           </NavigationContainer>
         </ScaledRoot>
       );

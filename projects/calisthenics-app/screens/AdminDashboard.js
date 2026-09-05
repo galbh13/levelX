@@ -9,11 +9,15 @@ import { useCoach } from '../context/CoachContext';
 import { useAdminNotify } from '../context/AdminNotifyContext';
 import { prestigeStars } from '../lib/prestige';
 import {
-  invitePlayer, isValidEmail, isValidPhone, isValidBirthday, normalizePhone, STARTER_PASSWORD,
+  invitePlayer, isValidEmail, isValidPhone, isValidBirthday,
 } from '../lib/invites';
 import { DEFAULT_JOB } from '../lib/jobs';
 import { F } from '../constants/fonts';
 import ScreenFrame from '../components/ScreenFrame';
+import BirthdayPicker, { birthdayToISO, isPartialBirthday } from '../components/BirthdayPicker';
+
+// Nothing picked yet — the legal "this coach doesn't know the birthday" answer.
+const EMPTY_BDAY = { y: null, m: null, d: null };
 
 const SL = {
   bg:        '#050912',
@@ -141,31 +145,34 @@ function NotifyBtn({ label, count, tone = 'alert', onPress, width }) {
 //
 // Phone and birthday are asked for here because this is the ONE moment the coach
 // has them in hand. They land on `profiles` as the player's GLOBAL contact
-// details — the same two values the BUSINESS card shows — and the phone is
-// repeated back on the success card ready to paste into WhatsApp.
+// details — the same two values the BUSINESS card shows. The success card
+// repeats NOTHING back: the welcome email carries the password and the WhatsApp
+// invites, so the card is the title and DONE.
 function InviteModal({ visible, onClose, onInvited }) {
   const [email,    setEmail]    = useState('');
   const [fullName, setFullName] = useState('');
   const [phone,    setPhone]    = useState('');
-  const [birthday, setBirthday] = useState('');
+  const [bday,     setBday]     = useState(EMPTY_BDAY);
   const [busy,     setBusy]     = useState(false);
   const [error,    setError]    = useState('');
-  const [done,     setDone]     = useState(null); // { email, phone, emailed, warning }
+  const [done,     setDone]     = useState(null); // { emailed, warning }
 
   // Reopening is always a blank slate — a stale success card or error from the
   // last invite must never greet the next one.
   useEffect(() => {
     if (visible) {
-      setEmail(''); setFullName(''); setPhone(''); setBirthday('');
+      setEmail(''); setFullName(''); setPhone(''); setBday(EMPTY_BDAY);
       setError(''); setDone(null); setBusy(false);
     }
   }, [visible]);
 
   // Birthday is the one optional field — a coach who doesn't know it yet can
-  // fill it in later on the business card. A half-typed date still blocks.
+  // fill it in later on the business card. It's PICKED, not typed (day · month ·
+  // year columns), so the only invalid state left is a half-picked one.
+  const birthday = birthdayToISO(bday);
   const canSubmit =
     isValidEmail(email) && fullName.trim().length > 0 &&
-    isValidPhone(phone) && isValidBirthday(birthday) && !busy;
+    isValidPhone(phone) && !isPartialBirthday(bday) && isValidBirthday(birthday) && !busy;
 
   async function submit() {
     if (!canSubmit) return;
@@ -173,12 +180,7 @@ function InviteModal({ visible, onClose, onInvited }) {
     setError('');
     try {
       const res = await invitePlayer({ email, fullName, phone, birthday });
-      setDone({
-        email: email.trim().toLowerCase(),
-        phone: res?.phone || normalizePhone(phone),
-        emailed: res?.emailed !== false,
-        warning: res?.warning,
-      });
+      setDone({ emailed: res?.emailed !== false, warning: res?.warning });
       onInvited?.();                      // refresh the roster behind the modal
     } catch (e) {
       setError(e?.message || 'Could not create the account.');
@@ -190,35 +192,30 @@ function InviteModal({ visible, onClose, onInvited }) {
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.modalBackdrop}>
+        {/* The card is capped at the backdrop's height and scrolls inside it —
+            the form is taller than a phone once the birthday picker is in it,
+            and a card that overflows puts CREATE off the bottom of the screen. */}
         <View style={styles.modalCard}>
+        <ScrollView
+          contentContainerStyle={styles.modalScroll}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
           <Text style={styles.modalTitle}>{done ? 'PLAYER IS IN' : 'NEW PLAYER'}</Text>
           <View style={styles.modalRule} />
 
+          {/* The success card is a receipt, not a briefing: the account exists,
+              the welcome email carries the password and the WhatsApp invites, so
+              repeating any of it here was a wall of text between the coach and
+              the DONE button. The ONE thing kept is the failure line — an email
+              that didn't send is the only outcome the coach must act on. */}
           {done ? (
             <>
-              <Text style={styles.modalBody}>
-                <Text style={styles.modalStrong}>{done.email}</Text> now has an account and
-                can sign in with the starter password below. They will be asked to set
-                their own password the first time they log in.
-              </Text>
-
-              <View style={styles.credBox}>
-                <Text style={styles.credLabel}>PASSWORD</Text>
-                <Text style={styles.credValue}>{STARTER_PASSWORD}</Text>
-                {/* Repeated back so the coach has it to hand — a contact, a call, a
-                    nudge. Joining the WhatsApp groups is NOT manual any more: the welcome
-                    email carries both invite links (see
-                    supabase/functions/invite-player), and they are in the app
-                    too, behind SOCIALIZE on THE SYSTEM tab. */}
-                <Text style={[styles.credLabel, styles.credLabelSpaced]}>PHONE</Text>
-                <Text style={styles.credPhone}>{done.phone}</Text>
-              </View>
-
-              <Text style={[styles.modalNote, done.emailed ? styles.noteOk : styles.noteWarn]}>
-                {done.emailed
-                  ? '✓ Welcome email sent — access + the two WhatsApp invites.'
-                  : (done.warning || 'The welcome email did not send — pass the details on yourself.')}
-              </Text>
+              {done.emailed ? null : (
+                <Text style={styles.modalNote}>
+                  {done.warning || 'The welcome email did not send — pass the details on yourself.'}
+                </Text>
+              )}
 
               <TapScale style={[styles.modalBtn, styles.modalBtnPrimary]} onPress={onClose}>
                 <Text style={styles.modalBtnPrimaryText}>DONE</Text>
@@ -267,40 +264,40 @@ function InviteModal({ visible, onClose, onInvited }) {
               />
 
               {/* Optional — the coach can fill it in later on the business card.
-                  Same YYYY-MM-DD shape that card uses, because it's the same
-                  value: profiles.birthday. */}
+                  PICKED, not typed: it still becomes the same YYYY-MM-DD that
+                  card writes, because it's the same value: profiles.birthday. */}
               <Text style={styles.fieldLabel}>BIRTHDAY · OPTIONAL</Text>
-              <TextInput
-                style={styles.input}
-                value={birthday}
-                onChangeText={setBirthday}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={SL.muted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="numbers-and-punctuation"
-                editable={!busy}
-                onSubmitEditing={submit}
-              />
+              <View style={styles.bdayField}>
+                <BirthdayPicker value={bday} onChange={setBday} disabled={busy} />
+              </View>
 
               {error ? <Text style={styles.modalError}>{error}</Text> : null}
 
+              {/* Each button is wrapped in a flexed View: TapScale's own
+                  Pressable carries no style, so `flex: 1` on the inner card
+                  never reached the row — the buttons sized to their text and
+                  CREATE grew past the card's edge. */}
               <View style={styles.modalActions}>
-                <TapScale style={styles.modalBtn} onPress={busy ? undefined : onClose} disabled={busy}>
-                  <Text style={styles.modalBtnText}>CANCEL</Text>
-                </TapScale>
-                <TapScale
-                  style={[styles.modalBtn, styles.modalBtnPrimary, !canSubmit && styles.modalBtnOff]}
-                  onPress={submit}
-                  disabled={!canSubmit}
-                >
-                  {busy
-                    ? <ActivityIndicator size="small" color={SL.accent} />
-                    : <Text style={styles.modalBtnPrimaryText}>CREATE &amp; EMAIL</Text>}
-                </TapScale>
+                <View style={styles.modalAction}>
+                  <TapScale style={styles.modalBtn} onPress={busy ? undefined : onClose} disabled={busy}>
+                    <Text style={styles.modalBtnText} numberOfLines={1}>CANCEL</Text>
+                  </TapScale>
+                </View>
+                <View style={styles.modalAction}>
+                  <TapScale
+                    style={[styles.modalBtn, styles.modalBtnPrimary, !canSubmit && styles.modalBtnOff]}
+                    onPress={submit}
+                    disabled={!canSubmit}
+                  >
+                    {busy
+                      ? <ActivityIndicator size="small" color={SL.accent} />
+                      : <Text style={styles.modalBtnPrimaryText} numberOfLines={1}>CREATE</Text>}
+                  </TapScale>
+                </View>
               </View>
             </>
           )}
+        </ScrollView>
         </View>
       </View>
     </Modal>
@@ -698,16 +695,17 @@ const styles = StyleSheet.create({
   modalCard: {
     width: '100%',
     maxWidth: 600,
+    maxHeight: '100%',
     backgroundColor: SL.panel,
     borderWidth: 2,
     borderColor: SL.border,
     borderRadius: 18,
-    padding: 40,
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.35, shadowRadius: 20,
   },
+  modalScroll: { padding: 26 },
   modalTitle: {
     fontFamily: F.heading,
-    fontSize: 34,
+    fontSize: 28,
     color: SL.gold,
     letterSpacing: 6,
     textAlign: 'center',
@@ -715,36 +713,29 @@ const styles = StyleSheet.create({
   modalRule: {
     height: 2,
     backgroundColor: SL.border,
-    marginTop: 18,
-    marginBottom: 26,
+    marginTop: 14,
+    marginBottom: 20,
   },
-  modalBody: {
-    fontFamily: F.bodyMed,
-    fontSize: 16,
-    lineHeight: 25,
-    color: SL.text,
-    marginBottom: 26,
-  },
-  modalStrong: { fontFamily: F.body, color: SL.gold },
   fieldLabel: {
     fontFamily: F.heading,
-    fontSize: 14,
+    fontSize: 13,
     color: SL.accent,
     letterSpacing: 3,
-    marginBottom: 10,
+    marginBottom: 8,
   },
   input: {
     backgroundColor: SL.panelAlt,
     borderWidth: 1.5,
     borderColor: SL.border,
     borderRadius: 12,
-    paddingHorizontal: 18,
-    paddingVertical: 17,
+    paddingHorizontal: 16,
+    paddingVertical: 13,
     fontFamily: F.body,
-    fontSize: 19,
+    fontSize: 17,
     color: SL.text,
-    marginBottom: 22,
+    marginBottom: 16,
   },
+  bdayField: { marginBottom: 16 },
   modalError: {
     fontFamily: F.body,
     fontSize: 15,
@@ -752,22 +743,23 @@ const styles = StyleSheet.create({
     color: SL.alert,
     marginBottom: 18,
   },
-  modalActions: { flexDirection: 'row', gap: 14, marginTop: 6 },
+  modalActions: { flexDirection: 'row', gap: 12, marginTop: 4 },
+  modalAction: { flex: 1 },
   modalBtn: {
-    flex: 1,
     borderWidth: 2,
     borderColor: SL.border,
     borderRadius: 999,
-    paddingVertical: 17,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 60,
+    minHeight: 46,
   },
   modalBtnText: {
     fontFamily: F.heading,
-    fontSize: 16,
+    fontSize: 14,
     color: SL.muted,
-    letterSpacing: 2.5,
+    letterSpacing: 2,
   },
   modalBtnPrimary: {
     borderColor: SL.accent,
@@ -776,55 +768,22 @@ const styles = StyleSheet.create({
   },
   modalBtnPrimaryText: {
     fontFamily: F.heading,
-    fontSize: 16,
+    fontSize: 14,
     color: SL.accent,
-    letterSpacing: 2.5,
+    letterSpacing: 2,
   },
   modalBtnOff: { opacity: 0.4 },
 
-  // Success card — the starter password stays readable so the coach can pass it
-  // on by hand if the email never lands.
-  credBox: {
-    backgroundColor: SL.panelAlt,
-    borderWidth: 1.5,
-    borderColor: SL.border,
-    borderRadius: 12,
-    paddingVertical: 22,
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  credLabel: {
-    fontFamily: F.heading,
-    fontSize: 13,
-    color: SL.muted,
-    letterSpacing: 3,
-    marginBottom: 9,
-  },
-  credValue: {
-    fontFamily: F.heading,
-    fontSize: 30,
-    color: SL.gold,
-    letterSpacing: 6,
-  },
-  // The phone sits under the password in the same box — same readout, quieter
-  // ink, because the password is the one the player is waiting on.
-  credLabelSpaced: {
-    marginTop: 20,
-  },
-  credPhone: {
-    fontFamily: F.heading,
-    fontSize: 22,
-    color: SL.accent,
-    letterSpacing: 3,
-  },
+  // The one line the success card can still show: the account exists but the
+  // welcome email did not go out, which the coach has to act on.
   modalNote: {
     fontFamily: F.body,
-    fontSize: 16,
+    fontSize: 15,
+    lineHeight: 22,
     textAlign: 'center',
-    marginBottom: 26,
+    color: SL.alert,
+    marginBottom: 22,
   },
-  noteOk:   { color: SL.jade },
-  noteWarn: { color: SL.alert },
 
   // SIGN OUT pill — same ice-glow pill, but laid out as a row so the power
   // glyph sits before the label.

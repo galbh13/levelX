@@ -186,3 +186,44 @@ export async function removeSignatureVideo(userId) {
     await supabase.storage.from(PROFILE_BUCKET).remove([p]).catch(() => {});
   }
 }
+
+// ── The player's own words (PROFILE tab) ────────────────────────────────────
+// `bio` + `end_goal` on `profiles` (migration 20260904_profile_bio_goal.sql).
+// Free text, written by the player on the PLAYER & GOALS node, read by nobody
+// else — nothing is derived from them.
+
+export const MAX_NOTE_CHARS = 600;
+
+// Read them. Fetched SEPARATELY from fetchHunterProfile on purpose: if the live
+// schema hasn't got the columns yet, PostgREST fails the WHOLE select, and
+// folding them into the Player Card's query would take that screen down with
+// them. Here a missing column just means "no notes yet" — the screen still
+// renders, and the save path reports the real error loudly.
+export async function fetchPlayerNotes(userId) {
+  if (!userId) return { bio: '', endGoal: '' };
+  const { data, error } = await supabase
+    .from('profiles').select('bio, end_goal').eq('id', userId).maybeSingle();
+  if (error) {
+    console.error('[profile] fetchPlayerNotes:', error.message);
+    return { bio: '', endGoal: '' };
+  }
+  return { bio: data?.bio ?? '', endGoal: data?.end_goal ?? '' };
+}
+
+// Write them. `.select()` on the update is deliberate — PostgREST reports an
+// update that matched NO rows as a happy success, so without it a row hidden by
+// RLS looks exactly like a save that worked (same reasoning as savePlayerContact).
+export async function savePlayerNotes(userId, { bio, endGoal }) {
+  const { data, error } = await supabase
+    .from('profiles')
+    .update({
+      bio:      (bio ?? '').trim().slice(0, MAX_NOTE_CHARS) || null,
+      end_goal: (endGoal ?? '').trim().slice(0, MAX_NOTE_CHARS) || null,
+    })
+    .eq('id', userId)
+    .select('id');
+  if (error) throw new Error(`Didn't save — ${error.message}`);
+  if (!data?.length) {
+    throw new Error("Didn't save — the profile row wasn't writable (row-level security).");
+  }
+}

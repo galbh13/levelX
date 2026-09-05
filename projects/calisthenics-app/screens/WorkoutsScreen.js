@@ -62,7 +62,7 @@ const editListHeight = (rows) => {
 // The player's Workouts screen skips the Training Forge swipe entirely — DAILY
 // QUESTS and MY WORKOUTS are reached straight from here. A dark "system" panel
 // with a bright static ice edge + glow halo and a tactile press punch (mirrors
-// StudentDetailScreen's ForgeButton so the two screens read the same).
+// the old ForgeButton, kept when that hub was deleted).
 function ActionTile({ label, onPress }) {
   const press = useRef(new Animated.Value(0)).current;
   const onIn  = () => Animated.spring(press, { toValue: 1, useNativeDriver: true, speed: 50, bounciness: 0 }).start();
@@ -1526,10 +1526,6 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     flexShrink: 1,
   },
-  typeTag: {
-    borderWidth: 1, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 1,
-  },
-  typeTagText: { fontFamily: F.bodyMed, fontSize: 10, letterSpacing: 1.5 },
   accDots: {
     flexDirection: 'row', gap: 4, marginTop: 3, justifyContent: 'center', flexWrap: 'wrap',
     position: 'absolute', bottom: 8, left: 0, right: 0,

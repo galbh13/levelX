@@ -11,15 +11,23 @@
 //      comes from the ledger, every "expected" number from the plan, and the gap
 //      between them is what you chase.
 //   2. Currencies are never summed together. There is no FX rate in this app, so
-//      every total is a `{ ILS, USD }` bag (see `emptyBag`). A coach with one
-//      overseas client sees two lines, not one wrong number.
+//      every total is a `{ ILS, USD }` bag (see `emptyBag`). Only USD is sold
+//      today; the ILS slot survives so shekel rows banked before the switch keep
+//      reporting as shekels rather than quietly joining the dollar total.
 
 import { supabase } from './supabase';
 
 // ─── Vocabulary ──────────────────────────────────────────────────────────────
 
+// The business is called THE SYSTEM and always will be, so it is a constant
+// rather than a field somebody has to type. `billing_settings.business_name`
+// still exists in the DB and is simply ignored.
+export const BUSINESS_NAME = 'THE SYSTEM';
+
+// You bill in dollars, full stop. ILS is not offered anywhere any more — the
+// symbol and the bag slot below stay only so historic shekel rows keep
+// displaying as shekels instead of silently reading as dollars.
 export const CURRENCIES = [
-  { key: 'ILS', symbol: '₪' },
   { key: 'USD', symbol: '$' },
 ];
 
@@ -35,35 +43,24 @@ export const STATUSES = [
   { key: 'churned', label: 'FINISHED', desc: 'No longer with you' },
 ];
 
-// One plan, two price tags — not an FX conversion. The currency chosen on the
-// player picks the line they pay.
-export const PRICING = { ILS: 600, USD: 200 };
+// The price list, by plan name. Two plans is the whole offer: STANDARD pays,
+// FAMILY is comped. A name that isn't here falls back to the plan row's own
+// `price` column, so a plan invented on the PLANS screen still prices itself.
+export const PRICING = { STANDARD: 350 };
 
 // What you sell today. Retired plan rows may still sit in `billing_plans` (and
 // must, so historic players keep their link) — this is what the card offers now.
 export const OFFERED_PLANS = ['STANDARD', 'FAMILY'];
 
-// Where the customer came from. The single most useful analytics field here:
-// after a dozen customers this tells you which channel produces the ones who stay.
-// Four channels, because that is all there are: a person sent them (gym, friend,
-// family, word of mouth all collapse to REFERRAL) or a feed did. Old rows may
-// still hold retired keys — `labelOf` falls back to the raw key.
-export const SOURCES = [
-  { key: 'referral',  label: 'REFERRAL' },
-  { key: 'instagram', label: 'INSTAGRAM' },
-  { key: 'tiktok',    label: 'TIKTOK' },
-  { key: 'youtube',   label: 'YOUTUBE' },
-];
+/** The list price of a plan, before any per-player override. */
+export const planPrice = (plan) =>
+  Number(PRICING[String(plan?.name ?? '').toUpperCase()] ?? plan?.price ?? 0);
 
-export const METHODS = [
-  { key: 'bit',      label: 'BIT' },
-  { key: 'paybox',   label: 'PAYBOX' },
-  { key: 'cash',     label: 'CASH' },
-  { key: 'transfer', label: 'TRANSFER' },
-  { key: 'card',     label: 'CARD' },
-  { key: 'paypal',   label: 'PAYPAL' },
-  { key: 'other',    label: 'OTHER' },
-];
+// NOTE (2026-09-04): `SOURCES` (acquisition channel) and `METHODS` (how the money
+// arrived) were deleted with the UI that offered them — the MONEY card stopped
+// setting either, and nothing reads them back. `payments.method` and
+// `billing.source` still exist as columns and old rows keep their values; the
+// lists come back the day a screen asks the question again.
 
 // Coded, not free text — a code aggregates into "3 left over price", a paragraph
 // aggregates into nothing.
@@ -78,15 +75,6 @@ export const CHURN_REASONS = [
   { key: 'other',        label: 'OTHER' },
 ];
 
-// Everything is rolling monthly today. Kept for the day a 3/6/12-month
-// commitment buys a discount — `termEnd` below already does that math.
-export const TERMS = [
-  { key: 1,  label: 'MONTHLY' },
-  { key: 3,  label: '3 MONTHS' },
-  { key: 6,  label: '6 MONTHS' },
-  { key: 12, label: '12 MONTHS' },
-];
-
 export const labelOf = (list, key, fallback = '—') =>
   list.find((x) => String(x.key) === String(key))?.label ?? fallback;
 
@@ -95,8 +83,6 @@ export const labelOf = (list, key, fallback = '—') =>
 // Date object would only re-introduce timezone drift.
 
 export const todayISO = () => new Date().toISOString().slice(0, 10);
-
-export const monthKey = (iso) => (iso ? String(iso).slice(0, 7) : null);
 
 /** First + last day of the month containing `iso` (defaults to today). */
 export function monthRange(iso = todayISO()) {
@@ -117,8 +103,8 @@ export function daysBetween(fromISO, toISO) {
 export const addDays = (iso, n) =>
   new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
 
-/** ₪400 · $50 · ₪1,250.50 — trailing .00 dropped, thousands grouped. */
-export function money(amount, currency = 'ILS') {
+/** $50 · $1,250.50 — trailing .00 dropped, thousands grouped. */
+export function money(amount, currency = 'USD') {
   const n = Number(amount ?? 0);
   const sym = SYMBOL[currency] ?? '';
   const abs = Math.abs(n);
@@ -141,8 +127,8 @@ export function bagAdd(bag, currency, amount) {
 
 export const bagIsZero = (bag) => !bag || (!bag.ILS && !bag.USD);
 
-/** "₪1,200 · $50" — only the currencies actually in play. Zero bag → "₪0". */
-export function bagText(bag, fallbackCurrency = 'ILS') {
+/** "$1,200" — only the currencies actually in play. Zero bag → "$0". */
+export function bagText(bag, fallbackCurrency = 'USD') {
   if (!bag) return money(0, fallbackCurrency);
   const parts = [];
   if (bag.ILS) parts.push(money(bag.ILS, 'ILS'));
@@ -155,14 +141,7 @@ export function bagText(bag, fallbackCurrency = 'ILS') {
 export async function fetchSettings() {
   const { data, error } = await supabase.from('billing_settings').select('*').limit(1).maybeSingle();
   if (error) throw error;
-  return data ?? { id: true, default_currency: 'ILS', grace_days: 7, lock_on_overdue: false };
-}
-
-export async function saveSettings(patch) {
-  const { error } = await supabase
-    .from('billing_settings')
-    .upsert({ id: true, ...patch, updated_at: new Date().toISOString() });
-  if (error) throw error;
+  return data ?? { id: true, default_currency: 'USD', grace_days: 7, lock_on_overdue: false };
 }
 
 export async function fetchPlans({ includeInactive = true } = {}) {
@@ -303,17 +282,6 @@ export async function deletePayment(id) {
   if (error) throw error;
 }
 
-/**
- * Mark a pending charge as received. Kept as one helper because "paid" is two
- * facts — the status AND the date it landed — and forgetting the date silently
- * drops the row out of every month report.
- */
-export async function markPaid(id, { paid_at = todayISO(), method = null } = {}) {
-  const patch = { status: 'paid', paid_at };
-  if (method) patch.method = method;
-  await updatePayment(id, patch);
-}
-
 // ─── Money math ──────────────────────────────────────────────────────────────
 
 /**
@@ -323,12 +291,14 @@ export async function markPaid(id, { paid_at = todayISO(), method = null } = {})
  */
 export function effectivePrice(billing, plan) {
   const free = !!plan?.is_free;
-  const currency = billing?.currency_override || plan?.currency || 'ILS';
-  // The currency IS the price tag (₪600 / $200) — there is no FX rate here. A
-  // stored override still wins, so a special rate agreed in the past survives.
+  // Everything is billed in USD now; a legacy 'ILS' override left on an old row
+  // is ignored rather than obeyed, so nobody goes on being priced in a currency
+  // you no longer take.
+  const currency = 'USD';
+  // A stored override still wins, so a special rate agreed once survives.
   const price = billing?.price_override != null
     ? Number(billing.price_override)
-    : Number(PRICING[currency] ?? plan?.price ?? 0);
+    : planPrice(plan);
   return { price: free ? 0 : price, currency, free };
 }
 
@@ -436,21 +406,9 @@ export function playerMoney(billing, plan, payments = [], today = todayISO()) {
   };
 }
 
-/**
- * `ok` | `grace` | `locked` | `free` — the same rule the DB's `my_access_state()`
- * applies, computed client-side so the admin can SEE who would be locked before
- * ever switching enforcement on.
- */
-export function accessState(billing, plan, payments, settings, today = todayISO()) {
-  if (!billing || effectivePrice(billing, plan).free) return 'free';
-  if (isPaused(billing, today) || billing.status === 'trial') return 'free';
-  const overdue = payments
-    .filter((p) => p.status === 'pending' && p.due_at && p.due_at < today)
-    .map((p) => p.due_at)
-    .sort()[0];
-  if (!overdue) return 'ok';
-  return daysBetween(overdue, today) > Number(settings?.grace_days ?? 7) ? 'locked' : 'grace';
-}
+// NOTE: the client-side `accessState()` mirror of the DB's `my_access_state()`
+// was deleted 2026-09-04 — no screen showed it, locking is still not enforced,
+// and the DB function is untouched and remains the authority if it ever is.
 
 /**
  * The whole-business roll-up behind the BUSINESS screen.

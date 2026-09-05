@@ -148,10 +148,10 @@ const STEPS = [
     title: 'Daily Quests',
     line: 'Tap DAILY QUESTS to set small habits you check off every single day.' },
 
-  // ── THE SYSTEM ── (route name is still `Personal`; only the label changed)
-  { phase: 'THE SYSTEM', tone: 'ice', tab: 'Personal', caption: 'center',
-    title: 'The System',
-    line: 'Everything around the training: sleep, nutrition, recovery, socialize, mentality.' },
+  // ── PROFILE ── (route name is still `Personal`; only the label changed)
+  { phase: 'PROFILE', tone: 'ice', tab: 'Personal', caption: 'center',
+    title: 'Your Profile',
+    line: 'Your picture, who you are as a player, and the end goal you are chasing — write it in your own words. THE SYSTEM node (nutrition, sleep, recovery) opens later.' },
 
   // ── CHECK-UP ──
   // Opens at the TOP of the form, then the SUBMIT step scrolls the player down
@@ -770,7 +770,6 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 6,
   },
-  phase: { fontFamily: F.heading, fontSize: 12, letterSpacing: 3 },
   topRight: { flexDirection: 'row', alignItems: 'center', gap: 14 },
   counter: { fontFamily: F.heading, fontSize: 12, letterSpacing: 1, color: C.textMuted },
   skip: { fontFamily: F.heading, fontSize: 12, letterSpacing: 2, color: C.textMuted },

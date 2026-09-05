@@ -32,11 +32,22 @@ exists.
 - **PHONE + BIRTHDAY are GLOBAL, and they live on `profiles` (2026-08-25).** One
   number and one date per player, typed at invite time — the one moment the coach
   has them in front of them — and shown everywhere they're needed. **The phone is
-  required and it is for WhatsApp**: it is the coach's line to the player, and
-  the success card repeats it back under the starter password. (Joining the
+  required and it is for WhatsApp**: it is the coach's line to the player. (Joining the
   WhatsApp groups is no longer manual — see THE COMMUNITY below.) **The
   birthday is optional**
   (`YYYY-MM-DD`) — it can be filled in later on the business card.
+  · **The birthday is PICKED, not typed (2026-09-05).** `components/BirthdayPicker.js`
+    is three tap-to-select columns — DAY · MONTH · YEAR (90 years back) — controlled
+    with a plain `{ y, m, d }` object so "no birthday at all" stays expressible;
+    `birthdayToISO()` turns it into the same `YYYY-MM-DD` the DB takes, and a
+    half-picked date blocks SUBMIT (`isPartialBirthday`). Tap-to-select and NOT a
+    snapping wheel on purpose: momentum-snap never lands reliably on Expo web,
+    which is the app's first target. The invite card scrolls inside the backdrop
+    (`maxHeight: '100%'`) now that the form is taller than a phone.
+  · **Wrap a `TapScale` in a flexed `<View>` to share a row.** Its `Pressable`
+    carries no style, so a `flex: 1` passed to TapScale lands on the inner
+    `Animated.View` and never reaches the row — which is why the invite modal's
+    CREATE button used to size to its own text and push past the card's edge.
   · Stored normalized on `profiles.phone`: a leading `+` if typed, then digits
     only — the form WhatsApp wants pasted into a contact. Validation is
     deliberately loose (7–15 digits, any separators); the birthday must be a real
@@ -91,9 +102,15 @@ exists.
   needed (which rules out Resend/SendGrid free tiers, whose senders must be a
   verified domain).
 - **A failed email does NOT roll back the account.** The function returns
-  `{ ok: true, emailed: false, warning }` and the modal shows the starter password
-  so the coach can pass it on by hand — deleting a live account over a transient
-  SMTP blip would be worse than an un-emailed one.
+  `{ ok: true, emailed: false, warning }` and the modal shows that warning —
+  deleting a live account over a transient SMTP blip would be worse than an
+  un-emailed one.
+- **The success card is a receipt: the title and DONE, nothing else (2026-09-05).**
+  It used to repeat the email, the starter password, the phone and a "sent"
+  confirmation — a wall of text between the coach and the button, all of it
+  already in the welcome email the player just got. The ONE thing that can still
+  render is the failed-email warning above, because that is the only outcome the
+  coach has to act on. Don't put the password back on it.
 - Migration: `migrations/20260825_invite_player.sql` (adds the column, rewrites the
   trigger) — **must be run on the live Supabase.**
 - **Testing the invite/email path uses Gmail `+` aliases**, not extra mailboxes:
@@ -130,8 +147,8 @@ the word `DELETE` typed out.
 An admin can manage ANY player's account. The mechanism reuses the self-coach
 screens two ways, set when the admin taps a player on the roster:
 - **CoachContext**: `AdminDashboard` calls `setSelectedStudent(player)` before
-  navigating, so the context-scoped screens (`Manage`/StudentDetailScreen,
-  AllWorkouts, EliteWorkouts, DailyQuest) act on that player with no
+  navigating, so the context-scoped screens (AllWorkouts, EliteWorkouts,
+  DailyQuest) act on that player with no
   changes — they already read `selectedStudent`.
 - **`studentId` route param**: `SkillsScreen`, `QuestTreeScreen` and
   `WorkoutsScreen` are auth-user-scoped by default (a player's own tabs). They now
@@ -168,9 +185,10 @@ former coach screens are reused **scoped to the player's own profile**:
 - **QuestTreeScreen** is interactive — tapping a node toggles the player's own
   completion (the only way LVL changes). Same generic `student_quest_completions`
   write as before, with `student_id` = self.
-- **WorkoutsScreen → "Manage My Training"** opens `StudentDetailScreen` (the
-  self workout/calendar authoring hub), which links to `DailyQuestScreen`
-  (`CoachDailyQuestScreen.js`) for self daily-quest management.
+- **WorkoutsScreen** links straight to `DailyQuestScreen`
+  (`CoachDailyQuestScreen.js`) for self daily-quest management. (It used to go via
+  a "Manage My Training" hub, `StudentDetailScreen` — orphaned when the Training
+  Forge was retired 2026-08-13 and **deleted 2026-09-04**.)
 - Routing: `admin` → AdminNavigator; everyone else → PlayerApp.
 
 ## Class & Quest System
@@ -587,182 +605,94 @@ share-tracking params WhatsApp appends when you copy — the bare link is the
 invite. An empty `url` drops that button from the mail rather than sending a
 dead one.
 
-## Community — REMOVED FROM THE PLAYER APP (2026-08-23)
-The community idea (groups, group challenges, group chat, raids, leaderboard) was
-**dropped on the player side** — that social layer lives in WhatsApp instead. What
-changed:
-- The 5th player tab is now **PERSONAL** (`PersonalNavigator` / `PersonalStack`:
-  `PersonalList` = `screens/PersonalScreen.js` → `System`). It holds exactly ONE
-  card: **THE SYSTEM** (purple, placeholder) — the COACH card went with the chat
-  removal (2026-08-26). No group cards, and the **MY PLAYER CARD** entry was
-  removed too (`HunterStatusScreen` still exists and is still reachable from the
-  ADMIN stack — the group rosters; the `PlayerAdminScreen` tile went too, see
-  "Player Profiles").
-- `CommunityScreen.js` is gone (replaced by `PersonalScreen.js`), and
-  `CommunityGroup` / `CommunityChat` / `HunterStatus` are no longer registered in
-  the player stack.
-- The "new challenge" gold tab badge and `context/CommunityNotifyContext.js` were
-  **deleted** (nothing polls `latestChallengeAt()` anymore).
-- **UPDATE 2026-08-25:** the admin's COMMUNITY button was removed from the
-  AdminDashboard too, so the community layer now has **no entry point at all** —
-  the screens below are registered but orphaned. See "Admin inbox".
-- **The ADMIN side is untouched** — `AdminCommunityScreen` / `AdminGroupScreen` /
-  `CommunityGroupScreen` / `CommunityChatScreen`, `lib/community.js` and all the
-  `community_*` tables still exist. `lib/community.js` is still needed for the
-  coach chat (`coach_messages` helpers live there). Strip the admin community
-  screens + tables in a later cleanup if you want them fully gone.
-- The guided tour's COMMUNITY phase became a **PERSONAL** phase (two steps: the
-  intro + `personal.coach`); the playercard/groups steps are gone.
+## Community — DELETED (2026-08-23 dropped · 2026-09-04 removed)
+The community layer (groups, per-group challenges, group chat, raids, group
+leaderboard) is **gone from the codebase**. The social layer is WhatsApp — see
+"THE COMMUNITY — WhatsApp invite links" above, which is the only community
+feature the app still has.
 
-The rest of this section documents the (still-present, admin-only) community
-system as it was built.
+**Deleted on 2026-09-04** (they had been unreachable since the admin's COMMUNITY
+button went in August, so nothing had an entry point on either side):
+`screens/AdminCommunityScreen.js`, `screens/AdminGroupScreen.js`,
+`screens/CommunityGroupScreen.js`, `screens/CommunityChatScreen.js`,
+`lib/community.js`, and the `AdminCommunity` / `AdminGroup` / `CommunityChat`
+routes. (`CommunityScreen.js` and `context/CommunityNotifyContext.js` had already
+gone in August, when the tab became PERSONAL → THE SYSTEM → PROFILE.)
 
-### Original design — groups + per-group challenges (2026-07-17)
-A **COMMUNITY** is built from **groups**: a small set of players (e.g. friends
-training together) who get their own **challenges** to compete on. A player can
-belong to MANY groups. **First-cut scope** — create/read groups, membership, and
-challenges; deeper mechanics (submissions, scoring, leaderboards) come later.
-- **Admin owns the structure.** From the **COMMUNITY** button on the AdminDashboard
-  top bar → `AdminCommunityScreen` (create groups, list them) → `AdminGroupScreen`
-  (toggle which roster players are in the group via a checklist, author/delete the
-  group's challenges, delete the group). Each challenge on `AdminGroupScreen` also
-  shows a **read-only completion view** — the group's members with a check + a
-  `done/total` tally — so the coach sees who did it. Registered in the `AdminStack`.
-- **Player side** — a 5th bottom tab, **COMMUNITY** (`CommunityNavigator`:
-  `CommunityScreen` root = the player's groups → `CommunityGroupScreen` = one
-  group's members + challenges). Players can't edit the structure, but on each
-  challenge every member shows a **check** — a player ticks their OWN off to mark
-  they did it (and sees who else has, with a `done/total` tally). Its header keeps
-  BACK on its own row so the **centered** group name gets full width (doesn't use
-  the shared `ScreenHeader`).
-- **Challenges are DAY-SCOPED, per viewer's timezone.** A challenge is live only on
-  the calendar day it was created — until **midnight (00:00) in each player's OWN
-  device-local timezone**. `startOfTodayISO()` is computed client-side from the
-  device clock, so two members of the same group in different timezones each keep a
-  challenge until their own local midnight (e.g. Israel loses it hours before a US
-  member). Player-facing reads filter `created_at >= startOfTodayISO()` (`todayOnly`
-  on `fetchGroupChallenges`, and the group-card `challengeCount` in `fetchMyGroups`);
-  after their midnight it just stops showing (rows are NOT deleted). Admin's
-  `AdminGroupScreen` is unfiltered — it sees every challenge for oversight.
-- **"New challenge" tab badge.** A small **static gold dot** sits on the COMMUNITY
-  bottom-tab when today has a challenge the player hasn't seen. Driven by
-  `context/CommunityNotifyContext.js` (`CommunityNotifyProvider` wraps `PlayerTabs`;
-  `PlayerTabBar` reads `hasNew`): it compares the newest of today's challenges
-  (`latestChallengeAt()`) against a locally stored last-seen time
-  (AsyncStorage `community:lastSeenChallengeAt`), re-checked on mount + a 60s poll.
-  Opening the Community tab calls `markSeen()` → clears the dot.
-- **Data:** tables `community_groups`, `community_group_members` (M:N, unique
-  `(group_id, player_id)`), `community_challenges`, and
-  `community_challenge_completions` (per-member "I did it", owner-write) — see
-  DATABASE.md and `migrations/20260717_community.sql` +
-  `migrations/20260718_community_challenge_completions.sql`. RLS = additive admin
-  CRUD (`is_admin()`) + member-read via the SECURITY DEFINER helper
-  `is_group_member(gid)` (avoids RLS recursion on the membership table); a
-  `shares_group_with` helper lets co-members read each other's names. Shared
-  helpers: [lib/community.js](lib/community.js).
+**`HunterStatusScreen` (the Player Card) survived and was re-homed.** It hung off
+the group roster, so it would have died with the layer; it is now registered in
+`PersonalStack` and opened by the PLAYER CARD panel on the PROFILE tab — see "The
+PROFILE tab" below.
 
-### Community game layer — leaderboard, streak, raids (2026-07-20)
-Three systems that make a group a competitive/bonding space instead of a shared
-checklist. `CommunityGroupScreen` (player) shows them all; `AdminGroupScreen`
-**mirrors the same dashboard** (streak banner + leaderboard read-only) with the
-authoring controls layered in (＋ ADD CHALLENGE, ＋ SUMMON RAID, member checklist,
-delete). Helpers in [lib/community.js](lib/community.js); migration
-`migrations/20260720_community_raids_and_leaderboard.sql`.
-- **No emojis (design rule).** The group-streak indicator is a glowing vertical
-  bar (ember `#FF8C28`), never a 🔥 glyph — emojis are off-brand for this app.
-  The leaderboard's top three use a **podium palette** (`RANK` = gold/silver/
-  bronze) tinting a squared rank badge, the row border/glow, and the LVL number.
-- **Leaderboard** — `fetchGroupLeaderboard(groupId)` ranks members by CLASS tier
-  (class `order_index`) then LVL (`computeLvlFromData`), then name. Needs the
-  additive `read co-member quest completions` RLS policy (`shares_group_with`) —
-  the base `student_quest_completions` policy is owner-only. NOTE `order_index`
-  restarts per JOB, so a cross-job tier compare is only an approximation (fine for v1).
-- **Group streak** — `fetchGroupStreak(groupId)` → `{ streak, pending }`, computed
-  (NO schema) from challenges + completions. Each challenge the WHOLE group cleared
-  = +1, counted LIVE the moment the last member ticks (optimistic). A challenge is
-  "settled" 24h after `created_at` — the safe upper bound for the latest local
-  midnight across every timezone, so nobody's own local day can still be open and
-  no per-member timezone is stored. Settled + anyone missed → streak resets to 0;
-  <24h + not all done → PENDING (shown as "+N pending today", neither counts nor
-  breaks). Only members present when the challenge was posted (membership
-  `created_at <= challenge.created_at`) are required — a new member can't
-  retroactively break history. The player screen re-fetches the streak after each
-  own tick so the flame reacts live.
-- **Raids** — a group-wide POOLED goal (`community_raids` + append-only
-  `community_raid_contributions`), distinct from a challenge's per-member checkbox.
-  Admin summons a raid with `title` + numeric `target` + `unit`; every member logs
-  the amount THEY did (`addRaidContribution`) and all sum into one collective bar
-  (`fetchGroupRaids` returns each raid with `total` + `byPlayer`). Cleared at
-  `total >= target` (gold state). `createRaid`/`deleteRaid` are admin-only via RLS.
-
-### Community CHAT — ephemeral group chat (2026-07-21)
-A **text-only** chat scoped to each group. It lives on its **own full-screen
-screen — `CommunityChatScreen`** (WhatsApp-style: an **inverted `FlatList`**, newest
-pinned to the bottom, scroll UP for history, composer pinned below via
-`<ScreenFrame fill>` + `KeyboardAvoidingView`), NOT inline in the group dashboard —
-so history scrolls there and never grows the dashboard endlessly. Table
-`community_messages`, migration `20260721_community_chat.sql`; helpers
-`fetchGroupMessages` / `sendMessage` / `deleteMessage` / `purgeExpiredMessages` +
-`CHAT_RETENTION_DAYS` in [lib/community.js](lib/community.js).
-- **One shared screen for both roles** (`isAdmin` route param). Registered in BOTH
-  `CommunityStack` (player) and `AdminStack` (admin). Player: post + **unsend own**.
-  Admin: posts as **COACH** and may **delete ANY** message (moderation).
-- **Opened from the group screen two ways (bar + swipe), bidirectional.** Both
-  `CommunityGroupScreen` (player) and `AdminGroupScreen` (admin) show a **CHAT bar**
-  with a live last-message **preview**; tapping it OR a **left-swipe on the card**
-  navigates to `CommunityChat`. The reverse is symmetric: a **right-swipe on the
-  chat screen** goes back to the dashboard. Both use a `PanResponder` that only
-  claims clearly-horizontal drags (dx dominates dy), so vertical scrolling (the
-  dashboard scroll / the chat's inverted list) passes straight through. The group
-  screens keep a light poll ONLY to refresh the bar preview — the real chat lives
-  on the chat screen.
-- **Both players AND the admin can post.** Players post via the member-send RLS;
-  the **admin (coach) posts through the admin-all RLS even though they aren't a
-  group member** — their messages render as **COACH** (a non-member sender can only
-  be the admin).
-- **Ephemeral — 7-day retention** (`CHAT_RETENTION_DAYS`). No long history; the
-  table stays tiny. The sweep is **client-side** on chat load (`purgeExpiredMessages`,
-  same philosophy as the check-up purge) — an additive RLS policy lets any member
-  delete their group's messages older than 7 days, so no cron/service role is needed.
-- **Freshness via polling, NOT realtime, and NOT focus-gated.** The app has no
-  live DB→device push anywhere — screens re-read on action, which only feels
-  instant because each player edits their own data. Chat waits on OTHER people's
-  writes, so the chat screen (and the group screens' preview) **poll
-  `fetchGroupMessages` every 3s for the whole time the screen is MOUNTED**
-  (`CHAT_POLL_MS`), clearing on unmount. CRITICAL: do **not** gate this poll on
-  `useIsFocused` — these screens sit inside the material-top-tab pager, where focus
-  tracking is unreliable, so a focus gate makes the poll silently never fire
-  (symptom: new messages only appear after leaving and re-entering). If 3s ever
-  feels laggy, upgrade to a Supabase Realtime subscription — the table/RLS don't
-  change, only how the screen listens (verify realtime on Expo web first — see
-  [web gotchas]).
-- **RLS:** admin all + member-read (`is_group_member`) + member-send-own +
-  member-delete-own (unsend) + member-purge-expired. Text capped at 1000 chars
-  (DB CHECK + client clamp). See DATABASE.md `community_messages`.
+**THE TABLES ARE STILL THERE AND WERE NOT DROPPED** — `community_groups`,
+`community_group_members`, `community_challenges`,
+`community_challenge_completions`, `community_raids`,
+`community_raid_contributions`, `community_messages` and `coach_messages`, plus
+their migrations (`20260717_community.sql`,
+`20260718_community_challenge_completions.sql`,
+`20260720_community_raids_and_leaderboard.sql`, `20260721_community_chat.sql`,
+`20260722_coach_chat.sql`). No code reads or writes any of them any more. They
+hold real rows (old chats, challenge history) and cost nothing sitting there;
+drop them only on an explicit call, in a migration, knowing there is no undo.
+The design of what was built lives in git history — `git log --diff-filter=D`
+finds the deleted files.
 
 ### Coach ⇄ player DIRECT chat — REMOVED (2026-08-26)
-The private 1-on-1 coach↔player chat (added 2026-07-22) is **gone from the app**.
-That conversation moved to **WhatsApp**, the same way the community layer did.
-Removed: `screens/CoachChatScreen.js`, `screens/AdminChatNotesScreen.js`, the
-`CoachChat` / `ChatNotes` routes, the COACH card on the PERSONAL tab, the COACH
-CHAT tile on `PlayerAdminScreen`, the CHAT NOTES pill + its badge, the five
-`*CoachMessage*` helpers in [lib/community.js](lib/community.js) and the whole
-chat half of [lib/adminInbox.js](lib/adminInbox.js) (thread list, unread count,
-AsyncStorage read-marks).
+The private 1-on-1 coach↔player chat (added 2026-07-22) went to WhatsApp too, at
+the same time and for the same reason. Removed then:
+`screens/CoachChatScreen.js`, `screens/AdminChatNotesScreen.js`, the `CoachChat`
+/ `ChatNotes` routes, the COACH card on the PERSONAL tab, the COACH CHAT tile on
+`PlayerAdminScreen`, the CHAT NOTES pill + badge, the `*CoachMessage*` helpers
+(they lived in the now-deleted `lib/community.js`) and the chat half of
+[lib/adminInbox.js](lib/adminInbox.js).
 
-**The `coach_messages` table was deliberately NOT dropped** — the app no longer
-reads or writes it, but the rows (and `migrations/20260722_coach_chat.sql`) are
-still there. Drop it only on an explicit call; see DATABASE.md.
+## The PROFILE tab (2026-09-04)
+The 4th player tab reads **PROFILE** (was COMMUNITY → PERSONAL → THE SYSTEM). The
+route is still `Personal` internally — the tab bar, `TAB_LABEL` in App.js, the
+guided tour and every `navigate('Personal')` key off that name, so only the label
+changed. Screen: `screens/PersonalScreen.js`, house accent (`C.deepBlue`), shared
+`ScreenFrame fill` + `ScreenHeader title="PROFILE"`.
 
-### Personal tab cards + accents (2026-08-23, trimmed 2026-08-26)
-`PersonalScreen` now holds a single card: **THE SYSTEM** (purple `#A66BFF`, route
-`System` → `SystemScreen`, a placeholder empty page for now, registered in
-`PersonalStack`). The accent hex lives as the `SYSTEM_PURPLE` const at the top of
-`PersonalScreen.js`. The jade COACH card above it was removed with the chat;
-PillButton keeps its `jade` tone (used elsewhere). The screen fetches nothing any
-more, so it has no loading state.
-(Was the COMMUNITY tab, whose MY PLAYER CARD `PLAYER_ICE` card + group cards were
-removed — see "Community — REMOVED FROM THE PLAYER APP".)
+**This tab is not about the training — it is the gaming layer around it.** The
+coach has nothing to teach here yet; what it gives a player is an identity page.
+Three things, top to bottom:
+- **The portrait.** Tap to upload / change (`expo-image-picker` → `uploadAvatar`).
+  It is the **SAME `profiles.avatar_url`** the Player Card portrait uses — one
+  picture per player, editable from either place. Initials fallback, same rule as
+  `HunterStatusScreen`. The name under it is `full_name` and stays un-editable
+  everywhere (see Player Profiles).
+- **NODE 1 — PLAYER & GOALS.** Two free-text fields the player writes and
+  rewrites: **PLAYER PROFILE** (who they are) and **END GOAL** (what they're
+  chasing). Reads as plain text with a muted prompt where it's empty; the EDIT
+  pill swaps both into inputs with SAVE / CANCEL. Stored on `profiles.bio` /
+  `profiles.end_goal` (600-char client cap), read/written by `fetchPlayerNotes` /
+  `savePlayerNotes` in [lib/profile.js](lib/profile.js) — migration
+  `20260904_profile_bio_goal.sql`, **must be run on the live Supabase**.
+  · The notes are fetched **separately from `fetchHunterProfile`** on purpose: a
+    missing column fails the WHOLE PostgREST select, so folding them into the
+    Player Card's query would take that screen down with them on a drifted live
+    DB. Here it degrades to "no notes yet"; the SAVE path reports the real error.
+  · The tab reloads on every focus, so the load **never overwrites a draft** the
+    player is mid-way through typing (`editing` guard).
+- **NODE 2 — PLAYER CARD.** Opens `HunterStatusScreen` (route `HunterStatus`,
+  registered in `PersonalStack`) with the signed-in player's own id. **This is
+  the Player Card's only entry point** — see "Player Profiles" below.
+- **NODE 3 — THE SYSTEM [coming soon...].** The locked node, dimmed and not
+  pressable. Behind it goes the coach's online course — nutrition, sleep,
+  recovery — once it is recorded. It reads as a node that EXISTS and isn't open
+  yet, which is the point: the previous screen was a bare COMING SOON and said
+  nothing about what the tab is for. (The old placeholder `SystemScreen.js` and
+  its `System` route were deleted 2026-09-04; this panel replaced them.)
+
+All three are the app's standard **ice panel** — the same shape as HomeScreen's
+TODAY'S MISSIONS / DAILY QUESTS: dark `#070d1a` ground, `#1a3a5c` edge, a 4px
+accent bar beside a glow title, then a hairline divider. The locked one is that
+panel one step down in every dimension (dim border, no glow, muted ink), and
+PLAYER CARD wears a chevron instead of a chip because it is the one that opens a
+screen. The first cut hung them off a quest-tree spine with diamond gems and was
+rejected — this screen is chrome, not a tree, and a second visual system for
+three items is not worth inventing. A future node joins the list; it does not get
+a new screen. (Was the COMMUNITY tab — see "Community — DELETED".)
 
 ## Admin inbox — CHECK-UP INBOX (2026-08-25)
 The "someone is waiting on you" queue on the AdminDashboard top bar: a pill that
@@ -794,7 +724,7 @@ player on all four tables). Schema + full column notes live in DATABASE.md
 - **Entry points.** `BUSINESS` on the AdminDashboard top bar (jade — it's a
   different KIND of action from the training pills) → `AdminBusinessScreen`, and
   **MONEY & MEMBERSHIP** on the `PlayerAdmin` hub → `PlayerBillingScreen`. The
-  business dashboard's PLANS · SETTINGS header pill → `AdminPlansScreen`.
+  business dashboard's PLANS header pill → `AdminPlansScreen`.
 - **`lib/billing.js` owns every number.** Two invariants the screens rely on:
   money is never derived from a plan price (`billing_plans` = what *should*
   arrive, `payments` = what *did*, the gap = outstanding), and **currencies are
@@ -803,6 +733,62 @@ player on all four tables). Schema + full column notes live in DATABASE.md
   (LTV, avg/month, outstanding, next charge, term end); `businessSummary()`
   powers the dashboard (MRR, collected, ARPU, avg lifespan, 90-day churn, revenue
   by acquisition channel).
+- **THE OFFER IS TWO PLANS IN ONE CURRENCY (2026-09-03).** `STANDARD` at **$350
+  a month** and `FAMILY` free — nobody can buy more or less, so there is no
+  quantity, no proration and nothing to tally.
+  · **USD only.** `CURRENCIES` holds a single entry, so no screen offers a
+    currency choice any more, and `effectivePrice()` returns `'USD'` outright
+    rather than reading `currency_override` (a legacy `'ILS'` override is
+    ignored, not obeyed). **The `ILS` bag slot and the `₪` symbol deliberately
+    STAY** — a payment banked in shekels before the switch must keep rendering as
+    shekels instead of silently joining the dollar total. You can display a
+    shekel row; you cannot create one.
+  · **`PRICING` is keyed by PLAN NAME, not by currency** (`{ STANDARD: 350 }`),
+    read through `planPrice(plan)`, which falls back to the plan row's own
+    `price` column. The old `{ ILS: 600, USD: 200 }` shape applied ONE price to
+    every paid plan and could not express two.
+  · Migration `20260903_usd_only_standard_350.sql` — **must be run on the live
+    Supabase.** It inserts STANDARD if the live DB never got it (the original
+    seed was guarded by `where not exists (select 1 from billing_plans)`, so any
+    database that already had a plan row skipped it — which is why the MONEY card
+    offered FAMILY alone), forces it to $350/USD/active, retires every other
+    plan, and clears leftover `'ILS'` overrides. It does **not** touch `payments`:
+    rewriting history to dollars would invent revenue that never arrived.
+- **The MONEY card is deliberately small (2026-09-03).** `PlayerBillingScreen`
+  shows LIFETIME + NEXT CHARGE, two neutral chips (days with me, last active),
+  THIS MONTH, THE DEAL, THE CUSTOMER, and — only for a finished player — WHY THEY
+  LEFT. What was removed and should not come back without a reason: the THIS
+  MONTH / OWES tiles, the risk + access badges, CAME FROM (`source`), the AUTO-PAY
+  toggle, and the whole payments ledger UI.
+  · **THIS MONTH is a switch, not a form.** One box reading PAID / NOT PAID YET
+    with MARK PAID (and UNDO). Because the price is fixed, tapping it writes ONE
+    `payments` row for the current month at the plan price — that single row is
+    what keeps LIFETIME honest now that nothing else writes the ledger. A free
+    plan shows NOTHING TO COLLECT and no button.
+  · **PHONE and BIRTHDAY are required here** — SAVE refuses with either blank.
+    Both arrive filled in from the ＋ NEW PLAYER form (they live on `profiles`;
+    see "Player onboarding"), so a blank one means something went wrong upstream.
+  · **`AdminBusinessScreen` still has a revenue-by-source table** fed by the
+    `source` field the card no longer sets. Existing rows keep their value; new
+    players all land in "unknown".
+- **The BUSINESS roster shows no DEBT and no RISK (2026-09-04).** The `OWES` chip
+  and the `AT RISK` / `HEALTHY` chip are gone from `AdminBusinessScreen`, on the
+  coach's call: **everyone on this roster pays**, so an owed badge marks nobody,
+  and a risk badge is a judgement he does not want sitting on a player's name.
+  The two sort keys those chips explained went with them — an ordering nothing on
+  screen accounts for is just a mystery — so rows now read **biggest LTV first,
+  then alphabetical**, and the screen no longer calls `fetchEngagement` at all.
+  `lib/engagement.js` is unchanged and still feeds `PlayerBillingScreen`'s LAST
+  ACTIVE chip; `playerMoney().outstanding` still exists in `lib/billing.js` and is
+  simply not rendered anywhere. Don't re-add either badge.
+- **The PLANS screen edits plans and nothing else (2026-09-03).** The GENERAL
+  block (business name, grace days, default currency, the overdue-lock switch)
+  and its SAVE SETTINGS button were removed — none of them carried a live
+  decision. The business name is now the **`BUSINESS_NAME` constant** in
+  `lib/billing.js` (`'THE SYSTEM'`, which it was always going to be); the
+  currency is always USD; the lock was never meant to be flipped (below).
+  `billing_settings` still exists and `fetchSettings()` still answers with
+  defaults — nothing in the app writes it any more.
 - **FREE is a flag, not a price of 0** (`billing_plans.is_free`). Family/comped
   players are excluded from ARPU, never chased, and never locked out. This is the
   whole reason the flag exists — a zero price cannot express it.
@@ -831,16 +817,15 @@ in the top bar), NOT a modal:
 - It's the payoff for the community features — profiles are how members see each
   other. Viewing your OWN card (`userId === signed-in user`) also unlocks
   tap-the-portrait-to-change on page 0. The NAME is never editable.
-- **Entry points (2026-08-24: GROUP ROSTERS ONLY).** Route param `{ userId }`;
-  `HunterStatus` is registered **only in `AdminStack`**, and the only way in is
-  tapping a member on the group leaderboard / roster (`AdminGroupScreen` /
-  `CommunityGroupScreen`). The player-side entry (the `MY PLAYER CARD` card atop
-  the old Community tab) was removed with the community layer (2026-08-23), and the
-  coach-side **PLAYER CARD tile on `PlayerAdminScreen` was removed 2026-08-24** —
-  the hub is now COACH CHAT · CHECK-UP · WORKOUTS MANAGEMENT · SKILLS·CLASS·LEVEL.
-  The screen is kept for a possible future re-entry. An admin opening a player's card sees it
-  **read-only** (`userId !== meId`) — reads ride the admin `profiles` /
-  completions RLS.
+- **Entry point (2026-09-04: THE PROFILE TAB).** Route param `{ userId }`;
+  `HunterStatus` is registered in **`PersonalStack`** and opened by the **PLAYER
+  CARD panel on the PROFILE tab**, which passes the signed-in player's own id.
+  Before that it was admin-stack-only, reachable from the community group roster —
+  when that layer was deleted the card would have had no way in at all, which is
+  why it moved here rather than being deleted with it. The read-only branch
+  (`userId !== meId`, reads riding the admin `profiles` / completions RLS) is kept
+  even though nothing reaches it today: it is what makes the card safe to point at
+  ANOTHER player, which is the whole reason a card like this exists.
 - Uses `<ScreenFrame fill>`; the pager fills the measured area.
   Do NOT reintroduce the shared `ScreenHeader` here (its flexed side slots squeezed
   the title) or a fullscreen `Modal` for the clip (an earlier attempt — replaced by
@@ -878,10 +863,11 @@ in the top bar), NOT a modal:
 Two layers, resolved at read time in [lib/schedule.js](lib/schedule.js)
 (`resolveDayWorkouts`, `materializeDay`):
 - **`weekly_workout_template`** — the recurring weekly SKELETON keyed by
-  `day_of_week` (0=Sun…6=Sat). The Manage hub (StudentDetailScreen) — the weekly-
-  skeleton view + ELITE WORKOUTS / CREATE WORKOUT / MY WORKOUTS buttons — is
-  **ORPHANED as of 2026-08-13** (the Training Forge that opened it was retired; see
-  Design System). The admin's Workouts screen is now identical to the player's.
+  `day_of_week` (0=Sun…6=Sat). The Manage hub that used to edit it by weekday
+  (`StudentDetailScreen`) was orphaned when the Training Forge was retired
+  (2026-08-13) and **DELETED 2026-09-04**; the skeleton is edited through the
+  **ASSIGN** picker on each card in My Workouts (`AllWorkoutsScreen`), which is
+  now the only writer. The admin's Workouts screen is identical to the player's.
   Assigning a workout to weekday(s) happens in the **My Workouts warehouse**
   (`AllWorkoutsScreen`): each of the player's own workouts has an **ASSIGN** button
   opening a Sun–Sat multi-day picker; SAVE diffs the selection against the live
@@ -892,7 +878,8 @@ Two layers, resolved at read time in [lib/schedule.js](lib/schedule.js)
   player); a player can create/assign but NOT delete their own workouts.
   The warehouse is stocked two ways: **+ CREATE WORKOUT** (author from scratch) and
   **importing an elite workout**. NOTE (2026-08-13): **CREATE WORKOUT is currently
-  orphaned** (its only opener was the retired Manage hub); **import IS reachable** —
+  gone** — `CreateWorkoutScreen` was deleted 2026-08-13 with its only opener,
+  the Manage hub; **import IS reachable** —
   the **WORKOUTS LIBRARY** tile on `WorkoutsScreen` opens `EliteWorkoutsScreen`
   directly for both roles. Elite import is a PLAYER-ONLY screen
   (`EliteWorkoutsScreen`) — deliberately NOT the admin gallery: it has no exercise
@@ -1180,7 +1167,7 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   + optional `subtitle`/`right`) and `components/PillButton` for every action button
   (rounded "ice pill"; `variant` solid|outline, `tone` accent|gold|green|danger|muted,
   `size` sm|md|lg, with `loading`/`disabled`). All the player workout screens
-  (WorkoutsScreen, StudentDetailScreen, AllWorkoutsScreen, EliteWorkoutsScreen,
+  (WorkoutsScreen, AllWorkoutsScreen, EliteWorkoutsScreen,
   WorkoutDetailScreen, WorkoutEditScreen, WorkoutModeScreen,
   WorkoutSummaryScreen) follow this; match it for new screens instead of
   hand-rolling headers/buttons. Cards/inputs/modals use rounded corners (≈12–18)
@@ -1244,16 +1231,14 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   scoped player's warehouse) + week strip + day panel (EDIT DAY; the rows are
   read-only — see "The Workouts day panel is a READ-ONLY board"). The
   only admin-mode difference is a **← BACK** pill (returns to the `PlayerAdmin`
-  hub). The old admin-only **TRAINING FORGE → Manage page-swipe was RETIRED** here —
-  with it went the admin's path to `Manage`/StudentDetailScreen and the
-  weekly-skeleton editor it hosted (StudentDetailScreen + `lib/forgeSwipe.js` stay
-  in the tree but orphaned). **WORKOUTS LIBRARY** was the one hub tool kept —
-  re-added directly as the third Workouts tile. **＋ CREATE WORKOUT**
+  hub). The old admin-only **TRAINING FORGE → Manage page-swipe was RETIRED** here,
+  and with it the admin's path to `Manage`/`StudentDetailScreen` and the
+  weekly-skeleton editor it hosted. **WORKOUTS LIBRARY** was the one hub tool kept
+  — re-added directly as the third Workouts tile. **＋ CREATE WORKOUT**
   (`CreateWorkoutScreen`) and the **ACCESSORIES** feature (`WeeklyAccessoriesScreen`)
-  were **DELETED entirely** (2026-08-13, screens + routes removed).
-  `lib/forgeSwipe.js` (`forgeP`, `SWIPE_MS`) and the ghost-swipe machinery in
-  StudentDetailScreen are dormant. Don't reintroduce the forge swipe unless the hub
-  is brought back.
+  were **DELETED entirely** (2026-08-13, screens + routes removed), and
+  `StudentDetailScreen` + `lib/forgeSwipe.js` — dormant ever since — followed them
+  **2026-09-04**. The forge swipe is gone; don't reintroduce it.
 - **The PANEL headers stay plain — motion belongs to the ROW (2026-08-30).** An
   all-clear state was built on the TODAY'S MISSIONS / DAILY QUESTS panels (gold
   header, gold scan across the panel, success haptic when the last row landed) and
@@ -1560,6 +1545,20 @@ title sequence plays on every cold start.
   Pressing LOGIN now calls `signInWithPassword` immediately — the old button ran
   a ~1.5s collapse animation FIRST and only then signed in, which read as a dead
   tap. Don't reintroduce the glitch layer.
+- **NO RECRUITMENT PAGE, AND NOTHING THAT LINKS OUT (2026-09-04) — a STORE
+  requirement, not a design preference.** The `I don't have an account` link, the
+  `joining` toggle in App.js and the whole `screens/JoinScreen.js` recruitment
+  page (hero → pitch video → what you get → how you get in → qualify, with its
+  Instagram/WhatsApp CTAs) were **deleted**. A sign-up funnel inside the iOS
+  binary that steers a stranger to an off-app purchase conversation drags the app
+  into Apple's in-app-purchase rules — a 15–30% cut of the coaching revenue. It is
+  not worth it for the handful of strangers who install the app off the store
+  every year; they now simply have nowhere to go, which is the intended outcome.
+  **Do not re-add a sign-up link, a landing/recruitment screen, or any outbound
+  link to Instagram/WhatsApp/a booking page from the logged-out app.** The pitch
+  lives on the coach's own channels and in the welcome email (which is not the
+  binary), and the login card is sign-in only — see "There is no self-serve
+  sign-up" under Roles.
 - **The login hands off to the landing card as ONE motion (2026-08-28).**
   `components/HoloDissolve.js` is the exact MIRROR of `HoloBuild`: the same 16
   slices and the same glowing cyan build-front, covering the card from the TOP

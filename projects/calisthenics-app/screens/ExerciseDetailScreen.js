@@ -642,9 +642,6 @@ const styles = StyleSheet.create({
     fontFamily: F.heading, fontSize: 15, color: C.iceGlow,
     letterSpacing: 3, textTransform: 'uppercase',
   },
-  bodyText: {
-    fontFamily: F.body, fontSize: 18, color: C.text, lineHeight: 30, letterSpacing: 0.4,
-  },
 
   // Description blocks. The gap BETWEEN blocks is bigger than the gap between
   // lines inside one — that difference is the whole trick: it tells the eye

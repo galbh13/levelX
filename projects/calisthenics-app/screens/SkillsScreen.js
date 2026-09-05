@@ -816,6 +816,16 @@ export default function SkillsScreen({ navigation, route }) {
   const userIdRef = useRef(null);
   const [allClasses,  setAllClasses]  = useState([]);
   const [classListOpen, setClassListOpen] = useState(false);
+  // ── Archive: looking BACK at a class already conquered ──────────────────────
+  // Prestige rarely demands every node of a class (a side chain or a last main
+  // quest is often still open when the player ascends), so a Class II player may
+  // still owe Class I something they later earn. `archiveClassId` re-points this
+  // whole screen — quests, LVL, trees — at that earlier class WITHOUT touching
+  // `profiles.class_id`: the player stays in their real class, they are only
+  // visiting. Completions are per-quest rows, so anything ticked off while
+  // visiting is a genuine, permanent completion of that old quest.
+  const [archiveClassId, setArchiveClassId] = useState(null);
+  const [archiveOpen,    setArchiveOpen]    = useState(false);
   const [assigning,   setAssigning]   = useState(false);
   // Name of the class just ascended into → shows the full-screen gold ceremony.
   const [ceremony,    setCeremony]    = useState(null);
@@ -862,16 +872,24 @@ export default function SkillsScreen({ navigation, route }) {
 
       if (!profileData.class_id) { setLoading(false); return; }
 
+      // The class actually on screen: the archived one being visited, or the
+      // player's own. An archive id that isn't part of this job's ladder (the
+      // coach switched jobs while it was open) is ignored rather than fetched.
+      const jobClasses  = (classesData ?? []).filter(c => (c.job ?? 'static') === job);
+      const viewClassId = (archiveClassId && jobClasses.some(c => c.id === archiveClassId))
+        ? archiveClassId
+        : profileData.class_id;
+
       const [classRes, questsRes, completionsRes] = await Promise.all([
         supabase
           .from('classes')
           .select('*')
-          .eq('id', profileData.class_id)
+          .eq('id', viewClassId)
           .single(),
         supabase
           .from('class_quests')
           .select('*')
-          .eq('class_id', profileData.class_id)
+          .eq('class_id', viewClassId)
           .order('quest_type')
           .order('chain')
           .order('order_index'),
@@ -888,13 +906,13 @@ export default function SkillsScreen({ navigation, route }) {
       // player's own write must never walk a cleared chain back to un-maxed.
       setCompletions(reconcileQuestProgress(
         targetId, new Set((completionsRes.data ?? []).map(c => c.quest_id))));
-      setUpgrades(await fetchUpgrades(supabase, targetId, profileData.class_id));
+      setUpgrades(await fetchUpgrades(supabase, targetId, viewClassId));
     } catch (e) {
       console.error('[SkillsScreen] fetchData:', e);
     }
     loadedRef.current = true;
     setLoading(false);
-  }, [overrideStudentId]);
+  }, [overrideStudentId, archiveClassId]);
 
   // Preload at app start (this tab is mounted before it's ever focused) so the
   // data is already in state by the time the player first swipes over.
@@ -1050,6 +1068,27 @@ export default function SkillsScreen({ navigation, route }) {
     finalClassMet: prestigeReady.ok,
   });
 
+  // ── Archive state (see `archiveClassId`) ────────────────────────────────────
+  // `homeClass` is the player's REAL class; `classData` is whatever is on screen.
+  // Only classes BELOW the real one are visitable — the ladder above is still to
+  // be earned, and prestige is the only way up.
+  const homeClass   = allClasses.find(c => c.id === profile?.class_id) ?? null;
+  const isArchive   = !!classData && !!profile?.class_id && classData.id !== profile.class_id;
+  const pastClasses = allClasses.filter(c => (c.order_index ?? 0) < (homeClass?.order_index ?? 0));
+
+  function visitClass(cls) {
+    setArchiveOpen(false);
+    if (cls.id === profile?.class_id) return;
+    setLoading(true);
+    setArchiveClassId(cls.id);
+  }
+
+  function leaveArchive() {
+    setArchiveOpen(false);
+    setLoading(true);
+    setArchiveClassId(null);
+  }
+
   // Build one entry per unique chain
   const mainChains = [...new Set(
     quests.filter(q => q.quest_type === 'main').map(q => q.chain).filter(Boolean)
@@ -1085,7 +1124,7 @@ export default function SkillsScreen({ navigation, route }) {
   function openTree(chain, questType) {
     openedChainRef.current = chain;
     navigation.navigate('QuestTree', {
-      classId:   profile?.class_id,
+      classId:   classData?.id ?? profile?.class_id,
       chain,
       questType,
       job:       profile?.job ?? DEFAULT_JOB,
@@ -1316,7 +1355,9 @@ export default function SkillsScreen({ navigation, route }) {
 
       {/* ── Prestige status on top, change-class control below ── */}
       <View style={styles.classRow}>
-        {classData && (
+        {/* Prestige belongs to the class the player is actually IN — an archived
+            class was already conquered, so its trials say nothing useful here. */}
+        {classData && !isArchive && (
         prestigeReady.ok ? (
           <View ref={tourPrestigeRef} collapsable={false} style={styles.prestigeBanner}>
             <View style={styles.prestigeBannerTitleWrap}>
@@ -1443,7 +1484,7 @@ export default function SkillsScreen({ navigation, route }) {
 
         {/* Change class — COACH-ONLY. A player's own class is assigned/changed by
             their coach (admin), so this control appears only in admin-as-coach view. */}
-        {isCoachView && (
+        {isCoachView && !isArchive && (
         <View style={styles.classCol}>
           <TouchableOpacity
             ref={tourClassRef}
@@ -1461,7 +1502,7 @@ export default function SkillsScreen({ navigation, route }) {
       </View>
 
       {/* Full-width class picker — opens directly under the CHANGE CLASS button. */}
-      {isCoachView && classListOpen && (
+      {isCoachView && !isArchive && classListOpen && (
         <View style={styles.classDropdown}>
           {allClasses.map(cls => {
             const selected = cls.id === profile?.class_id;
@@ -1480,6 +1521,55 @@ export default function SkillsScreen({ navigation, route }) {
               </TouchableOpacity>
             );
           })}
+        </View>
+      )}
+
+      {/* ── Past classes ──
+          Prestige doesn't require finishing a class outright, so an ascended
+          player often leaves an old side quest or main node open. This visits
+          that class: the whole screen (LVL, quests, trees) re-points at it and
+          every tick still writes a real completion — the player's own class is
+          untouched. */}
+      {classData && (isArchive || pastClasses.length > 0) && (
+        <View style={styles.archiveCol}>
+          {isArchive ? (
+            <View style={styles.archiveBanner}>
+              <Text style={styles.archiveBannerTitle} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
+                {(classData.name ?? '').toUpperCase()}
+              </Text>
+              <TouchableOpacity style={styles.archiveExitBtn} onPress={leaveArchive} activeOpacity={0.85}>
+                <Text style={styles.archiveExitText} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
+                  ← BACK TO {(homeClass?.name ?? 'MY CLASS').toUpperCase()}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <>
+              <TouchableOpacity
+                style={styles.archiveBtn}
+                onPress={() => setArchiveOpen(o => !o)}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.archiveBtnText}>PAST CLASSES</Text>
+              </TouchableOpacity>
+              {archiveOpen && (
+                <View style={styles.archiveDropdown}>
+                  {pastClasses.map(cls => (
+                    <TouchableOpacity
+                      key={cls.id}
+                      style={styles.archiveChip}
+                      onPress={() => visitClass(cls)}
+                      activeOpacity={0.75}
+                    >
+                      <Text style={styles.archiveChipText} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
+                        {cls.name}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+            </>
+          )}
         </View>
       )}
 
@@ -1888,6 +1978,84 @@ const styles = StyleSheet.create({
     color: SL.gold,
   },
 
+  // ── Past-class archive ──
+  // Amber, never the ice-blue of the live class or the gold of prestige: a
+  // visited class must read at a glance as somewhere the player is only passing
+  // through.
+  archiveCol: { paddingHorizontal: 16, marginTop: 14, gap: 10 },
+  archiveBtn: {
+    alignSelf: 'stretch',
+    minHeight: 44,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 10,
+    borderWidth: 1.5,
+    borderColor: UP.dim,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: UP.wash,
+  },
+  archiveBtnText: {
+    fontFamily: F.heading,
+    fontSize: 22,
+    color: UP.text,
+    letterSpacing: 2,
+    textAlign: 'center',
+  },
+  archiveDropdown: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  archiveChip: {
+    flexGrow: 1,
+    flexBasis: '40%',
+    minHeight: 52,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+    borderWidth: 1.5,
+    borderColor: UP.dim,
+    borderRadius: 12,
+    backgroundColor: SL.panel,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  archiveChipText: { fontFamily: F.heading, fontSize: 22, color: UP.text, letterSpacing: 1.5 },
+  archiveBanner: {
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    gap: 10,
+    borderWidth: 1.5,
+    borderColor: UP.hot,
+    borderRadius: 12,
+    backgroundColor: UP.wash,
+    shadowColor: UP.hot,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+  },
+  archiveBannerTitle: {
+    fontFamily: F.heading,
+    fontSize: 24,
+    color: UP.hot,
+    letterSpacing: 2,
+    textAlign: 'center',
+  },
+  // Amber too — the whole panel is one colour, so nothing inside it reads as
+  // belonging to the live class.
+  archiveExitBtn: {
+    alignSelf: 'stretch',
+    minHeight: 42,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: UP.dim,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    backgroundColor: 'rgba(255,196,107,0.10)',
+  },
+  archiveExitText: { fontFamily: F.heading, fontSize: 20, color: UP.hot, letterSpacing: 1.5 },
+
   prestigeBanner: {
     paddingHorizontal: 20,
     paddingVertical: 16,
@@ -1911,14 +2079,6 @@ const styles = StyleSheet.create({
     letterSpacing: 3,
     textAlign: 'center',
     marginBottom: 6,
-  },
-  prestigeBannerSub: {
-    fontFamily: F.bodyMed,
-    fontSize: 24,
-    color: SL.gold,
-    opacity: 0.8,
-    letterSpacing: 0.5,
-    textAlign: 'center',
   },
 
   // ── Prestige trials (RPG-styled checklist, shown until all gates pass) ───────
@@ -2534,19 +2694,6 @@ const styles = StyleSheet.create({
 
   // ── Class modal ───────────────────────────────────────────────────────────────
 
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'flex-end',
-  },
-  modalTitle: {
-    fontFamily: F.heading,
-    fontSize: 30,
-    color: SL.accent,
-    letterSpacing: 4,
-    textAlign: 'center',
-    marginBottom: 16,
-  },
   // ── Prestige ceremony (the class-up rite) ───────────────────────────────────
   riteBackdrop: {
     flex: 1,

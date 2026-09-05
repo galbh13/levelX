@@ -19,9 +19,6 @@ import Svg, { Circle, Defs, LinearGradient, Rect, Stop } from 'react-native-svg'
 export const GOLD = ['#F9A825', '#FFB300', '#FFD700', '#FFEB3B', '#FFF176', '#FFC107'];
 // Cool ice blues → cyan → vivid blue, matching the app's accent family.
 export const BLUE = ['#4A9EBF', '#5AC8FA', '#0A84FF', '#00C7BE', '#64D2FF', '#7AA7FF'];
-// Bordeaux: deep wine → crimson → bright rose and back. Strong contrast so the
-// sweep reads clearly as it travels around the frame.
-export const BORDEAUX = ['#2E0512', '#6A0F2A', '#A31034', '#E11D48', '#FF5C8A', '#8B1538'];
 
 // ── Shared clock (refcounted) ───────────────────────────────────────────────
 const clock = new Animated.Value(0);
