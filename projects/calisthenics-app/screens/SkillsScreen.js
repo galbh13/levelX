@@ -20,6 +20,8 @@ import { F } from '../constants/fonts';
 import { ShimmerText, ShimmerFill, ShimmerFrame, BLUE, GOLD } from '../components/Shimmer';
 import ScreenFrame from '../components/ScreenFrame';
 import { useTourTarget, useTourScroller } from '../lib/tourTargets';
+import { chainLabel } from '../lib/questLabels';
+import { chargeMs, playCharge } from '../lib/sfx';
 
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
@@ -219,13 +221,20 @@ function LevelGauge({ lvlPct, prestigePct, prestigeAt, prestigeReady, play = 1 }
     if (played.current === play) { grow.setValue(1); return; }
     played.current = play;
     grow.setValue(0);
+    // The gauge charges for as long as it has charge to take: a sliver of a bar
+    // is a short climb, a nearly-full one a long one. One ladder (CHARGE_STEPS
+    // in lib/sfx) sets both the duration and the sound, so the rising tone runs
+    // the length of the fill and locks as it arrives — same law as the level bar
+    // on Home.
+    const frac = Math.max(0, Math.min(1, lvlPct));
     const enter = Animated.timing(grow, {
-      toValue: 1, duration: 1100, delay: 150,
+      toValue: 1, duration: chargeMs(frac), delay: 150,
       easing: Easing.out(Easing.cubic), useNativeDriver: true,
     });
+    const soundAt = setTimeout(() => playCharge(frac), 150);
     enter.start();
-    return () => enter.stop();
-  }, [grow, play, trackW]);
+    return () => { clearTimeout(soundAt); enter.stop(); };
+  }, [grow, play, trackW, lvlPct]);
 
   const pct   = Math.max(0, Math.min(1, lvlPct)) * 100;
   // The fill is laid out at its FINAL width and slid in from the left; the track
@@ -1188,9 +1197,9 @@ export default function SkillsScreen({ navigation, route }) {
         <View style={styles.chainCardTop}>
           <View style={styles.chainCardTitleWrap}>
             {complete ? (
-              <ShimmerText text={chain.replace(/_/g, ' ').toUpperCase()} style={[styles.chainCardTitle, styles.chainCardTitleMax]} colors={GOLD} direction="ltr" active />
+              <ShimmerText text={chainLabel(chain)} style={[styles.chainCardTitle, styles.chainCardTitleMax]} colors={GOLD} direction="ltr" active />
             ) : (
-              <Text style={[styles.chainCardTitle, upg && styles.chainCardTitleUp]}>{chain.replace(/_/g, ' ').toUpperCase()}</Text>
+              <Text style={[styles.chainCardTitle, upg && styles.chainCardTitleUp]}>{chainLabel(chain)}</Text>
             )}
           </View>
           {/* The enter affordance doubles as the UPGRADE mark: a plain chain gets
@@ -1221,7 +1230,13 @@ export default function SkillsScreen({ navigation, route }) {
           <Text style={[styles.chainCardMeta, upg && styles.chainCardMetaUp, complete && styles.chainCardMetaMax]}>
             {complete ? 'MAXED OUT' : `${completed}/${total} unlocked`}
           </Text>
-          <Text style={[styles.chainCardReward, upg && styles.chainCardRewardUp, complete && styles.chainCardRewardMax]}>+{rewardLvl} LVL</Text>
+          {/* The counter is LVL BANKED, not LVL on offer, so an untouched chain
+              scores zero — and "+0 LVL" reads as a broken quest rather than an
+              empty one. Nothing banked yet, nothing to show; the "0/3 unlocked"
+              on the same row already says where the player stands. */}
+          {rewardLvl > 0 && (
+            <Text style={[styles.chainCardReward, upg && styles.chainCardRewardUp, complete && styles.chainCardRewardMax]}>+{rewardLvl} LVL</Text>
+          )}
         </View>
 
         {/* Cleared chains come alive in gold: a frame that sweeps clockwise plus a
@@ -1689,10 +1704,12 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     letterSpacing: 3,
     textAlign: 'center',
-    // Bright white glow halo — shining, like the Home screen.
-    textShadowColor: 'rgba(255,255,255,0.75)',
+    // No halo. The Home hero's wide white glow works at 76px, but at this size
+    // the blur merges between the letters and reads as a grey slab BEHIND the
+    // name instead of a glow around it.
+    textShadowColor: 'transparent',
     textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 24,
+    textShadowRadius: 0,
   },
   // Class crest — a compact echo of the Home hero's gold gem-medallion. The
   // prestige stars sit just above the gem so rank + prestige read as one emblem.

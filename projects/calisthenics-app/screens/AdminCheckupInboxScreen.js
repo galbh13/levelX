@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import {
   View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator,
@@ -9,22 +9,41 @@ import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import { useCoach } from '../context/CoachContext';
 import { useAdminNotify } from '../context/AdminNotifyContext';
-import { fetchPendingCheckups } from '../lib/adminInbox';
+import { fetchPendingCheckups, fetchCheckupSchedule } from '../lib/adminInbox';
 
 // ─── Admin — CHECK-UP INBOX ─────────────────────────────────────────────────
-// Everyone who submitted a check-up the coach hasn't answered yet (submitted,
-// no feedback). Reached from the bell button on the AdminDashboard, which wears
-// a dot while this list isn't empty. Tapping a row opens AdminCheckupScreen for
-// that player — replying there removes them from this queue.
+// Three views of the same week, picked from the menu at the top:
+//   SENT ME — they submitted, the coach hasn't replied yet (the original inbox)
+//   TODAY   — their recurring check-up day IS today and nothing has landed
+//   LATE    — their day has passed and the check-up still hasn't landed
+// A player sits in exactly one of them: submitting moves them out of TODAY/LATE
+// and into SENT ME; replying clears them entirely. Reached from the bell button
+// on the AdminDashboard (whose dot follows the SENT ME queue). Tapping any row
+// opens AdminCheckupScreen for that player.
+const TABS = [
+  { key: 'sent',  label: 'SENT ME' },
+  { key: 'today', label: 'TODAY' },
+  { key: 'late',  label: 'LATE' },
+];
+
 export default function AdminCheckupInboxScreen({ navigation }) {
   const { setSelectedStudent } = useCoach();
   const { refresh } = useAdminNotify();
-  const [rows, setRows] = useState([]);
+  const [tab, setTab] = useState('sent');
+  const [pending, setPending] = useState([]);
+  const [due, setDue] = useState([]);
+  const [late, setLate] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      setRows(await fetchPendingCheckups());
+      const [rows, sched] = await Promise.all([
+        fetchPendingCheckups(),
+        fetchCheckupSchedule(),
+      ]);
+      setPending(rows);
+      setDue(sched.due);
+      setLate(sched.late);
     } catch (e) {
       console.error('[AdminCheckupInbox] load:', e);
     }
@@ -36,59 +55,122 @@ export default function AdminCheckupInboxScreen({ navigation }) {
   // the dashboard dot should follow.
   useFocusEffect(useCallback(() => { load(); refresh(); }, [load, refresh]));
 
+  const counts = { sent: pending.length, today: due.length, late: late.length };
+  const rows = tab === 'sent' ? pending : tab === 'today' ? due : late;
+
+  const subtitle = useMemo(() => {
+    if (loading) return ' ';
+    if (tab === 'sent')  return `${counts.sent} WAITING ON YOU`;
+    if (tab === 'today') return `${counts.today} DUE TODAY`;
+    return `${counts.late} BEHIND SCHEDULE`;
+  }, [loading, tab, counts.sent, counts.today, counts.late]);
+
+  const empty = {
+    sent:  ['ALL CLEAR',   'Every submitted check-up has your reply.'],
+    today: ['NOTHING DUE', 'Nobody has a check-up day today.'],
+    late:  ['NOBODY LATE', 'Everyone is current with their check-up.'],
+  }[tab];
+
+  function open(player) {
+    setSelectedStudent(player);
+    navigation.navigate('PlayerCheckup', { player });
+  }
+
   return (
     <ScreenFrame fill ready={!loading}>
       <View style={styles.card}>
         <ScreenHeader
           title="CHECK-UP INBOX"
-          subtitle={loading ? ' ' : `${rows.length} WAITING ON YOU`}
+          subtitle={subtitle}
           onBack={() => navigation.goBack()}
         />
 
         <View style={styles.body}>
+          {/* The menu: one pill per queue, each carrying its own count so the
+              coach sees what's waiting in the other two without switching. */}
+          <View style={styles.tabs}>
+            {TABS.map(t => {
+              const active = tab === t.key;
+              const n = counts[t.key];
+              const tone = t.key === 'late' ? ALERT : t.key === 'today' ? WARN : ACCENT;
+              return (
+                <Pressable
+                  key={t.key}
+                  onPress={() => setTab(t.key)}
+                  style={[
+                    styles.tab,
+                    active && {
+                      borderColor: tone, backgroundColor: tint(tone),
+                      shadowColor: tone, shadowOpacity: 0.35,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.tabText, active && { color: tone }]} numberOfLines={1}>
+                    {t.label}
+                  </Text>
+                  {n > 0 ? (
+                    <View style={[styles.tabCount, { borderColor: tone, backgroundColor: tint(tone) }]}>
+                      <Text style={[styles.tabCountText, { color: tone }]}>{n}</Text>
+                    </View>
+                  ) : null}
+                </Pressable>
+              );
+            })}
+          </View>
+
           {loading ? (
             <View style={styles.center}>
               <ActivityIndicator size="large" color={C.deepBlue} />
             </View>
           ) : rows.length === 0 ? (
             <View style={styles.center}>
-              <Text style={styles.emptyTitle}>ALL CLEAR</Text>
-              <Text style={styles.muted}>Every submitted check-up has your reply.</Text>
+              <Text style={styles.emptyTitle}>{empty[0]}</Text>
+              <Text style={styles.muted}>{empty[1]}</Text>
             </View>
           ) : (
             <ScrollView showsVerticalScrollIndicator={false}>
-              {rows.map((row, i) => (
-                <Pressable
-                  key={row.checkupId}
-                  style={styles.row}
-                  onPress={() => {
-                    setSelectedStudent(row.player);
-                    navigation.navigate('PlayerCheckup', { player: row.player });
-                  }}
-                >
-                  <View style={styles.rankChip}>
-                    <Text style={styles.rankText}>{String(i + 1).padStart(2, '0')}</Text>
-                  </View>
-                  {/* Two stacked lines so the NEEDS REPLY badge can never eat
-                      into the player's name: name across the full row width on
-                      top, the timestamp + badge on the line below it. */}
-                  <View style={styles.rowMain}>
-                    <View style={styles.nameRow}>
-                      <Text style={styles.name} numberOfLines={1}>
-                        {row.player.full_name || '(no name)'}
-                      </Text>
-                      <View style={styles.dot} />
+              {rows.map((row, i) => {
+                const tone = tab === 'today' ? WARN : ALERT;
+                // Line two says WHY this player is on this list: when they sent
+                // (SENT ME), or which day of theirs is owed (TODAY / LATE).
+                const meta =
+                  tab === 'sent'  ? `Submitted ${ago(row.submittedAt)}`
+                  : tab === 'today' ? `${row.dayName} · nothing sent yet`
+                  : `${row.dayName} · ${lastSeen(row.lastSubmittedAt)}`;
+                const badge =
+                  tab === 'sent'  ? 'NEEDS REPLY'
+                  : tab === 'today' ? 'DUE TODAY'
+                  : `${row.daysLate}D LATE`;
+                return (
+                  <Pressable
+                    key={row.checkupId ?? row.player.id}
+                    style={styles.row}
+                    onPress={() => open(row.player)}
+                  >
+                    <View style={styles.rankChip}>
+                      <Text style={styles.rankText}>{String(i + 1).padStart(2, '0')}</Text>
                     </View>
-                    <View style={styles.metaRow}>
-                      <Text style={styles.meta} numberOfLines={1}>Submitted {ago(row.submittedAt)}</Text>
-                      <View style={styles.badge}>
-                        <Text style={styles.badgeText}>NEEDS REPLY</Text>
+                    {/* Two stacked lines so the badge can never eat into the
+                        player's name: name across the full row width on top,
+                        the reason + badge on the line below it. */}
+                    <View style={styles.rowMain}>
+                      <View style={styles.nameRow}>
+                        <Text style={styles.name} numberOfLines={1}>
+                          {row.player.full_name || '(no name)'}
+                        </Text>
+                        <View style={[styles.dot, { backgroundColor: tone, shadowColor: tone }]} />
+                      </View>
+                      <View style={styles.metaRow}>
+                        <Text style={styles.meta} numberOfLines={1}>{meta}</Text>
+                        <View style={[styles.badge, { borderColor: tone, backgroundColor: tint(tone) }]}>
+                          <Text style={[styles.badgeText, { color: tone }]}>{badge}</Text>
+                        </View>
                       </View>
                     </View>
-                  </View>
-                  <Text style={styles.chevron}>›</Text>
-                </Pressable>
-              ))}
+                    <Text style={styles.chevron}>›</Text>
+                  </Pressable>
+                );
+              })}
             </ScrollView>
           )}
         </View>
@@ -111,8 +193,21 @@ function ago(iso) {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+// How long since this player last checked in AT ALL — "never sent one" is the
+// line the coach most needs to see on the LATE list.
+function lastSeen(iso) {
+  return iso ? `last sent ${ago(iso)}` : 'never sent one';
+}
+
 const ACCENT = '#4A9EBF';
+const WARN   = '#E8A33D';
 const ALERT  = '#E11D48';
+
+// The faint fill every badge / active pill wears in its own colour.
+function tint(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},0.10)`;
+}
 
 const styles = StyleSheet.create({
   card: { flex: 1 },
@@ -122,6 +217,26 @@ const styles = StyleSheet.create({
     fontFamily: F.heading, fontSize: 20, color: ACCENT, letterSpacing: 3,
   },
   muted: { fontFamily: F.bodyMed, fontSize: 13, color: '#4a6a8a', letterSpacing: 1 },
+
+  // The queue menu. Equal-flex pills so three of them always fill the row, and
+  // the count chip never pushes a label off its own pill (the label shrinks).
+  tabs: { flexDirection: 'row', gap: 8, marginBottom: 14 },
+  tab: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    borderWidth: 1.5, borderColor: '#1a3a5c', borderRadius: 999,
+    backgroundColor: '#070d1a',
+    paddingHorizontal: 8, paddingVertical: 8,
+    shadowOffset: { width: 0, height: 0 }, shadowRadius: 12, shadowOpacity: 0,
+  },
+  tabText: {
+    flexShrink: 1,
+    fontFamily: F.heading, fontSize: 11, color: '#4a6a8a', letterSpacing: 1.2,
+  },
+  tabCount: {
+    minWidth: 20, paddingHorizontal: 5, paddingVertical: 1,
+    borderWidth: 1, borderRadius: 999, alignItems: 'center', flexShrink: 0,
+  },
+  tabCountText: { fontFamily: F.heading, fontSize: 10, letterSpacing: 0.5 },
 
   row: {
     flexDirection: 'row',
@@ -149,24 +264,24 @@ const styles = StyleSheet.create({
     fontFamily: F.heading, fontSize: 18, color: '#E8F4FF',
     letterSpacing: 1.2, textTransform: 'uppercase',
   },
-  // Line two: timestamp on the left, badge pinned to the right. The timestamp
+  // Line two: the reason on the left, badge pinned to the right. The reason
   // shrinks, the badge never does.
   metaRow: {
     flexDirection: 'row', alignItems: 'center',
     justifyContent: 'space-between', gap: 8,
   },
-  // The same red "you owe this" marker used on the dashboard bell.
+  // The same "you owe this" marker used on the dashboard bell, wearing the
+  // colour of the queue the row belongs to.
   dot: {
-    width: 7, height: 7, borderRadius: 3.5, flexShrink: 0, backgroundColor: ALERT,
-    shadowColor: ALERT, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.9, shadowRadius: 6,
+    width: 7, height: 7, borderRadius: 3.5, flexShrink: 0,
+    shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.9, shadowRadius: 6,
   },
   meta: { flexShrink: 1, fontFamily: F.bodyMed, fontSize: 12, color: '#4a6a8a', letterSpacing: 1 },
   badge: {
     flexShrink: 0,
-    borderWidth: 1.2, borderColor: ALERT, borderRadius: 999,
-    backgroundColor: 'rgba(225,29,72,0.10)',
+    borderWidth: 1.2, borderRadius: 999,
     paddingHorizontal: 10, paddingVertical: 3,
   },
-  badgeText: { fontFamily: F.heading, fontSize: 10, color: ALERT, letterSpacing: 1 },
+  badgeText: { fontFamily: F.heading, fontSize: 10, letterSpacing: 1 },
   chevron: { fontFamily: F.heading, fontSize: 21, color: ACCENT, marginLeft: 9, marginTop: -2 },
 });

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  View, Text, Image, StyleSheet, ScrollView, Pressable, TouchableOpacity, ActivityIndicator,
+  View, Text, Image, StyleSheet, ScrollView, Pressable, TouchableOpacity, TextInput,
+  ActivityIndicator, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { F } from '../constants/fonts';
@@ -11,6 +12,7 @@ import PillButton from '../components/PillButton';
 import VideoPlayer from '../components/VideoPlayer';
 import {
   fetchHunterProfile, uploadAvatar, uploadSignatureVideo, removeSignatureVideo,
+  fetchPlayerNotes, savePlayerNotes, MAX_NOTE_CHARS,
 } from '../lib/profile';
 
 // Player Card accent — a bright, near-white icy blue. Really icy, so the card
@@ -41,6 +43,36 @@ function fitWithin(boxW, boxH, ratio) {
   let h = w / ratio;
   if (h > boxH) { h = boxH; w = h * ratio; }
   return { w, h };
+}
+
+// One field inside the PLAYER & GOALS panel. Reads as a plain line of text until
+// the panel is in edit mode, where it becomes the input — so the card stays a
+// profile first and a form second. (Moved here from the PROFILE tab on
+// 2026-09-06: the player's own words belong ON the card, above the signature
+// move, not in a separate panel one screen back.)
+function NoteField({ label, hint, value, editing, onChangeText }) {
+  return (
+    <View style={styles.noteField}>
+      <Text style={styles.noteLabel}>{label}</Text>
+      {editing ? (
+        <>
+          <TextInput
+            style={styles.noteInput}
+            value={value}
+            onChangeText={onChangeText}
+            placeholder={hint}
+            placeholderTextColor="#2a4a6a"
+            multiline
+            maxLength={MAX_NOTE_CHARS}
+            textAlignVertical="top"
+          />
+          <Text style={styles.noteCounter}>{value.length}/{MAX_NOTE_CHARS}</Text>
+        </>
+      ) : (
+        <Text style={[styles.noteText, !value && styles.noteEmpty]}>{value || hint}</Text>
+      )}
+    </View>
+  );
 }
 
 // ─── Player Card — a player's profile ───────────────────────────────────────
@@ -76,13 +108,43 @@ export default function HunterStatusScreen({ navigation, route }) {
   // WebView can't report it, so the default stands there).
   const [vidRatio, setVidRatio] = useState(9 / 16);
 
+  // PLAYER & GOALS — the player's own two paragraphs. Fetched separately from
+  // fetchHunterProfile on purpose (see lib/profile), so a column the live schema
+  // hasn't got yet can't take the whole card down with it.
+  const [bio, setBio] = useState('');
+  const [endGoal, setEndGoal] = useState('');
+  const [notesSaved, setNotesSaved] = useState({ bio: '', endGoal: '' });
+  const [editingNotes, setEditingNotes] = useState(false);
+  const [savingNotes, setSavingNotes] = useState(false);
+
+  // The signature page's stage — the box left over once the action buttons have
+  // taken their room. MEASURED, not guessed: the old code subtracted a hardcoded
+  // `reserve` from the page height, which on a tall phone left the clip short and
+  // on a short one pushed REPLACE CLIP / REMOVE off the bottom of the frame.
+  const [stage, setStage] = useState(null);
+  const onStageLayout = (e) => {
+    const { width, height } = e.nativeEvent.layout;
+    setStage(prev => (prev && prev.width === width && prev.height === height ? prev : { width, height }));
+  };
+
   const isSelf = !!userId && userId === meId;
 
   const load = useCallback(async () => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       setMeId(user?.id ?? null);
-      setData(await fetchHunterProfile(userId ?? user?.id));
+      const id = userId ?? user?.id;
+      const [profile, notes] = await Promise.all([
+        fetchHunterProfile(id),
+        fetchPlayerNotes(id),
+      ]);
+      setData(profile);
+      setNotesSaved(notes);
+      // Never clobber a draft the player is in the middle of typing.
+      setEditingNotes(e => {
+        if (!e) { setBio(notes.bio); setEndGoal(notes.endGoal); }
+        return e;
+      });
     } catch (e) {
       console.error('[HunterStatusScreen] load:', e);
     }
@@ -145,6 +207,30 @@ export default function HunterStatusScreen({ navigation, route }) {
     setBusy(null);
   }
 
+  async function saveNotes() {
+    if (!meId) return;
+    setSavingNotes(true);
+    setErrorMsg('');
+    try {
+      await savePlayerNotes(meId, { bio, endGoal });
+      const next = { bio: bio.trim(), endGoal: endGoal.trim() };
+      setNotesSaved(next);
+      setBio(next.bio);
+      setEndGoal(next.endGoal);
+      setEditingNotes(false);
+    } catch (e) {
+      setErrorMsg(e.message ?? 'Could not save.');
+    }
+    setSavingNotes(false);
+  }
+
+  function cancelNotes() {
+    setBio(notesSaved.bio);
+    setEndGoal(notesSaved.endGoal);
+    setErrorMsg('');
+    setEditingNotes(false);
+  }
+
   const stars = data?.stars ?? 0;
 
   // ── Page 0 — identity ──
@@ -153,6 +239,7 @@ export default function HunterStatusScreen({ navigation, route }) {
       style={{ width: size.width, height: size.height }}
       contentContainerStyle={styles.identityContent}
       showsVerticalScrollIndicator={false}
+      keyboardShouldPersistTaps="handled"
     >
       <Pressable
         style={styles.portraitWrap}
@@ -198,6 +285,63 @@ export default function HunterStatusScreen({ navigation, route }) {
         <View style={styles.chip}><Text style={styles.chipText}>LVL {data.lvl}</Text></View>
       </View>
 
+      {/* PLAYER & GOALS — the player's own words, sitting on the card itself and
+          directly above the signature move. Read-only when this is somebody
+          else's card; on your own it flips to a form with EDIT. */}
+      {(isSelf || notesSaved.bio || notesSaved.endGoal) && (
+        <View style={styles.notes}>
+          <View style={styles.notesHeader}>
+            <View style={styles.notesBar} />
+            <Text style={styles.notesTitle} numberOfLines={1}>PLAYER & GOALS</Text>
+            {isSelf && !editingNotes && (
+              <PillButton
+                label={notesSaved.bio || notesSaved.endGoal ? 'EDIT' : '＋ WRITE'}
+                size="sm"
+                onPress={() => setEditingNotes(true)}
+              />
+            )}
+          </View>
+          <View style={styles.notesDivider} />
+
+          <NoteField
+            label="PLAYER DESCRIPTION"
+            hint={isSelf
+              ? 'Who are you as a player? Where you started, what you train for, what drives you.'
+              : 'Nothing written yet.'}
+            value={bio}
+            editing={editingNotes}
+            onChangeText={setBio}
+          />
+          <View style={styles.noteDivider} />
+          <NoteField
+            label="END GOAL"
+            hint={isSelf
+              ? "The one thing you're chasing. Name it — a skill, a hold, a number."
+              : 'Nothing written yet.'}
+            value={endGoal}
+            editing={editingNotes}
+            onChangeText={setEndGoal}
+          />
+
+          {editingNotes && (
+            <View style={styles.notesActions}>
+              <PillButton
+                label={savingNotes ? 'SAVING…' : 'SAVE'}
+                tone="jade"
+                onPress={saveNotes}
+                loading={savingNotes}
+              />
+              {!savingNotes && (
+                <PillButton label="CANCEL" tone="muted" size="sm" onPress={cancelNotes} />
+              )}
+            </View>
+          )}
+        </View>
+      )}
+
+      {/* The identity page can report its own failure now that it can save. */}
+      {errorMsg ? <Text style={styles.error}>{errorMsg}</Text> : null}
+
       {/* Swipe teaser — tells the player the signature move lives one swipe left,
           and doubles as a tap target to get there. */}
       <Pressable style={styles.swipeTeaser} onPress={() => goToPage(1)}>
@@ -216,41 +360,41 @@ export default function HunterStatusScreen({ navigation, route }) {
 
   // ── Page 1 — signature move ──
   const signaturePage = size && data && (
-    <ScrollView
-      style={{ width: size.width, height: size.height }}
-      contentContainerStyle={styles.signatureContent}
-      showsVerticalScrollIndicator={false}
-    >
-      <Text style={styles.sigTitle}>SIGNATURE MOVE</Text>
-
-      {data.signatureVideoUrl ? (() => {
-        // Fit the clip to its real shape inside the page (leaving room for the
-        // title + the self-edit buttons), so it's never a giant dark box (desktop)
-        // or a letterboxed one (phone). Sized to sit INSIDE the icy frame — subtract
-        // the frame's padding + border so the framed box lands at the right width.
-        const reserve = (isSelf ? 200 : 110) + 2 * SIG_FRAME_PAD + 30;
-        const inset = 2 * (SIG_FRAME_PAD + SIG_FRAME_BORDER);
-        const { w, h } = fitWithin(size.width - 48 - inset, Math.max(220, size.height - reserve), vidRatio);
-        return (
-          // Framed container — the rounded/glowing border lives on this View, NOT on
-          // the <video> (a rounded <video> paints black in Chromium — see VideoPlayer),
-          // so the clip reads as "contained in a frame" without that bug.
-          <View style={styles.videoFrame}>
-            <VideoPlayer
-              url={data.signatureVideoUrl}
-              width={w}
-              height={h}
-              onRatio={setVidRatio}
-            />
+    // A COLUMN, not a scroller: the stage takes every pixel the buttons don't,
+    // and the buttons sit outside it — so the clip is as big as the page allows
+    // and the actions can never be clipped by the card frame. The page carries no
+    // SIGNATURE MOVE heading any more (the card title + the page dots already say
+    // where you are); that row was 34px of the clip's height.
+    <View style={{ width: size.width, height: size.height }}>
+      <View style={styles.sigStage} onLayout={onStageLayout}>
+        {!stage ? null : data.signatureVideoUrl ? (() => {
+          // Fit the clip to its real shape inside the MEASURED stage, so it's never
+          // a giant dark box (desktop) or a letterboxed one (phone). Sized to sit
+          // INSIDE the icy frame — subtract the frame's padding + border so the
+          // framed box lands at the right width.
+          const inset = 2 * (SIG_FRAME_PAD + SIG_FRAME_BORDER);
+          const { w, h } = fitWithin(stage.width - inset, stage.height - inset, vidRatio);
+          return (
+            // Framed container — the rounded/glowing border lives on this View, NOT on
+            // the <video> (a rounded <video> paints black in Chromium — see VideoPlayer),
+            // so the clip reads as "contained in a frame" without that bug.
+            <View style={styles.videoFrame}>
+              <VideoPlayer
+                url={data.signatureVideoUrl}
+                width={w}
+                height={h}
+                onRatio={setVidRatio}
+              />
+            </View>
+          );
+        })() : (
+          <View style={styles.videoEmpty}>
+            <Text style={styles.muted}>
+              {isSelf ? 'Show off your proudest rep — add your best clip.' : 'No signature clip yet.'}
+            </Text>
           </View>
-        );
-      })() : (
-        <View style={styles.videoEmpty}>
-          <Text style={styles.muted}>
-            {isSelf ? 'Show off your proudest rep — add your best clip.' : 'No signature clip yet.'}
-          </Text>
-        </View>
-      )}
+        )}
+      </View>
 
       {isSelf && (
         <View style={styles.actions}>
@@ -276,7 +420,7 @@ export default function HunterStatusScreen({ navigation, route }) {
       )}
 
       {errorMsg ? <Text style={styles.error}>{errorMsg}</Text> : null}
-    </ScrollView>
+    </View>
   );
 
   return (
@@ -303,7 +447,11 @@ export default function HunterStatusScreen({ navigation, route }) {
         <Text style={styles.title} numberOfLines={1}>PLAYER CARD</Text>
 
         {/* Swipeable pager — identity (left) ⇄ signature move (right). */}
-        <View style={styles.pagerArea} onLayout={onLayout}>
+        <KeyboardAvoidingView
+          style={styles.pagerArea}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          onLayout={onLayout}
+        >
           {loading ? (
             <View style={styles.center}><ActivityIndicator size="large" color={ACCENT} /></View>
           ) : !data ? (
@@ -322,7 +470,7 @@ export default function HunterStatusScreen({ navigation, route }) {
               {signaturePage}
             </ScrollView>
           ) : null}
-        </View>
+        </KeyboardAvoidingView>
       </View>
     </ScreenFrame>
   );
@@ -417,6 +565,41 @@ const styles = StyleSheet.create({
   },
   chipText: { fontFamily: F.heading, fontSize: 14, color: ACCENT, letterSpacing: 1.5 },
 
+  // ── PLAYER & GOALS panel (identity page) ──
+  // The app's standard panel language (accent bar · glow title · hairline
+  // divider), painted in the card's ice rather than the house blue so it reads
+  // as part of the card and not as a transplanted PROFILE-tab box.
+  notes: {
+    alignSelf: 'stretch', marginTop: 26,
+    backgroundColor: '#070d1a',
+    borderRadius: 14, borderWidth: 1.5, borderColor: 'rgba(205,243,255,0.30)',
+    paddingHorizontal: 16, paddingTop: 16, paddingBottom: 18,
+    shadowColor: ACCENT, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.18, shadowRadius: 14,
+  },
+  notesHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  notesBar: {
+    width: 4, height: 22, borderRadius: 2, backgroundColor: ACCENT,
+    shadowColor: ACCENT, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.9, shadowRadius: 6,
+  },
+  notesTitle: {
+    flex: 1, fontFamily: F.heading, fontSize: 18, color: ACCENT, letterSpacing: 2,
+    textShadowColor: 'rgba(205,243,255,0.35)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
+  },
+  notesDivider: { height: 1, backgroundColor: 'rgba(205,243,255,0.22)', marginTop: 14, marginBottom: 16 },
+  notesActions: { flexDirection: 'row', gap: 12, alignItems: 'center', marginTop: 18 },
+
+  noteField: { gap: 8 },
+  noteLabel: { fontFamily: F.heading, fontSize: 12, color: '#5a7a9a', letterSpacing: 3 },
+  noteText: { fontFamily: F.bodyMed, fontSize: 15, color: C.text, letterSpacing: 0.3, lineHeight: 23 },
+  noteEmpty: { color: '#3a5a7a', fontStyle: 'italic' },
+  noteDivider: { height: 1, backgroundColor: 'rgba(205,243,255,0.16)', marginVertical: 16 },
+  noteInput: {
+    fontFamily: F.bodyMed, fontSize: 15, color: C.text, letterSpacing: 0.3, lineHeight: 22,
+    minHeight: 92, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(205,243,255,0.45)',
+    backgroundColor: C.lockedBg, paddingHorizontal: 12, paddingVertical: 10,
+  },
+  noteCounter: { fontFamily: F.bodyMed, fontSize: 11, color: '#2a4a6a', letterSpacing: 1, alignSelf: 'flex-end' },
+
   // Swipe teaser at the bottom of the identity page.
   swipeTeaser: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
@@ -431,10 +614,11 @@ const styles = StyleSheet.create({
   swipeTeaserArrow: { fontFamily: F.heading, fontSize: 34, color: ACCENT, marginTop: -4 },
 
   // ── Page 1 — signature move ──
-  signatureContent: { alignItems: 'center', paddingHorizontal: 24, paddingTop: 6, paddingBottom: 30 },
-  sigTitle: {
-    fontFamily: F.heading, fontSize: 18, color: ACCENT, letterSpacing: 3,
-    alignSelf: 'flex-start', marginBottom: 16,
+  // The stage soaks up the leftover height; the actions row underneath keeps its
+  // own bottom padding so the pills clear the card frame and the tab bar.
+  sigStage: {
+    flex: 1, alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 16, paddingTop: 4,
   },
   // Icy frame around the signature clip — a matte inset + glowing accent border
   // so the video reads as "mounted in a frame" rather than a raw tacked-on box.
@@ -449,10 +633,13 @@ const styles = StyleSheet.create({
     shadowColor: ACCENT, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.35, shadowRadius: 16,
   },
   videoEmpty: {
-    alignSelf: 'stretch', minHeight: 160, borderRadius: 12,
+    alignSelf: 'stretch', flex: 1, minHeight: 160, borderRadius: 12,
     borderWidth: 1, borderColor: 'rgba(205,243,255,0.25)', borderStyle: 'dashed',
     backgroundColor: C.surface, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24,
   },
-  actions: { flexDirection: 'row', gap: 12, marginTop: 20, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap' },
+  actions: {
+    flexDirection: 'row', gap: 12, alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap',
+    paddingHorizontal: 16, paddingTop: 14, paddingBottom: 18,
+  },
   error: { fontFamily: F.bodyMed, fontSize: 14, color: '#FF6B6B', letterSpacing: 0.4, textAlign: 'center', marginTop: 16, lineHeight: 20 },
 });

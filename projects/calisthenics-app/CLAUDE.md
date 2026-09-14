@@ -443,7 +443,20 @@ mastered, add a player-specific question, etc.).
   edited in place; a `CLASS STANDARD`/`PERSONAL` chip says which it currently is
   and flips to PERSONAL on the first change. `↺ BACK TO CLASS STANDARD` (confirmed
   via `SystemConfirm`) appears only once it IS personal.
-  **The section is READ-ONLY until the coach taps EDIT (2026-08-30).** He screen-
+  **The section is CLOSED until the coach taps OPEN (2026-09-11), then READ-ONLY
+  until he taps EDIT.** Two steps, and the order matters: the authoring list
+  hanging open under the review was a second page of content in the screen
+  recording that the player has no reason to see. Collapsed, it is the section
+  head + the CLASS STANDARD/PERSONAL chip + a `▼ OPEN` pill + one line of tally
+  ("6 questions · 2 exercises"); EDIT only renders once it's open, since it acts
+  on a list that isn't on screen otherwise, and CLOSE also drops edit mode so the
+  section always REOPENS on the clean read-only list.
+  · **The closed row's chip and tally are resolved BY THE SCREEN, not the
+    editor** (`loadTplSummary` → `resolvePlayerTemplate` + `splitTemplateParts`,
+    called on load, on close, and after a reset). The editor is unmounted while
+    the section is shut, so `onSourceChange` can't be the source of truth for
+    something rendered before anything is opened.
+  **The list itself is READ-ONLY until the coach taps EDIT (2026-08-30).** He screen-
   records himself walking a player through their check-up, so the per-row EDIT/✕,
   the ADD buttons, the explainer and the reset button are all hidden behind the
   editor's `editable` prop (a plain EDIT / green DONE `PillButton` beside the
@@ -451,6 +464,28 @@ mastered, add a player-specific question, etc.).
   screen opens in every time. `AdminCheckupTemplateScreen` leaves `editable`
   at its default `true` — authoring is its whole purpose. Needs the admin-override RLS in
   `migrations/20260714_checkups.sql` + `20260722_checkup_templates.sql`.
+  **TWO LAYOUTS — PHONE AND COMPUTER (2026-09-11).** The coach does this review
+  on a DESKTOP and screen-records it for the player, so the screen reads
+  `useDesktopLayout()` (constants/layout.js) and, on a desktop-sized canvas,
+  renders a second layout: the card widens past `CARD_W` (to `DESKTOP_CARD_W`),
+  THEIR ANSWERS and THEIR EXERCISES go **two-up**, the template editor's PART 1 /
+  PART 2 become **side-by-side columns** (`wide` prop on
+  `CheckupTemplateEditor`), and every label, field and note steps up a size. A
+  phone-width column on a 1920 monitor is two thirds dead space, which reads as
+  an unfinished app in the recording.
+  · **The desktop styles live in their OWN `W` StyleSheet** in each file and are
+    only ever layered ON TOP of the phone style (`[styles.x, wide && W.x]`),
+    never in place of it — so the phone layout stays the one real layout and a
+    desktop tweak can't move it.
+  · **The clips are shaped to the CLIP on desktop, not to a fixed-height row.**
+    `ReviewClip` takes `VideoPlayer.onRatio` and sizes the box from the real
+    aspect ratio (height clamped 260–620, width following it) — these are filmed
+    on a phone, so most are portrait, and a portrait clip in a ~1100-wide fixed
+    box is a stamp between two grey slabs.
+  · Breakpoint + card width are CANVAS units (`DESKTOP_MIN_W` 1400 /
+    `DESKTOP_CARD_W` 2400), so one threshold is right on web (document zoomed to
+    `WEB_ZOOM`) and on native (`useAppDimensions` undoes `NATIVE_SCALE`). A phone
+    is ~550 either way.
 - **Shared `components/CheckupTemplateEditor`** — the admin authoring surface used by
   BOTH admin screens: lists Part-1 questions + Part-2 exercises with add/edit/delete
   (a modal form; exercises also take a video URL + description). Scope-driven
@@ -1054,6 +1089,56 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   name matching is fragile (imported/free-typed workout names drift from the catalog).
   Workout Edit + the gallery example builder store `gallery_id` when an exercise is picked from the
   library, so any workout authored/re-saved after 2026-07-01 links exactly.
+- **RENAMING A CATALOG EXERCISE REWRITES THE COPIES (2026-09-09).** The video is
+  resolved live from `exercises_gallery` on every read, so uploading one updates
+  it for everybody — but the NAME is COPIED into the workout row when the
+  exercise is added, so renaming the catalog entry used to leave every workout
+  already carrying it on the old name. `renameExerciseEverywhere()` in
+  [lib/workouts.js](lib/workouts.js) closes that gap, called from
+  `AddExerciseScreen`'s save when (and only when) the name actually changed.
+  Three copies, each matched the strictest way it can be: `exercises` linked by
+  **`gallery_id`** (exact, renamed whatever it currently says), `exercises` with
+  NO link still carrying the **old name exactly** (case-insensitive `ilike` with
+  the LIKE wildcards escaped — never a contains match), and
+  `gallery_example_workouts.exercises` (inline JSONB, matched on `normName`,
+  read-modify-write per row). **A name a coach deliberately typed differently for
+  one player matches none of the three and survives the rename** — that is the
+  point of matching the old name exactly rather than by resemblance.
+  · It **never throws**: the catalog row is already saved when it runs, so a
+    failure reports "renamed, but existing workouts kept the old name", not a
+    failed save. Both `gallery_id` steps fall back for a live DB predating that
+    column (same drift guard as `insertExercises`).
+  · **Templates now store `gallery_id` too** (the gallery example builder's
+    picker + save payload, carried through `templateExerciseRows`), so a workout
+    IMPORTED from the library links to the catalog exactly instead of relying on
+    name matching — which makes future renames land by id and the how-to card
+    resolve on tier 1. Older templates have none and fall back to the name path.
+  · Copies that drifted BEFORE this existed aren't retro-fixed: rename the
+    catalog entry back to the old name, save, then rename it forward again.
+- **DELETING A CATALOG EXERCISE DELETES THE COPIES (2026-09-09).** Same problem
+  as the rename, one step worse: the FK is `ON DELETE SET NULL`, so deleting a
+  library movement used to leave the workout carrying its NAME with the
+  `gallery_id` link nulled — a movement that no longer exists, whose how-to card
+  (video + cues) silently resolves to nothing, with no trail of the deletion.
+  `deleteExerciseEverywhere()` in [lib/workouts.js](lib/workouts.js) removes the
+  copies; `findExerciseUsage()` counts them FIRST so `ExerciseGalleryScreen`'s ✕
+  can say "it will also be taken out of N player workouts and N library workouts"
+  before the coach confirms, and reports what it removed after.
+  · **Copies are matched by the same three-tier rule as the rename** (catalog
+    link, then unlinked rows on the exact name, then template JSONB by
+    `normName`) — so a movement a coach deliberately typed differently for one
+    player is never swept up by a delete either.
+  · **Purge BEFORE deleting the catalog row.** Once that row is gone the FK has
+    already nulled every `gallery_id`, leaving only the weaker name match to find
+    the copies. A purge failure therefore leaves the library entry standing, so
+    the coach's retry is still a complete delete (the reverse order would strand
+    copies unreachable by id).
+  · Each touched workout is **re-lettered** (A, B, C with no hole) and a superset
+    left with a **single member is unpaired** — a "parallel" group of one is just
+    a normal exercise.
+  · Safe mid-workout: a live session is local AsyncStorage keyed by exercise id,
+    and `buildLog` rebuilds it from the CURRENT rows, so a deleted exercise just
+    drops out of the running session instead of crashing it.
 - **A NUMBER ONLY MEANS "VARIATION" WHEN IT REPEATS (2026-08-31).** The single
   most important rule on the exercise card. `1,1,1,2,2` in the cues is two
   groups of cues for two ways of doing the movement; `1,2,3,4,5` is an ordinary
@@ -1108,6 +1193,30 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   callout words above (`hs form key points - 2` names a group, it isn't a note).
   All of it degrades to plain spaced lines when nothing matches — the coach
   types exactly what he typed before, and no column changed.
+- **`*` AT THE HEAD OF A LINE MEANS REQUIRED KIT (2026-09-09).** The third rule of
+  the description language, and the only one shared by BOTH parsers — the exercise
+  card's `parseDescription` and `parseCoachText` (workout purpose, per-exercise
+  variation/notes). The coach types the short-hand, the app fills the rest:
+  `*weights required` and `*weights` both render a REQUIRED call-out reading
+  **WEIGHTS** over "dumbbells, plates or a vest". [lib/gear.js](lib/gear.js) owns
+  it — `gearFromLine` / `parseGear` / `splitGear` plus the `LEXICON` (weights,
+  bands, bar, rings, parallettes, wall, box, elevated surface, partner, mat,
+  straps, towel, rope, ab wheel, chalk, timer). Rules that keep it honest:
+  · **A bare item is canonicalised; extra words are the coach's and they stay.**
+    `*bands` → RESISTANCE BAND, but `*ankle straps` stays ANKLE STRAPS and
+    `*rings / bar` stays RINGS / BAR — with the lexicon's hint dropped, since it
+    describes the plain item and would contradict what he actually wrote.
+    Unknown kit (`*heavy backpack`) still renders; the rule never refuses a line.
+  · **No space after the asterisk.** `* item` WITH a space is a bullet, and that
+    meaning is older — hence `GEAR_LINE`'s `(?!\s)`.
+  · Splits on `,` `+` `and`; `/` and `or` stay INSIDE one chip (one requirement,
+    two ways to meet it).
+  · **Periwinkle `#AEB4FF`** (`TONES.REQUIRED` in CoachText), deliberately off the
+    accent blue that GOAL/NOTE ride — kit is something you CHECK before you start,
+    not something you read — and off gold, which is XP/prestige.
+  · Where a call-out won't fit (workout cards, the quest gate) `splitGear` pulls
+    the line OUT of the prose and `GearLine` renders `REQUIRED · WEIGHTS`, so the
+    raw asterisk never surfaces in a one-line preview.
   **`AddExerciseScreen` states the format under both fields**, and its
   placeholders are worked examples. That is not decoration: a format the coach
   can't see is a format he can't use, so any new rule here gets a line there in
@@ -1122,6 +1231,23 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
 - **Finishing** marks the workout done in `workout_override_workouts` (same
   materialize-then-complete path as WorkoutsScreen's MARK DONE) and clears the
   local session.
+- **READING a library example: `WorkoutDetail` with a `preview` param
+  (2026-09-09).** Tapping an example workout in the admin gallery's WORKOUTS tab
+  opens the real workout screen instead of expanding a stripped list inside the
+  card (name + sets×reps was all it could show — no variation, no notes, no fork,
+  no exercise cards). The card is now a plain row with a `›`; BACK returns to the
+  gallery with its filters intact.
+  · `preview` carries the whole `gallery_example_workouts` row. A template is not
+    a `workouts` row: `WorkoutDetailScreen` synthesizes `{ id: 'template:<id>',
+    title, purpose: description, branches, category }` from it, skips the
+    `detailCache` and the exercises/workouts fetches entirely, and builds its list
+    with **`templateExercisePreview()`** in [lib/workouts.js](lib/workouts.js) —
+    the same `templateExerciseRows` the IMPORT uses, so a preview can never show a
+    different workout than importing would produce.
+  · It still fetches `exercises_gallery`, which is what makes each exercise name
+    tappable (the how-to card) and adds WATCH VIDEO.
+  · The coach's CTA becomes **EDIT TEMPLATE** → `AddExampleWorkout`. `WorkoutEdit`
+    writes to a player's workouts row, which a template does not have.
 - **Gallery preview (`gallery: true` route param):** WorkoutModeScreen can also run
   a `gallery_example_workouts` row as a one-off preview (exercises/branches read
   INLINE from the route param — synthesizing each exercise's `id`/`letter` — rather
@@ -1239,6 +1365,19 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
   were **DELETED entirely** (2026-08-13, screens + routes removed), and
   `StudentDetailScreen` + `lib/forgeSwipe.js` — dormant ever since — followed them
   **2026-09-04**. The forge swipe is gone; don't reintroduce it.
+- **NEVER LOOP A SCALE ON A FULL-WIDTH ELEMENT (2026-09-11).** Workout Mode's
+  FINISH button used to breathe (a looping 1 → 1.035 scale, `Breathe`, played
+  once every required set was done). A percentage scale on something that spans
+  its container grows it OUT of the container — 3.5% of a phone-width button is
+  ~13px, half of it past each edge — so the one control at the bottom of a
+  session sat pulsing over the layout. It was **removed**, the button dropped
+  from `size="lg"` to `"md"`, and the hint line under it ("Exit anytime — your
+  progress is saved…") went too. The state is already carried by the label and
+  the colour (FINISH WORKOUT/accent → COMPLETE THE MISSION/gold), which costs no
+  geometry. A scale loop is fine on something SMALL and inset (a count chip, a
+  badge dot, a quest node); when a full-width thing must move, move its border or
+  run a light over it — `ShimmerFrame` / `DoneAura` / `ClearSweep` all stay
+  inside the box.
 - **The PANEL headers stay plain — motion belongs to the ROW (2026-08-30).** An
   all-clear state was built on the TODAY'S MISSIONS / DAILY QUESTS panels (gold
   header, gold scan across the panel, success haptic when the last row landed) and
@@ -1451,6 +1590,15 @@ workout (no ▶ WORKOUT button, and since 2026-08-30 no DONE either). This keeps
     the card shrink to its content, which is the exact bug this rule kills.
   ALWAYS render the full layout and overlay the load spinner (never swap the body
   for a spinner) — that was the other source of load-time size jumps.
+  **THE ONE SANCTIONED EXCEPTION: an ADMIN screen on a DESKTOP canvas
+  (2026-09-11).** `useDesktopLayout()` in `constants/layout.js` returns
+  `{ wide, cardW }` and a screen passes `cardW` to `ScreenFrame`'s `maxWidth`,
+  widening the card past `CARD_W` when the canvas is desktop-sized. It exists
+  because the coach works — and screen-records — on a monitor, where the phone
+  card leaves two thirds of the screen empty. `AdminCheckupScreen` is the only
+  user today. **Never do this on a player tab:** the tabs are a swipe pager, so a
+  differently-sized card is visible against its neighbour mid-drag, which is the
+  exact mismatch the rule above exists to kill.
   **The frame must not blink out BETWEEN screens either (2026-08-28).** After
   sign-in, App.js waits on the role lookup before it knows which tree to mount,
   and that gap used to render a bare dark `View` — the border vanished for a
@@ -1636,7 +1784,10 @@ title sequence plays on every cold start.
   admin authoring surface for check-up templates (Part-1 questions + Part-2
   exercises; scope `{ classId }` or `{ playerId }`), used by both admin check-up
   screens (see Checkups).
-- `constants/` — colors.js, fonts.js, layout.js (`CARD_W` — THE card width for every framed screen; there is no CARD_H, the card is always full height)
+- `constants/` — colors.js, fonts.js, layout.js (`CARD_W` — THE card width for
+  every framed screen; there is no CARD_H, the card is always full height. Also
+  `useAppDimensions`/`useAppInsets` — the real canvas size on native — and
+  `useDesktopLayout`, the admin desktop breakpoint, see the Design System note)
 - `context/` — React contexts (incl. `TourContext` — the guided tour is owned by
   the app root, not HomeScreen; see the Design System note)
 - `lib/` — utilities

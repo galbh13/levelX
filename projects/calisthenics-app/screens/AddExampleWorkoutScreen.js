@@ -7,6 +7,7 @@ import { supabase } from '../lib/supabase';
 import { F } from '../constants/fonts';
 import ScreenFrame from '../components/ScreenFrame';
 import { ShimmerFrame, BLUE } from '../components/Shimmer';
+import { isAccumulate, accumTarget, ACCUM_TOKEN, MAX_ACCUM_SETS } from '../lib/workouts';
 
 const SL = {
   bg:      '#050912',
@@ -45,6 +46,7 @@ function computeGroups(list) {
 
 function ExerciseRow({ exercise, letter, showLink, onChange, onRemove, onToggleLink, onMove, canUp, canDown }) {
   const uid = exercise._uid;
+  const accumulate = isAccumulate(exercise.sets);
   return (
     <View style={styles.exRow}>
       {/* Letter badge */}
@@ -80,25 +82,40 @@ function ExerciseRow({ exercise, letter, showLink, onChange, onRemove, onToggleL
           onChangeText={v => onChange(uid, 'variation', v)}
           multiline
         />
-        {/* Sets × Reps */}
+        {/* Sets × Reps — count ("3"), range ("1-2"), or "???" = ACCUMULATE, where
+            the reps field is a TOTAL the player splits across as many sets as the
+            day allows. Same chip (and same no-numeric-keyboard) as the player-side
+            editor, so a library program can carry accumulate targets too. */}
         <View style={styles.exFieldsRow}>
           <TextInput
-            style={styles.exInputSets}
+            style={[styles.exInputSets, accumulate && styles.exInputAccum]}
             placeholder="sets"
             placeholderTextColor={SL.muted}
             value={exercise.sets}
             onChangeText={v => onChange(uid, 'sets', v)}
-            keyboardType="numeric"
           />
+          <TouchableOpacity
+            style={[styles.accumChip, accumulate && styles.accumChipOn]}
+            onPress={() => onChange(uid, 'sets', accumulate ? '' : ACCUM_TOKEN)}
+            activeOpacity={0.8}
+          >
+            <Text style={[styles.accumChipText, accumulate && styles.accumChipTextOn]}>???</Text>
+          </TouchableOpacity>
           <Text style={styles.exMult}>×</Text>
           <TextInput
             style={styles.exInputReps}
-            placeholder="reps"
+            placeholder={accumulate ? 'total reps' : 'reps'}
             placeholderTextColor={SL.muted}
             value={exercise.reps}
             onChangeText={v => onChange(uid, 'reps', v)}
           />
         </View>
+        {accumulate && (
+          <Text style={styles.accumHint}>
+            ACCUMULATE · as many sets as it takes (max {MAX_ACCUM_SETS}) until{' '}
+            {accumTarget(exercise.reps) || '—'} reps are banked
+          </Text>
+        )}
       </View>
 
       {/* Reorder (within this section) + remove */}
@@ -148,6 +165,8 @@ export default function AddExampleWorkoutScreen({ route, navigation }) {
     const list = (editing?.exercises ?? []).map(e => ({
       _uid:           uid(),
       name:           e.name ?? '',
+      // The catalog link, carried through edits — see the save payload.
+      gallery_id:     e.gallery_id ?? null,
       variation:      e.variation ?? '',
       sets:           String(e.sets ?? ''),
       reps:           String(e.reps ?? ''),
@@ -287,7 +306,7 @@ export default function AddExampleWorkoutScreen({ route, navigation }) {
   function pickExercise(item) {
     setExercises(prev => [
       ...prev,
-      { _uid: uid(), name: item.name, variation: '', sets: '', reps: '', superset_group: null, branch: pickerTarget, linkedAbove: false },
+      { _uid: uid(), name: item.name, gallery_id: item.id, variation: '', sets: '', reps: '', superset_group: null, branch: pickerTarget, linkedAbove: false },
     ]);
     setPickerAdded(p => ({ ...p, [item.id]: true }));
     setTimeout(() => setPickerAdded(p => { const n = { ...p }; delete n[item.id]; return n; }), 1200);
@@ -323,6 +342,10 @@ export default function AddExampleWorkoutScreen({ route, navigation }) {
       branches,
       exercises:   validExercises.map((e, i) => ({
         name:           e.name.trim(),
+        // Stored so a template — and every workout imported from it — keeps an
+        // EXACT link to the catalog entry, which is what makes a later rename
+        // (and the how-to card) land without falling back to name matching.
+        gallery_id:     e.gallery_id ?? null,
         variation:      e.variation?.trim() || null,
         sets:           e.sets.trim() || '3',
         reps:           e.reps.trim() || '—',
@@ -813,7 +836,7 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
   },
   exFieldsRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
+    flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap',
   },
   exInputSets: {
     width: 72, height: 42,
@@ -824,6 +847,20 @@ const styles = StyleSheet.create({
   },
   exMult: {
     fontFamily: F.heading, fontSize: 16, color: SL.muted,
+  },
+  // ??? = accumulate. One tap instead of hunting for "?" on a numeric pad.
+  exInputAccum: { borderColor: SL.accent, color: SL.accent },
+  accumChip: {
+    height: 42, paddingHorizontal: 10, borderRadius: 8,
+    borderWidth: 1.5, borderColor: SL.border, backgroundColor: SL.panel,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  accumChipOn: { borderColor: SL.accent, backgroundColor: 'rgba(74,158,191,0.15)' },
+  accumChipText: { fontFamily: F.heading, fontSize: 15, color: SL.muted, letterSpacing: 1 },
+  accumChipTextOn: { color: SL.accent },
+  accumHint: {
+    fontFamily: F.body, fontSize: 12, color: SL.muted,
+    marginTop: 6, letterSpacing: 0.5,
   },
   exInputReps: {
     width: 130, height: 42,

@@ -9,7 +9,10 @@ import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
 import { ShimmerFrame, BLUE } from '../components/Shimmer';
-import { WORKOUT_CATEGORIES, updateWorkoutMeta, replaceWorkoutExercises } from '../lib/workouts';
+import {
+  WORKOUT_CATEGORIES, updateWorkoutMeta, replaceWorkoutExercises,
+  isAccumulate, accumTarget, ACCUM_TOKEN, MAX_ACCUM_SETS,
+} from '../lib/workouts';
 
 // ─── Theme ──────────────────────────────────────────────────────────────────
 // Matches the admin example-workout builder so the two editors look identical.
@@ -50,6 +53,7 @@ function computeGroups(list) {
 
 function ExerciseRow({ exercise, letter, showLink, onChange, onRemove, onToggleLink, onMove, canUp, canDown }) {
   const u = exercise._uid;
+  const accumulate = isAccumulate(exercise.sets);
   return (
     <View style={styles.exRow}>
       {/* Letter badge */}
@@ -85,25 +89,41 @@ function ExerciseRow({ exercise, letter, showLink, onChange, onRemove, onToggleL
           onChangeText={v => onChange(u, 'variation', v)}
           multiline
         />
-        {/* Sets × Reps */}
+        {/* Sets × Reps. The sets field takes a count ("3"), a range ("1-2") or
+            "???" = ACCUMULATE — no set count at all, the reps field becomes a
+            TOTAL the player splits however the day allows. The ??? chip toggles
+            it, so the mode never depends on finding "?" on a phone keypad (which
+            is also why there's no numeric keyboardType here — a range needs "-"). */}
         <View style={styles.exFieldsRow}>
           <TextInput
-            style={styles.exInputSets}
+            style={[styles.exInputSets, accumulate && styles.exInputAccum]}
             placeholder="sets"
             placeholderTextColor={SL.muted}
             value={exercise.sets}
             onChangeText={v => onChange(u, 'sets', v)}
-            keyboardType="numeric"
           />
+          <TouchableOpacity
+            style={[styles.accumChip, accumulate && styles.accumChipOn]}
+            onPress={() => onChange(u, 'sets', accumulate ? '' : ACCUM_TOKEN)}
+            activeOpacity={0.8}
+          >
+            <Text style={[styles.accumChipText, accumulate && styles.accumChipTextOn]}>???</Text>
+          </TouchableOpacity>
           <Text style={styles.exMult}>×</Text>
           <TextInput
             style={styles.exInputReps}
-            placeholder="reps"
+            placeholder={accumulate ? 'total reps' : 'reps'}
             placeholderTextColor={SL.muted}
             value={exercise.reps}
             onChangeText={v => onChange(u, 'reps', v)}
           />
         </View>
+        {accumulate && (
+          <Text style={styles.accumHint}>
+            ACCUMULATE · as many sets as it takes (max {MAX_ACCUM_SETS}) until{' '}
+            {accumTarget(exercise.reps) || '—'} reps are banked
+          </Text>
+        )}
       </View>
 
       {/* Reorder (within this section) + remove */}
@@ -371,6 +391,9 @@ export default function WorkoutEditScreen({ route, navigation }) {
         <Text style={styles.label}>
           GOAL / PURPOSE <Text style={styles.optional}>(optional)</Text>
         </Text>
+        {/* One line only here, so the * rule is all-or-nothing: a purpose that
+            IS a requirement ("*bands") renders as the REQUIRED strip. */}
+        <Text style={styles.optional}>Start with * to mark required kit — *bands</Text>
         <TextInput
           style={styles.input}
           placeholder="e.g. BUILD PULLING STRENGTH"
@@ -703,7 +726,7 @@ const styles = StyleSheet.create({
     fontFamily: F.body, fontSize: 14, color: SL.text,
     textAlignVertical: 'top',
   },
-  exFieldsRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  exFieldsRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
   exInputSets: {
     width: 72, height: 42,
     backgroundColor: SL.panel,
@@ -712,6 +735,20 @@ const styles = StyleSheet.create({
     fontFamily: F.body, fontSize: 16, color: SL.text,
   },
   exMult: { fontFamily: F.heading, fontSize: 16, color: SL.muted },
+  // ??? = accumulate. One tap instead of hunting for "?" on a numeric pad.
+  exInputAccum: { borderColor: SL.accent, color: SL.accent },
+  accumChip: {
+    height: 42, paddingHorizontal: 10, borderRadius: 8,
+    borderWidth: 1.5, borderColor: SL.border, backgroundColor: SL.panel,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  accumChipOn: { borderColor: SL.accent, backgroundColor: 'rgba(74,158,191,0.15)' },
+  accumChipText: { fontFamily: F.heading, fontSize: 15, color: SL.muted, letterSpacing: 1 },
+  accumChipTextOn: { color: SL.accent },
+  accumHint: {
+    fontFamily: F.body, fontSize: 12, color: SL.muted,
+    marginTop: 6, letterSpacing: 0.5,
+  },
   exInputReps: {
     width: 130, height: 42,
     backgroundColor: SL.panel,

@@ -129,6 +129,15 @@ export default function WorkoutSummaryScreen({ route, navigation }) {
                 </View>
                 {blankSkip ? (
                   <Text style={[styles.exCount, { color: SL.muted }]}>—</Text>
+                ) : ex.accum ? (
+                  /* Accumulate: the score is REPS banked against the target, not
+                     sets done — the set count was never the promise. */
+                  <Text style={[
+                    styles.exCount,
+                    ex.accum.target > 0 && ex.accum.done >= ex.accum.target && styles.exCountDone,
+                  ]}>
+                    {ex.accum.done}{ex.accum.target ? `/${ex.accum.target}` : ''}
+                  </Text>
                 ) : (
                   <Text style={[
                     styles.exCount,

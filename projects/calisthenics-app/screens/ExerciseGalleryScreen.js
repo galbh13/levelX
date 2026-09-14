@@ -1,13 +1,17 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
-  FlatList, Image, ActivityIndicator, ScrollView, Platform, Alert, Dimensions,
+  FlatList, Image, ActivityIndicator, ScrollView, Platform, Alert,
 } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 import { supabase } from '../lib/supabase';
 import { useCoach } from '../context/CoachContext';
 import { F } from '../constants/fonts';
-import ScreenFrame, { FRAME_PAD, FRAME_MAX_W } from '../components/ScreenFrame';
+import ScreenFrame from '../components/ScreenFrame';
+import { useDesktopLayout } from '../constants/layout';
+import { GearLine } from '../components/CoachText';
+import { splitGear } from '../lib/gear';
+import { findExerciseUsage, deleteExerciseEverywhere } from '../lib/workouts';
 
 // Video-game "upgrade" arrow (double chevron pointing up) — the placeholder icon
 // for exercises with no thumbnail.
@@ -26,25 +30,34 @@ function UpgradeArrow({ size = 30, color = '#4A9EBF' }) {
 }
 
 // ─── Responsive browse grid ─────────────────────────────────────────────────────
-// Fixed-width cards (no flex:1) so a lone card never stretches full-width, and the
-// column count adapts to the viewport (2 on phones, more on wide web layouts).
-const WIN_W     = Dimensions.get('window').width;
-const GRID_PAD  = 20;
-const GRID_GAP  = 18;
 // No fixed body height: the gallery FILLS the frame (ScreenFrame is always in
 // `fill` mode here) and the grid/list region flexes to the bottom of the card.
 // A fixed height used to cut the grid mid-card and leave a dead black band under
 // it — the card is already full height, so let the grid own what's left.
-// The screen is wrapped in a centered ScreenFrame (max-width), so the grid sizes
-// off the FRAMED width, not the raw window — otherwise columns overflow the frame
-// on wide screens. ~210px target → compact cards, more per row.
-const FRAME_W   = Math.min(WIN_W - FRAME_PAD * 2, FRAME_MAX_W);
-// Exactly 2 nodes per row, always.
-const GRID_COLS = 2;
-const CARD_W    = Math.floor((FRAME_W - GRID_PAD * 2 - GRID_GAP * (GRID_COLS - 1)) / GRID_COLS);
+const GRID_PAD  = 20;
+const GRID_GAP  = 18;
 // Fixed node height: tall enough for a 2-line exercise name. Shorter (1-line)
 // names center vertically inside this constant box, so every node lines up.
 const NODE_H    = 104;
+
+// ─── Desktop ─────────────────────────────────────────────────────────────────
+// The gallery is an ADMIN screen: the library is curated on a COMPUTER, so on a
+// desktop-sized canvas it takes `useDesktopLayout()`'s wide card — the same
+// sanctioned exception AdminCheckupScreen uses (see constants/layout.js) — and
+// lays the grid out in as many columns as that width affords, instead of a
+// phone-width column stranded in the middle of a monitor. On a phone NOTHING
+// changes: the same card, two columns, 48% each.
+//
+// Column count is resolved from the live card width inside the component, not
+// from a module-level `Dimensions.get()` — that read happens once at import and
+// never updates, so a resized window (and the wide card itself) kept getting
+// phone-sized columns.
+const GRID_TARGET_W = 590; // canvas units — the width a 2-up phone node lands on
+function gridColumns(cardW) {
+  const usable = cardW - GRID_PAD * 2;
+  const cols = Math.round((usable + GRID_GAP) / (GRID_TARGET_W + GRID_GAP));
+  return Math.max(2, Math.min(6, cols));
+}
 
 // ─── Theme ────────────────────────────────────────────────────────────────────
 
@@ -63,6 +76,12 @@ const SL = {
 const MOVEMENT_TYPES = ['All', 'Pull', 'Push', 'Balance', 'Legs', 'Core', 'Mobility', 'Flexibility', 'Isolated'];
 
 // ─── Cross-platform confirm ───────────────────────────────────────────────────
+
+// Plain "here's what happened" message — same web/native split as the confirm.
+function notify(message) {
+  if (Platform.OS === 'web') window.alert(message);
+  else Alert.alert('Exercise library', message);
+}
 
 function confirmAction(message, onConfirm) {
   if (Platform.OS === 'web') {
@@ -105,17 +124,28 @@ function ClassChips({ classes, selectedId, onSelect, showAll = true }) {
 
 // ─── Workout card ─────────────────────────────────────────────────────────────
 
-function WorkoutCard({ workout, expanded, onToggle, onEdit, onDelete }) {
+// Tapping the card OPENS the workout on the real workout screen (WorkoutDetail
+// in preview mode) instead of expanding a stripped inline list under it. The
+// inline version could only ever show name + sets×reps — no variation, no notes,
+// no fork, no exercise cards — so the one place a coach reads a program back was
+// the one place it wasn't fully written down.
+function WorkoutCard({ workout, onOpen, onEdit, onDelete }) {
   return (
     <View style={styles.workoutCard}>
-      <TouchableOpacity style={styles.workoutCardHeader} onPress={onToggle} activeOpacity={0.8}>
+      <TouchableOpacity style={styles.workoutCardHeader} onPress={onOpen} activeOpacity={0.8}>
         <View style={styles.workoutCardLeft}>
           <Text style={styles.workoutTitle}>{workout.title}</Text>
-          {!!workout.description && (
-            <Text style={styles.workoutDesc} numberOfLines={expanded ? undefined : 1}>
-              {workout.description}
-            </Text>
-          )}
+          {!!workout.description && (() => {
+            const { prose, items } = splitGear(workout.description);
+            return (
+              <>
+                {prose ? (
+                  <Text style={styles.workoutDesc} numberOfLines={1}>{prose}</Text>
+                ) : null}
+                <GearLine items={items} />
+              </>
+            );
+          })()}
         </View>
         <View style={styles.workoutCardActions}>
           {!!onEdit && (
@@ -136,30 +166,10 @@ function WorkoutCard({ workout, expanded, onToggle, onEdit, onDelete }) {
               <Text style={styles.cardDeleteText}>✕</Text>
             </TouchableOpacity>
           )}
-          <Text style={styles.workoutChevron}>{expanded ? '▲' : '▼'}</Text>
+          {/* Points RIGHT: this card leads somewhere, it doesn't unfold. */}
+          <Text style={styles.workoutChevron}>›</Text>
         </View>
       </TouchableOpacity>
-
-      {expanded && (
-        <View style={styles.workoutExercises}>
-          {(workout.exercises ?? []).map((ex, i) => (
-            <View key={i} style={styles.exerciseRow}>
-              <View style={styles.exerciseRowLeft}>
-                <Text style={styles.exerciseLetter}>{String.fromCharCode(65 + i)}</Text>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.exerciseName}>{ex.name}</Text>
-                  {!!ex.notes && (
-                    <Text style={styles.exerciseNotes}>{ex.notes}</Text>
-                  )}
-                </View>
-              </View>
-              <Text style={styles.exerciseSetsReps}>
-                {ex.sets}×{ex.reps}
-              </Text>
-            </View>
-          ))}
-        </View>
-      )}
     </View>
   );
 }
@@ -171,8 +181,10 @@ const stickyFilters = {
   activeTab:       null,
   exClassId:       null,
   movFilter:       'All',
+  search:          '',
   workoutsClassId: null,
   workoutCategory: 'main',
+  workoutSearch:   '',
 };
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
@@ -181,25 +193,41 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
   const selectionMode = route.params?.selectionMode ?? false;
   const { addExercise, pendingExercises } = useCoach();
 
+  // Desktop: the wide admin card + a grid that actually uses it. `wide` is false
+  // on every phone-sized canvas (web or native), where all of this collapses
+  // back to the original one-column-card, two-up-grid layout.
+  const { wide, cardW } = useDesktopLayout();
+  const cols = wide ? gridColumns(cardW) : 2;
+  // Fixed pixel columns + a real column gap on desktop: `space-between` would
+  // fling a short last row to the card's two edges once there are 3+ columns.
+  const nodeStyle = wide
+    ? { width: Math.floor((cardW - GRID_PAD * 2 - GRID_GAP * (cols - 1)) / cols) }
+    : null;
+  // Selection mode's cards are wide rows (thumb + name + ADD), so they take far
+  // fewer columns than the name-only browse nodes.
+  const selCols = wide ? Math.min(3, Math.max(2, Math.round(cardW / 900))) : 1;
+
   const [activeTab,       setActiveTab]       = useState(route.params?.initialTab ?? stickyFilters.activeTab ?? 'exercises');
   const [classes,         setClasses]         = useState([]);
   const [exercises,       setExercises]       = useState([]);
   const [exampleWorkouts, setExampleWorkouts] = useState([]);
 
   // Exercises tab filters
-  const [search,    setSearch]    = useState('');
+  const [search,    setSearch]    = useState(stickyFilters.search);
   const [movFilter, setMovFilter] = useState(stickyFilters.movFilter);
   const [exClassId, setExClassId] = useState(stickyFilters.exClassId);
 
   // Workouts tab
   const [workoutsClassId,  setWorkoutsClassId]  = useState(stickyFilters.workoutsClassId);
   const [workoutCategory,  setWorkoutCategory]  = useState(stickyFilters.workoutCategory); // main | side | accessory | legs
-  const [workoutSearch,    setWorkoutSearch]    = useState('');
-  const [expandedWorkout,  setExpandedWorkout]  = useState(null);
+  const [workoutSearch,    setWorkoutSearch]    = useState(stickyFilters.workoutSearch);
 
   // UI
   const [loading,  setLoading]  = useState(true);
   const [addedMap, setAddedMap] = useState({});
+  // Catalog id currently being deleted — a delete now sweeps every workout, so
+  // it takes long enough that a second tap has to be blocked.
+  const [deletingId, setDeletingId] = useState(null);
 
   // Remember the current filters so the next mount of this screen opens where
   // this one left off.
@@ -207,9 +235,11 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
     stickyFilters.activeTab       = activeTab;
     stickyFilters.exClassId       = exClassId;
     stickyFilters.movFilter       = movFilter;
+    stickyFilters.search          = search;
     stickyFilters.workoutsClassId = workoutsClassId;
     stickyFilters.workoutCategory = workoutCategory;
-  }, [activeTab, exClassId, movFilter, workoutsClassId, workoutCategory]);
+    stickyFilters.workoutSearch   = workoutSearch;
+  }, [activeTab, exClassId, movFilter, search, workoutsClassId, workoutCategory, workoutSearch]);
 
   useEffect(() => {
     Promise.all([loadClasses(), loadExercises(), loadExampleWorkouts()])
@@ -219,6 +249,15 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
   // Re-fetch exercises / workouts when navigating back to this screen
   useEffect(() => {
     const unsub = navigation.addListener('focus', () => {
+      // Editing an exercise leaves the gallery and comes back to it. Re-assert
+      // the remembered filters on the way back so the edit lands on the same
+      // "hip" / class / type view it started from, whatever the stack did in
+      // between (pop, fresh push, or a remount).
+      setActiveTab(stickyFilters.activeTab ?? 'exercises');
+      setMovFilter(stickyFilters.movFilter);
+      setSearch(stickyFilters.search);
+      setWorkoutCategory(stickyFilters.workoutCategory);
+      setWorkoutSearch(stickyFilters.workoutSearch);
       loadExercises();
       loadExampleWorkouts();
     });
@@ -261,13 +300,55 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
 
   // ── Delete handlers ──────────────────────────────────────────────────────────
 
+  // Deleting a movement takes it out of the players' workouts too. Without that
+  // the workout keeps a copy of something that no longer exists — same name, but
+  // its how-to card (video + cues) now resolves to nothing, and nothing anywhere
+  // says why. The confirmation names the damage before it's done.
   async function handleDeleteExercise(item) {
-    confirmAction(`Delete "${item.name}"?`, async () => {
+    if (deletingId) return;
+    setDeletingId(item.id);
+    const usage = await findExerciseUsage({ galleryId: item.id, name: item.name });
+    setDeletingId(null);
+    if (usage.error) {
+      notify(`Couldn't check where "${item.name}" is used, so nothing was deleted: ${usage.error.message}`);
+      return;
+    }
+
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+    const where = [
+      usage.workouts  ? plural(usage.workouts, 'player workout')   : null,
+      usage.templates ? plural(usage.templates, 'library workout') : null,
+    ].filter(Boolean).join(' and ');
+    const message = where
+      ? `Delete "${item.name}"?\n\nIt will also be taken out of ${where}. This cannot be undone.`
+      : `Delete "${item.name}"?`;
+
+    confirmAction(message, async () => {
+      setDeletingId(item.id);
+      // The copies are swept FIRST: deleting the catalog row nulls every
+      // `gallery_id` pointing at it, leaving only the weaker name match to find
+      // them. A failure here leaves the catalog entry standing, so a retry is
+      // still a complete delete.
+      const purge = await deleteExerciseEverywhere({ galleryId: item.id, name: item.name });
+      if (purge.error) {
+        setDeletingId(null);
+        notify(`Couldn't take "${item.name}" out of existing workouts, so it was left in the library: ${purge.error.message}`);
+        return;
+      }
+
       const { error } = await supabase
         .from('exercises_gallery')
         .delete()
         .eq('id', item.id);
-      if (!error) setExercises(prev => prev.filter(e => e.id !== item.id));
+      setDeletingId(null);
+      if (error) {
+        notify(`Removed from workouts, but the library entry didn't delete: ${error.message}`);
+        return;
+      }
+      setExercises(prev => prev.filter(e => e.id !== item.id));
+      if (purge.workouts || purge.templates) {
+        notify(`"${item.name}" deleted — and taken out of ${plural(purge.workouts, 'player workout')} and ${plural(purge.templates, 'library workout')}.`);
+      }
     });
   }
 
@@ -334,11 +415,12 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
   // ── Cards ─────────────────────────────────────────────────────────────────────
 
   function renderSelectionCard({ item }) {
+    if (item.__filler) return <View style={styles.selCardCol} />;
     const thumbId  = getYouTubeId(item.youtube_url);
     const thumbUri = thumbId ? `https://img.youtube.com/vi/${thumbId}/mqdefault.jpg` : null;
     const isAdded  = !!addedMap[item.id];
     return (
-      <View style={styles.selCard}>
+      <View style={[styles.selCard, selCols > 1 && styles.selCardCol]}>
         {/* Tapping the thumbnail/name opens the full exercise detail (video +
             cues); the + ADD button stays separate so it still just adds. */}
         <TouchableOpacity
@@ -375,7 +457,7 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
 
   function renderBrowseCard({ item }) {
     return (
-      <View style={styles.browseCard}>
+      <View style={[styles.browseCard, nodeStyle]}>
         <TouchableOpacity
           style={styles.browseCardInner}
           onPress={() => navigation.navigate('ExerciseDetail', { exercise: item })}
@@ -387,11 +469,12 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
 
         {/* Delete button — admin browse only */}
         <TouchableOpacity
-          style={styles.exDeleteBtn}
+          style={[styles.exDeleteBtn, deletingId === item.id && styles.exDeleteBtnBusy]}
           onPress={() => handleDeleteExercise(item)}
+          disabled={!!deletingId}
           hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
         >
-          <Text style={styles.exDeleteText}>✕</Text>
+          <Text style={styles.exDeleteText}>{deletingId === item.id ? '…' : '✕'}</Text>
         </TouchableOpacity>
       </View>
     );
@@ -399,10 +482,23 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
 
   const selectedCount = pendingExercises?.length ?? 0;
 
+  // Multi-column FlatList rows share their width with `flex: 1`, so a last row
+  // holding 1 of 3 cards would stretch that card across the whole card. Pad the
+  // data with invisible fillers to keep every row's cards the same width.
+  const selData = useMemo(() => {
+    if (selCols < 2) return filteredExercises;
+    const rem = filteredExercises.length % selCols;
+    if (rem === 0) return filteredExercises;
+    return [
+      ...filteredExercises,
+      ...Array.from({ length: selCols - rem }, (_, i) => ({ id: `__filler_${i}`, __filler: true })),
+    ];
+  }, [filteredExercises, selCols]);
+
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
-    <ScreenFrame fill>
+    <ScreenFrame fill maxWidth={cardW}>
     <View style={styles.container}>
 
       {/* Header */}
@@ -489,9 +585,13 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
           </View>
 
           <FlatList
-            data={filteredExercises}
+            data={selData}
             keyExtractor={item => item.id}
             renderItem={renderSelectionCard}
+            /* numColumns can't change on a live list — the key remounts it. */
+            key={`sel-${selCols}`}
+            numColumns={selCols}
+            columnWrapperStyle={selCols > 1 ? styles.selRow : undefined}
             contentContainerStyle={styles.selList}
             ListEmptyComponent={
               loading
@@ -557,7 +657,7 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
               </View>
             ) : (
               <ScrollView style={styles.gridScroll} contentContainerStyle={styles.browseGrid} showsVerticalScrollIndicator={false}>
-                <View style={styles.browseGridWrap}>
+                <View style={[styles.browseGridWrap, wide && styles.browseGridWrapWide]}>
                   {filteredExercises.map(item => (
                     <React.Fragment key={item.id}>{renderBrowseCard({ item })}</React.Fragment>
                   ))}
@@ -637,16 +737,18 @@ export default function ExerciseGalleryScreen({ route, navigation }) {
                     )}
                   </View>
                 ) : (
-                  shownWorkouts.map(workout => (
-                    <WorkoutCard
-                      key={workout.id}
-                      workout={workout}
-                      expanded={expandedWorkout === workout.id}
-                      onToggle={() => setExpandedWorkout(prev => prev === workout.id ? null : workout.id)}
-                      onEdit={() => navigation.navigate('AddExampleWorkout', { workout })}
-                      onDelete={() => handleDeleteWorkout(workout)}
-                    />
-                  ))
+                  <View style={wide && styles.workoutsWrapWide}>
+                    {shownWorkouts.map(workout => (
+                      <View key={workout.id} style={wide && styles.workoutColWide}>
+                        <WorkoutCard
+                          workout={workout}
+                          onOpen={() => navigation.navigate('WorkoutDetail', { preview: workout })}
+                          onEdit={() => navigation.navigate('AddExampleWorkout', { workout })}
+                          onDelete={() => handleDeleteWorkout(workout)}
+                        />
+                      </View>
+                    ))}
+                  </View>
                 )}
                 <View style={{ height: 40 }} />
               </ScrollView>
@@ -780,6 +882,9 @@ const styles = StyleSheet.create({
   // ── Selection mode ───────────────────────────────────────────────────────────
 
   selList: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 100, gap: 10 },
+  // Desktop selection list: even columns (each card flexes to its share).
+  selRow: { gap: 10 },
+  selCardCol: { flex: 1 },
   selCard: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: SL.panel, borderWidth: 1.5, borderColor: SL.border,
@@ -824,6 +929,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row', flexWrap: 'wrap',
     justifyContent: 'space-between', rowGap: GRID_GAP,
   },
+  // Desktop grid: explicit column gap, rows packed from the left, so a last row
+  // holding 1 of 4 nodes sits under the first column instead of being stretched
+  // across the whole card by `space-between`.
+  browseGridWrapWide: { justifyContent: 'flex-start', columnGap: GRID_GAP },
   // Name-only node: fixed height so every card lines up; the name is centered
   // inside, so a 1-line name sits mid-card and a 2-line name fills it evenly.
   browseCard: {
@@ -876,6 +985,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.4, shadowRadius: 4,
   },
+  exDeleteBtnBusy: { opacity: 0.5 },
   exDeleteText: { fontFamily: F.body, fontSize: 15, color: '#fff', lineHeight: 17 },
 
   // ── Done bar ──────────────────────────────────────────────────────────────────
@@ -904,6 +1014,10 @@ const styles = StyleSheet.create({
   // ── Workout cards ─────────────────────────────────────────────────────────────
 
   workoutsList: { paddingHorizontal: 16, paddingTop: 12 },
+  // Desktop: example workouts run two-up — a full-width row per workout across a
+  // 1600px card is one title and an ocean of empty panel.
+  workoutsWrapWide: { flexDirection: 'row', flexWrap: 'wrap', columnGap: 14 },
+  workoutColWide:   { width: '49%' },
   workoutCard: {
     backgroundColor: SL.panel, borderWidth: 1.5, borderColor: SL.border,
     borderRadius: 4, marginBottom: 14, overflow: 'hidden',
@@ -936,28 +1050,4 @@ const styles = StyleSheet.create({
   },
   cardDeleteText: { fontFamily: F.body, fontSize: 20, color: SL.danger },
 
-  workoutExercises: {
-    borderTopWidth: 1, borderTopColor: SL.border,
-    paddingHorizontal: 16, paddingVertical: 12, gap: 12,
-  },
-  exerciseRow: {
-    flexDirection: 'row', alignItems: 'flex-start',
-    justifyContent: 'space-between', gap: 8,
-  },
-  exerciseRowLeft: {
-    flex: 1, flexDirection: 'row', alignItems: 'flex-start', gap: 12,
-  },
-  exerciseLetter: {
-    fontFamily: F.heading, fontSize: 19, color: SL.accent,
-    letterSpacing: 1, width: 24, marginTop: 1,
-  },
-  exerciseName: {
-    fontFamily: F.bodyMed, fontSize: 17, color: SL.text, letterSpacing: 0.5,
-  },
-  exerciseNotes: {
-    fontFamily: F.body, fontSize: 14, color: SL.muted, letterSpacing: 0.3, marginTop: 2,
-  },
-  exerciseSetsReps: {
-    fontFamily: F.heading, fontSize: 16, color: SL.gold, letterSpacing: 1, marginTop: 2,
-  },
 });

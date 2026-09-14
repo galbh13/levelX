@@ -56,6 +56,30 @@ export function checkupDueState(checkupDay, submittedAt, now = new Date()) {
   return sched.status === 'grace' ? 'late' : 'due';
 }
 
+// ─── Coach side: is this player's check-up owed RIGHT NOW? ──────────────────────
+// checkupDueState answers the PLAYER's question ("do I owe one today?") and goes
+// quiet again once the grace day passes. The coach needs the opposite: a check-up
+// that was never sent stays owed until it IS sent. checkupCycleState measures the
+// whole cycle instead — how many days have passed since the player's day came
+// round, and whether anything landed since.
+//   'due'         — today IS their day, nothing sent for this cycle yet
+//   'late'        — their day has passed (daysLate 1..6), still nothing sent
+//   'clear'       — sent for this cycle
+//   'unscheduled' — no check-up day pinned on them at all
+export function checkupCycleState(checkupDay, submittedAt, now = new Date()) {
+  if (checkupDay == null) return { status: 'unscheduled', daysLate: 0 };
+  const start = checkupCycleStart(checkupDay, now);
+  if (submittedAt && new Date(submittedAt) >= start) {
+    return { status: 'clear', daysLate: 0, checkupDay, dayName: WEEKDAYS[checkupDay] };
+  }
+  // 0 = their day IS today, 1..6 = that many days since it passed.
+  const daysLate = ((now.getDay() - checkupDay) % 7 + 7) % 7;
+  return {
+    status: daysLate === 0 ? 'due' : 'late',
+    daysLate, checkupDay, dayName: WEEKDAYS[checkupDay],
+  };
+}
+
 // The two reads the due-check needs (the player's day + their newest submission),
 // in one call → 'none' | 'due' | 'late'. Used by the tab-dot context.
 export async function fetchCheckupDueState(userId) {

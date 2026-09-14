@@ -37,7 +37,13 @@ const DESC_MAX   = 600;
 // ADD buttons. AdminCheckupScreen turns it OFF by default so the coach can screen-
 // record himself walking a player through their check-up without admin controls in
 // the frame; he flips it on only while actually changing something.
-export default function CheckupTemplateEditor({ scope, onCountChange, onSourceChange, editable = true }) {
+//
+// `wide` (default false) is the DESKTOP layout, passed down by a screen that has
+// already decided the canvas is desktop-sized (`useDesktopLayout`): the two parts
+// sit SIDE BY SIDE instead of stacked, and the rows step up a size. It is a prop
+// rather than its own breakpoint read so the editor can never disagree with the
+// screen hosting it.
+export default function CheckupTemplateEditor({ scope, onCountChange, onSourceChange, editable = true, wide = false }) {
   const [items,   setItems]   = useState([]);
   const [loading, setLoading] = useState(true);
   const [busyId,  setBusyId]  = useState(null);
@@ -160,44 +166,47 @@ export default function CheckupTemplateEditor({ scope, onCountChange, onSourceCh
     return <View style={styles.center}><ActivityIndicator color={C.iceGlow} /></View>;
   }
 
+  const itemRow = (it, i) => (
+    <View key={it.id} style={[styles.itemCard, wide && W.itemCard]}>
+      <Text style={[styles.itemNum, wide && W.itemNum]}>{i + 1}</Text>
+      <View style={styles.itemMain}>
+        <Text style={[styles.itemPrompt, wide && W.itemPrompt]}>{it.prompt}</Text>
+      </View>
+      {editable && (
+        <RowActions busy={busyId === it.id} onEdit={() => openEdit(it)} onDelete={() => remove(it)} wide={wide} />
+      )}
+    </View>
+  );
+
   return (
     <View>
+    {/* On a desktop canvas the two parts are columns, not a 600px-long scroll —
+        the whole check-up is then one screenful the coach can talk over. The
+        modal stays OUTSIDE this row: a <Modal> is a flex child like any other
+        on react-native-web, and inside a row it would be laid out as a third
+        column. */}
+    <View style={wide ? W.columns : null}>
       {/* Part 1 — Questions */}
-      <PartHead n={1} label="QUESTIONS" hint="Diet, sleep, how the week felt — plain text answers." />
-      {questions.map((q, i) => (
-        <View key={q.id} style={styles.itemCard}>
-          <Text style={styles.itemNum}>{i + 1}</Text>
-          <View style={styles.itemMain}>
-            <Text style={styles.itemPrompt}>{q.prompt}</Text>
-          </View>
-          {editable && (
-            <RowActions busy={busyId === q.id} onEdit={() => openEdit(q)} onDelete={() => remove(q)} />
-          )}
-        </View>
-      ))}
-      {questions.length === 0 && <Text style={styles.emptyLine}>No questions yet.</Text>}
-      {editable && (
-        <PillButton label="＋  ADD QUESTION" onPress={() => openAdd(CHECKUP_PART.QUESTION)} size="sm" style={styles.addBtn} />
-      )}
+      <View style={wide ? W.column : null}>
+        <PartHead n={1} label="QUESTIONS" hint="Diet, sleep, how the week felt — plain text answers." wide={wide} />
+        {questions.map(itemRow)}
+        {questions.length === 0 && <Text style={[styles.emptyLine, wide && W.emptyLine]}>No questions yet.</Text>}
+        {editable && (
+          <PillButton label="＋  ADD QUESTION" onPress={() => openAdd(CHECKUP_PART.QUESTION)} size={wide ? 'md' : 'sm'} style={styles.addBtn} />
+        )}
+      </View>
 
       {/* Part 2 — Exercises */}
-      <View style={{ height: 26 }} />
-      <PartHead n={2} label="EXERCISES" hint="Describe what you want to see; the player records their own clip." />
-      {exercises.map((ex, i) => (
-        <View key={ex.id} style={styles.itemCard}>
-          <Text style={styles.itemNum}>{i + 1}</Text>
-          <View style={styles.itemMain}>
-            <Text style={styles.itemPrompt}>{ex.prompt}</Text>
-          </View>
-          {editable && (
-            <RowActions busy={busyId === ex.id} onEdit={() => openEdit(ex)} onDelete={() => remove(ex)} />
-          )}
-        </View>
-      ))}
-      {exercises.length === 0 && <Text style={styles.emptyLine}>No exercises yet.</Text>}
-      {editable && (
-        <PillButton label="＋  ADD EXERCISE" onPress={() => openAdd(CHECKUP_PART.EXERCISE)} size="sm" style={styles.addBtn} />
-      )}
+      <View style={wide ? W.column : null}>
+        {!wide && <View style={{ height: 26 }} />}
+        <PartHead n={2} label="EXERCISES" hint="Describe what you want to see; the player records their own clip." wide={wide} />
+        {exercises.map(itemRow)}
+        {exercises.length === 0 && <Text style={[styles.emptyLine, wide && W.emptyLine]}>No exercises yet.</Text>}
+        {editable && (
+          <PillButton label="＋  ADD EXERCISE" onPress={() => openAdd(CHECKUP_PART.EXERCISE)} size={wide ? 'md' : 'sm'} style={styles.addBtn} />
+        )}
+      </View>
+    </View>
 
       {/* Item form */}
       <Modal visible={!!form} transparent animationType="fade" onRequestClose={() => setForm(null)}>
@@ -256,26 +265,26 @@ export default function CheckupTemplateEditor({ scope, onCountChange, onSourceCh
   );
 }
 
-function PartHead({ n, label, hint }) {
+function PartHead({ n, label, hint, wide = false }) {
   return (
-    <View style={styles.partHead}>
-      <View style={styles.partChip}><Text style={styles.partChipText}>PART {n}</Text></View>
+    <View style={[styles.partHead, wide && W.partHead]}>
+      <View style={[styles.partChip, wide && W.partChip]}><Text style={[styles.partChipText, wide && W.partChipText]}>PART {n}</Text></View>
       <View style={{ flex: 1 }}>
-        <Text style={styles.partLabel}>{label}</Text>
-        <Text style={styles.partHint}>{hint}</Text>
+        <Text style={[styles.partLabel, wide && W.partLabel]}>{label}</Text>
+        <Text style={[styles.partHint, wide && W.partHint]}>{hint}</Text>
       </View>
     </View>
   );
 }
 
-function RowActions({ onEdit, onDelete, busy }) {
+function RowActions({ onEdit, onDelete, busy, wide = false }) {
   return (
     <View style={styles.rowActions}>
       <TouchableOpacity onPress={onEdit} disabled={busy} style={styles.actBtn}>
-        <Text style={styles.actEdit}>EDIT</Text>
+        <Text style={[styles.actEdit, wide && W.actEdit]}>EDIT</Text>
       </TouchableOpacity>
       <TouchableOpacity onPress={onDelete} disabled={busy} style={styles.actBtn}>
-        {busy ? <ActivityIndicator size="small" color="#FF6B6B" /> : <Text style={styles.actDel}>✕</Text>}
+        {busy ? <ActivityIndicator size="small" color="#FF6B6B" /> : <Text style={[styles.actDel, wide && W.actDel]}>✕</Text>}
       </TouchableOpacity>
     </View>
   );
@@ -341,4 +350,29 @@ const styles = StyleSheet.create({
   multiline: { minHeight: 90, lineHeight: 22 },
   formErr: { fontFamily: F.bodyMed, fontSize: 13, color: '#FF6B6B', letterSpacing: 0.4, marginTop: 14 },
   modalBtns: { flexDirection: 'row', gap: 12, marginTop: 22 },
+});
+
+// ─── THE DESKTOP OVERRIDES ──────────────────────────────────────────────────
+// Layered on top of `styles` when the host screen passes `wide` (see the prop
+// note on the component). Same rule as AdminCheckupScreen's sheet: these only
+// ever ADD to a phone style, so the phone layout above stays the one real
+// layout and can't be moved by a desktop tweak.
+const W = StyleSheet.create({
+  columns: { flexDirection: 'row', gap: 40, alignItems: 'flex-start' },
+  column:  { flex: 1 },
+
+  partHead: { gap: 16, marginBottom: 20 },
+  partChip: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 10 },
+  partChipText: { fontSize: 15, letterSpacing: 2 },
+  partLabel: { fontSize: 24, letterSpacing: 4 },
+  partHint: { fontSize: 16, marginTop: 5 },
+
+  itemCard: { padding: 22, gap: 16, borderRadius: 18, marginBottom: 16 },
+  itemNum: { fontSize: 17, minWidth: 22, paddingTop: 4 },
+  itemPrompt: { fontSize: 21, lineHeight: 30 },
+
+  actEdit: { fontSize: 15, letterSpacing: 2 },
+  actDel: { fontSize: 21 },
+
+  emptyLine: { fontSize: 18, marginBottom: 16 },
 });

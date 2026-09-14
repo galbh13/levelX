@@ -7,6 +7,8 @@ import { F } from '../constants/fonts';
 import { C, CUE_TINTS } from '../constants/colors';
 import ScreenFrame from '../components/ScreenFrame';
 import VideoPlayer from '../components/VideoPlayer';
+import { GearCallout } from '../components/CoachText';
+import { gearFromLine } from '../lib/gear';
 
 function getYouTubeEmbedUrl(url) {
   if (!url) return null;
@@ -211,6 +213,12 @@ function parseDescription(raw) {
   };
 
   for (const line of lines) {
+    // The asterisk rule, shared with CoachText: "*weights required" is kit, not
+    // prose. Checked first — a requirement must never fall through to the
+    // bullet rule and lose its meaning.
+    const gear = gearFromLine(line);
+    if (gear) { blocks.push({ kind: 'gear', items: gear }); continue; }
+
     const step = line.match(DESC_STEP);
     if (step) { push('steps', { n: step[1], text: step[2] }); continue; }
 
@@ -262,6 +270,10 @@ function DescriptionBody({ text }) {
               ))}
             </View>
           );
+        }
+
+        if (block.kind === 'gear') {
+          return <GearCallout key={bi} items={block.items} />;
         }
 
         if (block.kind === 'note') {

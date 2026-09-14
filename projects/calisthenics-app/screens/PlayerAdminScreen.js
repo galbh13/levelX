@@ -107,6 +107,13 @@ export default function PlayerAdminScreen({ navigation, route }) {
 
   const actions = [
     {
+      key: 'profile',
+      label: 'PROFILE',
+      // The player's own PROFILE page (portrait · PLAYER & GOALS · PLAYER CARD) —
+      // the same screen they see on their PROFILE tab, pointed at THIS player.
+      onPress: () => navigation.navigate('PlayerProfile', { studentId: player?.id }),
+    },
+    {
       key: 'checkup',
       label: 'CHECK-UP',
       onPress: () => navigation.navigate('PlayerCheckup', { player }),

@@ -19,15 +19,17 @@ import ClearSweep from '../components/ClearSweep';
 import DoneAura from '../components/DoneAura';
 import QuestGate from '../components/QuestGate';
 import { hapticTap } from '../lib/haptics';
+import { chargeMs, playCharge } from '../lib/sfx';
 import { CARD_W } from '../constants/layout';
 import { sessionKey, activeSessionKeys } from '../lib/workoutSession';
 import { useTourTarget } from '../lib/tourTargets';
 import { useTour } from '../context/TourContext';
 import { lighten, rgba } from '../lib/colorMix';
 // Master switch for the guided walkthrough. OFF until the tutorial is ready to
-// ship — the TUTORIAL pill is the only way it can be started, so hiding it makes
-// the tour unreachable without ripping any of it out.
-const TUTORIAL_ENABLED = false;
+// ship. It now gates TWO entry points — this screen's TUTORIAL pill and the
+// TUTORIAL node on the PROFILE tab — so the value itself lives in
+// constants/flags.js and both read the one switch.
+import { TUTORIAL_ENABLED } from '../constants/flags';
 
 // EVERY typed mission glows in its own type color — the same hex the launcher
 // window wears, so the row you tap and the window that opens are one thing.
@@ -170,6 +172,9 @@ export default function HomeScreen({ navigation }) {
   const [lvl,            setLvl]            = useState(0);
   const [maxLvl,         setMaxLvl]         = useState(0);
   const [prestigeReady,  setPrestigeReady]  = useState(false);
+  // The class's prestige level gate. Kept in state (not just used inline in the
+  // evaluator) because the bar's right-hand label counts down to it — see toNext.
+  const [prestigeAt,     setPrestigeAt]     = useState(null);
   const [stars,          setStars]          = useState(0);
   const [dailyQuests,    setDailyQuests]    = useState([]);
   const [doneTodayIds,   setDoneTodayIds]   = useState(new Set());
@@ -275,7 +280,17 @@ export default function HomeScreen({ navigation }) {
     // in lockstep while each runs where it belongs: the bar's slide natively, the
     // count-up in JS (a listener can't read a native value without dragging every
     // frame back over the bridge).
-    const cfg = { toValue: 1, duration: 1100, delay: 260, easing: Easing.out(Easing.cubic) };
+    // ── The charge ────────────────────────────────────────────────────────
+    // How long the bar takes is no longer a constant: it is set by HOW MUCH
+    // there is to charge. A level-1 sliver snaps up in under half a second; a
+    // nearly-full bar takes three times that to climb. The SAME number picks
+    // the charge sound (chargeMs and playCharge read one ladder — see
+    // CHARGE_STEPS in lib/sfx), so the rising tone runs exactly as long as the
+    // fill and its lock chime lands on the frame the bar arrives. Delay the
+    // sound by the animation's own delay so they start together.
+    const frac = targetPct / 100;
+    const cfg = { toValue: 1, duration: chargeMs(frac), delay: 260, easing: Easing.out(Easing.cubic) };
+    const soundAt = setTimeout(() => playCharge(frac), 260);
     const sub = countUp.addListener(({ value }) => {
       setDisplayLvl(Math.round(value * lvl));
     });
@@ -286,7 +301,7 @@ export default function HomeScreen({ navigation }) {
       if (finished) { setDisplayLvl(lvl); introDone.current = true; }
       countUp.removeListener(sub);
     });
-    return () => { countUp.removeListener(sub); slide.stop(); count.stop(); };
+    return () => { clearTimeout(soundAt); countUp.removeListener(sub); slide.stop(); count.stop(); };
   }, [loading, !!profile, heroAnim, statAnim, gridAnim, barGrow, countUp]);
 
   // After the intro count-up settles, keep the number/bar in sync with later
@@ -356,6 +371,7 @@ export default function HomeScreen({ navigation }) {
       setClassName(classRes.data?.name ?? null);
       setLvl(lvlVal ?? 0);
       setMaxLvl(maxLvlVal ?? 0);
+      setPrestigeAt(classRes.data?.prestige_at ?? null);
 
       // Gold bar = prestige actually AVAILABLE (full gate), not just the level
       // line. Same evaluator SkillsScreen uses.
@@ -524,7 +540,19 @@ export default function HomeScreen({ navigation }) {
 
   const missionLive  = !!activeMission && inProgress.has(sessionKey(TODAY, activeMission.id));
   const allDone      = workouts.length > 0 && workouts.every(w => w.completed);
+  // The bar's right-hand label. It used to count down to maxLvl, which is the
+  // wrong finish line: nothing happens at the class cap, while PRESTIGE fires at
+  // `prestige_at` (90 of 110 on Handstand III) and is the thing the player is
+  // actually training towards. Counting to the cap made Home say "40 TO GO"
+  // while Skills showed the real gate 20 levels away.
+  //   below the gate  → count down to prestige
+  //   past it         → the gate is no longer the target, so fall back to the
+  //                     cap (the PRESTIGE READY pill above covers the rest)
+  const toPrestige   = prestigeAt == null ? 0 : Math.max(0, prestigeAt - lvl);
   const toNext       = Math.max(0, maxLvl - lvl);
+  const nextLabel    = toPrestige > 0 ? `${toPrestige} TO PRESTIGE`
+                     : toNext > 0     ? `${toNext} TO GO`
+                     : 'MAXED';
   const missionsDone = workouts.filter(w => w.completed).length;
   const dqDone       = dailyQuests.filter(q => doneTodayIds.has(q.id)).length;
 
@@ -675,8 +703,8 @@ export default function HomeScreen({ navigation }) {
 
               <View style={styles.levelBottomRow}>
                 <Text style={styles.progressLabel}>{lvl} / {maxLvl}</Text>
-                <Text style={styles.toNextLabel}>
-                  {toNext > 0 ? `${toNext} TO GO` : 'MAXED'}
+                <Text style={styles.toNextLabel} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+                  {nextLabel}
                 </Text>
               </View>
             </View>
@@ -694,7 +722,7 @@ export default function HomeScreen({ navigation }) {
               <View style={styles.panelHeader}>
                 <View style={styles.panelHeaderBar} />
                 <Text style={[styles.panelHeaderText, d.panelHeaderText]} numberOfLines={2} ellipsizeMode="tail">
-                  TODAY'S MISSIONS
+                  TODAY'S TRAINING
                 </Text>
                 {workouts.length > 0 && (
                   <View style={[styles.countChip, allDone && styles.countChipDone]}>
@@ -1275,7 +1303,7 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
   },
   // The title wraps to two lines (e.g. DAILY / QUESTS); flex:1 keeps it from
-  // shoving the badge, and the size is tuned so the longest word ("MISSIONS")
+  // shoving the badge, and the size is tuned so the longest word ("TRAINING")
   // still fits one line next to the inline badge.
   panelHeaderText: {
     flex: 1,

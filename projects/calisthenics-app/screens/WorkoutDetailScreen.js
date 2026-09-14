@@ -12,7 +12,7 @@ import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
 import CoachText, { parseCoachText } from '../components/CoachText';
 import { buildGalleryIndex, resolveGuide } from '../lib/exerciseGuide';
-import { categoryLabel } from '../lib/workouts';
+import { categoryLabel, templateExercisePreview, isAccumulate, accumTarget } from '../lib/workouts';
 
 
 // Session-lifetime cache of everything the screen fetches, keyed by workout id.
@@ -39,7 +39,22 @@ const SL = {
 // carries through the live session. Reading the workout is the app's own chrome:
 // it stays ice, like every other detail/reading screen.
 export default function WorkoutDetailScreen({ route, navigation }) {
-  const { workout, studentView } = route.params;
+  const { studentView, preview } = route.params;
+
+  // PREVIEW — a gallery example workout, read with this screen instead of the
+  // list card's cramped inline expansion. A template is not a workouts row: its
+  // exercises live inline on it, there is nothing to fetch by id, and "edit"
+  // means the library editor. Everything below reads `workout` either way; the
+  // template just arrives already loaded.
+  const workout = preview
+    ? {
+        id: `template:${preview.id}`,
+        title: preview.title,
+        purpose: preview.description ?? '',
+        branches: preview.branches ?? [],
+        category: preview.category ?? null,
+      }
+    : route.params.workout;
 
   // Who may EDIT is decided by the navigator, not by the caller's params:
   // `isAdmin` is true only under the coach-side CoachProvider (AdminNavigator).
@@ -50,10 +65,15 @@ export default function WorkoutDetailScreen({ route, navigation }) {
 
   // Seed everything from the cache when this workout was opened before — the
   // full content paints on the very first frame, no spinner.
-  const cached = detailCache.get(workout.id);
+  // A template carries its own exercises, so it is never cached and never waits:
+  // the list is on screen from the first frame, and the catalog fetch below only
+  // adds the video links.
+  const cached = preview ? null : detailCache.get(workout.id);
 
-  const [exercises,      setExercises]      = useState(cached?.exercises ?? []);
-  const [loading,        setLoading]        = useState(!cached);
+  const [exercises,      setExercises]      = useState(
+    preview ? templateExercisePreview(preview) : (cached?.exercises ?? []),
+  );
+  const [loading,        setLoading]        = useState(!preview && !cached);
   const [workoutTitle,    setWorkoutTitle]    = useState(cached?.workoutTitle   ?? workout.title   ?? '');
   const [workoutPurpose,  setWorkoutPurpose]  = useState(cached?.workoutPurpose ?? workout.purpose ?? '');
   const [coachFeedback,   setCoachFeedback]   = useState(cached?.coachFeedback  ?? workout.coachFeedback  ?? null);
@@ -70,6 +90,21 @@ export default function WorkoutDetailScreen({ route, navigation }) {
   const loadedRef = useRef(!!cached);
 
   const fetchExercises = useCallback(async () => {
+    // Preview: nothing to load but the catalog, which is what turns an exercise
+    // name into a tappable how-to card and a WATCH VIDEO button.
+    if (preview) {
+      const { data } = await supabase.from('exercises_gallery').select('*');
+      const { byId, byName } = buildGalleryIndex(data);
+      setGalleryById(byId);
+      setGalleryByName(byName);
+      setExercises(templateExercisePreview(preview).map(ex => ({
+        ...ex,
+        youtube_url: resolveGuide(ex, byId, byName).youtube_url ?? null,
+      })));
+      loadedRef.current = true;
+      return;
+    }
+
     if (!loadedRef.current) setLoading(true);
     try {
       const queries = [
@@ -135,7 +170,7 @@ export default function WorkoutDetailScreen({ route, navigation }) {
     }
     loadedRef.current = true;
     setLoading(false);
-  }, [workout.id, workout.overrideId]);
+  }, [workout.id, workout.overrideId, preview]);
 
   useFocusEffect(useCallback(() => { fetchExercises(); }, [fetchExercises]));
 
@@ -181,19 +216,32 @@ export default function WorkoutDetailScreen({ route, navigation }) {
             {ex.name?.toUpperCase()}
           </Text>
         </TouchableOpacity>
-        {ex.variation ? <CoachText text={ex.variation} style={styles.exVariation} prefix="※ " /> : null}
+        {ex.variation ? <CoachText text={ex.variation} style={styles.exVariation} /> : null}
         <View style={styles.metaRow}>
           {ex.superset_group != null ? (
             <View style={[styles.metaChip, { borderColor: SL.accent }]}>
               <Text style={styles.metaChipText}>⇄ SUPERSET</Text>
             </View>
           ) : null}
-          {ex.sets ? (
-            <View style={styles.metaChip}><Text style={styles.metaChipText}>{ex.sets} SETS</Text></View>
-          ) : null}
-          {ex.reps ? (
-            <View style={styles.metaChip}><Text style={styles.metaChipText}>{ex.reps} REPS</Text></View>
-          ) : null}
+          {/* "???" is authoring shorthand — the player never sees it. An
+              accumulate exercise reads as one chip: the rep TOTAL it owes,
+              with the set count deliberately left open. */}
+          {isAccumulate(ex.sets) ? (
+            <View style={[styles.metaChip, { borderColor: SL.accent }]}>
+              <Text style={styles.metaChipText}>
+                ∞ SETS · {accumTarget(ex.reps) ? `${accumTarget(ex.reps)} REPS TOTAL` : 'ACCUMULATE'}
+              </Text>
+            </View>
+          ) : (
+            <>
+              {ex.sets ? (
+                <View style={styles.metaChip}><Text style={styles.metaChipText}>{ex.sets} SETS</Text></View>
+              ) : null}
+              {ex.reps ? (
+                <View style={styles.metaChip}><Text style={styles.metaChipText}>{ex.reps} REPS</Text></View>
+              ) : null}
+            </>
+          )}
         </View>
         {ex.notes ? <CoachText text={ex.notes} style={styles.exNotes} /> : null}
         {ex.youtube_url ? (
@@ -319,9 +367,13 @@ export default function WorkoutDetailScreen({ route, navigation }) {
               action there is. */}
           {isCoach ? (
             <PillButton
-              label="EDIT WORKOUT"
+              label={preview ? 'EDIT TEMPLATE' : 'EDIT WORKOUT'}
               size="lg"
-              onPress={() => navigation.navigate('WorkoutEdit', { workout, exercises })}
+              // A library example is edited in the library editor — WorkoutEdit
+              // writes to a player's workouts row, which a template has none of.
+              onPress={() => (preview
+                ? navigation.navigate('AddExampleWorkout', { workout: preview })
+                : navigation.navigate('WorkoutEdit', { workout, exercises }))}
               style={{ marginTop: 8, alignSelf: 'center' }}
             />
           ) : null}

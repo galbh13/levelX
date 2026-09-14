@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  ActivityIndicator, TextInput, Animated, Easing, Modal,
+  ActivityIndicator, TextInput, Animated, Easing, Modal, Platform,
 } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { materializeDay } from '../lib/schedule';
@@ -13,10 +13,15 @@ import ScreenFrame from '../components/ScreenFrame';
 import PillButton from '../components/PillButton';
 import PopCheck from '../components/PopCheck';
 import CoachText, { parseCoachText } from '../components/CoachText';
-import { ShimmerFill, BLUE } from '../components/Shimmer';
+import Svg, { Circle, Path } from 'react-native-svg';
+import { ShimmerFill, ShimmerFrame, ShimmerText, BLUE, GOLD } from '../components/Shimmer';
 import { hapticTap, hapticSuccess } from '../lib/haptics';
+
 import { buildGalleryIndex, resolveGuide } from '../lib/exerciseGuide';
-import { categoryLabel, categoryMeta } from '../lib/workouts';
+import {
+  categoryLabel, categoryMeta,
+  parseSets, accumTarget, accumDone, accumRows, MAX_ACCUM_SETS,
+} from '../lib/workouts';
 
 const SL = {
   bg:     '#050912',
@@ -57,41 +62,62 @@ const rgba = (hex, a) => {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-// `sets` may be a single count ("3") or a RANGE ("1-2"): `required` is the must-do
-// count (lower bound), `total` is how many set rows to show (upper bound). Sets
-// beyond `required` are optional/bonus.
-function parseSets(sets) {
-  const s = String(sets ?? '').trim();
-  const m = s.match(/^(\d+)\s*[-–]\s*(\d+)$/);
-  if (m) {
-    const a = parseInt(m[1], 10);
-    const b = parseInt(m[2], 10);
-    if (a >= 1 && b >= a) return { required: a, total: b };
-  }
-  const n = parseInt(s, 10);
-  const c = Number.isFinite(n) && n > 0 ? n : 1;
-  return { required: c, total: c };
-}
+// `sets` shapes — fixed ("3"), range ("1-2") and ACCUMULATE ("???") — are parsed
+// by the shared `parseSets` in lib/workouts, so the editor, the detail card and
+// this screen can never disagree about what the field means.
 
 function setsCountFor(ex) { return parseSets(ex.sets).total; }
 function requiredFor(ex)  { return parseSets(ex.sets).required; }
+
+// ── Accumulate ("???") ──────────────────────────────────────────────────────
+// No set count: the player owes a TOTAL number of reps and splits it however
+// today allows (50 = 20/20/10, or 20/15/15, or ten fives). Rows grow one at a
+// time as they're filled, capped at MAX_ACCUM_SETS so the card stays on screen.
+
+// Reps still owed on an accumulate exercise (0 once the target is banked).
+function accumLeft(ex, setLog) {
+  const target = accumTarget(ex.reps);
+  return target ? Math.max(0, target - accumDone(setLog)) : 0;
+}
+
+// Fraction of an exercise's work that's banked, 0..1 — drives the progress BAR
+// (the "n/m SETS" counter stays whole numbers). An accumulate exercise moves the
+// bar by reps, so a long 50-rep grind doesn't leave it frozen.
+function exFraction(ex, log) {
+  const setLog = log[ex.id] ?? [];
+  const { required, accumulate } = parseSets(ex.sets);
+  if (accumulate) {
+    const target = accumTarget(ex.reps);
+    if (!target) return setLog.some(s => s.done) ? 1 : 0;
+    return Math.min(1, accumDone(setLog) / target);
+  }
+  return Math.min(1, (setLog.filter(s => s.done).length) / Math.max(1, required));
+}
 
 // An exercise is "complete" once its REQUIRED sets are checked done — optional
 // (range) sets are bonus and never block completion. A SKIPPED exercise (player
 // bailed on it today) counts as complete too, so the NOW marker / flow move on
 // past it without it ever blocking the session.
+// An accumulate exercise is complete when the REP TOTAL is banked, however many
+// sets that took (no numeric target → one logged set is enough).
 function exComplete(ex, log, skipped) {
   if (skipped?.[ex.id]) return true;
-  const done = (log[ex.id] ?? []).filter(s => s.done).length;
-  return done >= requiredFor(ex);
+  const setLog = log[ex.id] ?? [];
+  if (parseSets(ex.sets).accumulate) {
+    const target = accumTarget(ex.reps);
+    return target ? accumDone(setLog) >= target : setLog.some(s => s.done);
+  }
+  return setLog.filter(s => s.done).length >= requiredFor(ex);
 }
 
 // Build a fresh per-set log, re-using any saved values for the same exercise.
 function buildLog(exercises, saved) {
   const log = {};
   for (const ex of exercises) {
-    const n = setsCountFor(ex);
     const savedSets = saved?.log?.[ex.id] ?? [];
+    // Accumulate rows are grown by the player, not declared by the field — a
+    // resumed session comes back with exactly the rows it left behind, plus one.
+    const n = parseSets(ex.sets).accumulate ? accumRows(savedSets) : setsCountFor(ex);
     log[ex.id] = Array.from({ length: n }, (_, i) => ({
       done: savedSets[i]?.done ?? false,
       reps: savedSets[i]?.reps ?? '',
@@ -236,10 +262,11 @@ function groupComplete(group, log, skipped) {
   return group.items.every(ex => exComplete(ex, log, skipped));
 }
 
-// A set row that flashes a soft green wash when its `done` flips true — the
-// most-repeated tap in the app gets a moment of feedback. The overlay is
-// absolute (doesn't disturb the flex row) and native-driver opacity only.
-function SetFlashRow({ done, style, children }) {
+// A set row that flashes a soft wash — in the session's own colour — when its
+// `done` flips true: the most-repeated tap in the app gets a moment of feedback.
+// The overlay is absolute (doesn't disturb the flex row) and native-driver
+// opacity only.
+function SetFlashRow({ done, wash, style, children }) {
   const flash = useRef(new Animated.Value(0)).current;
   const prev  = useRef(done);
   useEffect(() => {
@@ -255,30 +282,186 @@ function SetFlashRow({ done, style, children }) {
     <View style={style}>
       <Animated.View
         pointerEvents="none"
-        style={[StyleSheet.absoluteFillObject, styles.setFlash, { opacity: flash }]}
+        style={[
+          StyleSheet.absoluteFillObject,
+          styles.setFlash,
+          wash && { backgroundColor: wash },
+          { opacity: flash },
+        ]}
       />
       {children}
     </View>
   );
 }
 
-// Gentle breathing scale while `active` — used to pull the eye to FINISH once
-// the progress bar hits 100%. Sits at rest (scale 1) when inactive.
-function Breathe({ active, children }) {
-  const v = useRef(new Animated.Value(0)).current;
+// NOTE — there was a `Breathe` here (a looping 1 → 1.035 scale on the FINISH
+// button once every required set was done) and it was REMOVED 2026-09-11.
+// A scale transform on a FULL-WIDTH button grows it out of the card: 3.5% of a
+// phone's button is ~13px, half of it past each edge, so the one control at the
+// bottom of a session sat pulsing over the layout instead of in it. The button
+// already changes its label AND its colour when the board is clear (FINISH
+// WORKOUT/accent → COMPLETE THE MISSION/gold) — that is the signal, and it costs
+// no geometry. Don't put a looping scale back on anything that spans its
+// container; if something full-width has to move, move its border or run a light
+// over it (ShimmerFrame / DoneAura / ClearSweep), which stay inside the box.
+// A card that BLOOMS once when its work lands. Clearing a movement is the
+// smallest real achievement in a session, so it gets the same gold "award"
+// vocabulary the accumulate tally and the class gates already speak: one wash,
+// one spring, then quiet. A card that opens already-cleared (resumed session)
+// never replays it.
+function ExCardShell({ cleared, style, children }) {
+  const pop = useRef(new Animated.Value(0)).current;
+  const was = useRef(cleared);
   useEffect(() => {
-    if (!active) { v.setValue(0); return; }
-    const loop = Animated.loop(Animated.sequence([
-      Animated.timing(v, { toValue: 1, duration: 850, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-      Animated.timing(v, { toValue: 0, duration: 850, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-    ]));
-    loop.start();
-    return () => loop.stop();
-  }, [active, v]);
-  const scale = v.interpolate({ inputRange: [0, 1], outputRange: [1, 1.035] });
+    if (cleared && !was.current) {
+      pop.setValue(0);
+      Animated.timing(pop, {
+        toValue: 1, duration: 900, easing: Easing.out(Easing.quad), useNativeDriver: true,
+      }).start();
+    }
+    if (!cleared) pop.setValue(0);
+    was.current = cleared;
+  }, [cleared, pop]);
+  const wash  = pop.interpolate({ inputRange: [0, 0.18, 1], outputRange: [0, 0.5, 0] });
+  const scale = pop.interpolate({ inputRange: [0, 0.14, 0.42, 1], outputRange: [1, 1.025, 0.998, 1] });
   return (
-    <Animated.View style={{ transform: [{ scale }] }}>
+    <Animated.View style={[style, { transform: [{ scale }] }]}>
+      <Animated.View
+        pointerEvents="none"
+        style={[StyleSheet.absoluteFillObject, styles.clearWash, { opacity: wash }]}
+      />
       {children}
+    </Animated.View>
+  );
+}
+
+// The set count as a row of charge cells instead of a sentence — how much of
+// this movement is banked, readable at arm's length without counting rows.
+// Accumulate (no declared count) and very long exercises opt out: the tally and
+// the rows already say it better than eleven dots would.
+function SetPips({ total, done, tint }) {
+  if (!total || total > 8) return null;
+  return (
+    <View style={styles.pipRow}>
+      {Array.from({ length: total }).map((_, i) => (
+        <View
+          key={i}
+          style={[
+            styles.pip,
+            i < done && styles.pipOn,
+            i < done && tint && { backgroundColor: tint, borderColor: tint },
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
+// The one line the HUD reads back at the player. A pure function of the
+// percentage — no state of its own, so it can never disagree with the bar it
+// sits under.
+const MILESTONES = [
+  { at: 75,  text: 'FINAL STRETCH' },
+  { at: 50,  text: 'HALFWAY' },
+  { at: 25,  text: 'MOMENTUM BUILDING' },
+  { at: 1,   text: 'MISSION LIVE' },
+  { at: 0,   text: 'AWAITING FIRST SET' },
+];
+const milestoneFor = (pct) => MILESTONES.find(m => pct >= m.at);
+
+// An arrow buried in the bullseye — the seal on a reached target. Drawn rather
+// than set as a glyph so it's the SAME gold as the panel it sits in (an emoji
+// 🎯 would drag its own colours in and fight the palette).
+function TargetHitIcon({ size = 22, color = SL.gold }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24">
+      {/* Rings, outer → bullseye. */}
+      <Circle cx="10" cy="14" r="8"   stroke={color} strokeWidth="1.5" fill="none" opacity={0.9} />
+      <Circle cx="10" cy="14" r="4.4" stroke={color} strokeWidth="1.3" fill="none" opacity={0.75} />
+      <Circle cx="10" cy="14" r="1.5" fill={color} />
+      {/* Shaft, struck in from the upper right and stopping dead centre. */}
+      <Path d="M22 2 L10.6 13.4" stroke={color} strokeWidth="2" strokeLinecap="round" />
+      {/* Two fletches across the tail. */}
+      <Path d="M17.6 3.1 L20.9 6.4" stroke={color} strokeWidth="1.6" strokeLinecap="round" />
+      <Path d="M19.4 1.3 L22.7 4.6" stroke={color} strokeWidth="1.6" strokeLinecap="round" />
+    </Svg>
+  );
+}
+
+// ── Accumulate tally ────────────────────────────────────────────────────────
+// The banked/owed readout an accumulate exercise carries INSTEAD of a set count,
+// and the flip between its two states is the whole point of the feature.
+//
+// While reps are owed it's a cool panel in the session's own colour: the number
+// leads, the instruction sits behind it. The moment the last rep lands it turns
+// GOLD — a live shimmer frame around it, the label sweeping the gold palette, a
+// wash blooming once and the panel springing under it. That's the same "award"
+// vocabulary the LVL gauge and the class gates already speak, so a cleared quota
+// reads as the system marking an achievement rather than as a grey checkbox.
+function AccumTally({ done, target, left, tint }) {
+  const cleared    = target > 0 && left === 0;
+  const pop        = useRef(new Animated.Value(0)).current;
+  const wasCleared = useRef(cleared);
+
+  useEffect(() => {
+    // One pass, on the FLIP only — a session resumed already-cleared opens calm
+    // (the frame still shimmers, but nothing bursts at a player who just walked
+    // back in). Same reason the celebration never replays on re-render.
+    if (cleared && !wasCleared.current) {
+      hapticSuccess();
+      pop.setValue(0);
+      Animated.timing(pop, {
+        toValue: 1, duration: 900, easing: Easing.out(Easing.quad), useNativeDriver: true,
+      }).start();
+    }
+    if (!cleared) pop.setValue(0);
+    wasCleared.current = cleared;
+  }, [cleared, pop]);
+
+  const wash  = pop.interpolate({ inputRange: [0, 0.22, 1], outputRange: [0, 0.55, 0] });
+  const scale = pop.interpolate({ inputRange: [0, 0.16, 0.42, 1], outputRange: [1, 1.05, 0.995, 1] });
+
+  return (
+    <Animated.View
+      style={[
+        styles.accumBar,
+        !cleared && tint && { borderColor: rgba(tint, 0.45), backgroundColor: rgba(tint, 0.07) },
+        cleared && styles.accumBarCleared,
+        cleared && { transform: [{ scale }] },
+      ]}
+    >
+      {/* Living gold border — the frame owns the edge once the target is met. */}
+      {cleared && (
+        <ShimmerFrame style={styles.accumFrame} colors={GOLD} active radius={8} thickness={2} duration={2800} />
+      )}
+      {/* The one-shot bloom behind the numbers. Absolute so it never nudges the row. */}
+      <Animated.View
+        pointerEvents="none"
+        style={[StyleSheet.absoluteFillObject, styles.accumWash, { opacity: wash }]}
+      />
+
+      {cleared ? (
+        <>
+          <Text style={styles.accumCountCleared}>{done} / {target}</Text>
+          <View style={{ flex: 1 }}>
+            <ShimmerText
+              text="TARGET REACHED"
+              style={styles.accumClearedLabel}
+              colors={GOLD}
+              direction="ltr"
+              active
+            />
+          </View>
+          <View style={styles.accumSeal}><TargetHitIcon /></View>
+        </>
+      ) : (
+        /* Banked / owed, and nothing else — the number says it, so no caption
+           repeats it. The instruction only ever needed saying once, in the
+           editor's hint, not on every card for the whole session. */
+        <Text style={[styles.accumCount, tint && { color: tint }]}>
+          {done}{target ? ` / ${target}` : ''}
+        </Text>
+      )}
     </Animated.View>
   );
 }
@@ -306,6 +489,14 @@ export default function WorkoutModeScreen({ route, navigation }) {
   // The progress sweep needs a palette, not one hex — dark → bright → dark in
   // the session's own hue, so the bar still moves the way the ice one did.
   const tcRamp    = tc ? [tc, lighten(tc, 0.35), lighten(tc, 0.65), lighten(tc, 0.35)] : BLUE;
+  // Checking a set off is the session talking back, so "done" wears the session's
+  // colour too — the ✓, its box, the set label, the reps field and the card edge.
+  // Untyped workouts keep the old green.
+  const doneC     = tc || SL.green;
+  const doneText  = tc && { color: tc };
+  const doneBox   = tc && { borderColor: tc, backgroundColor: rgba(tc, 0.15) };
+  const doneInput = tc && { borderColor: tc, color: tc };
+  const doneWash  = rgba(doneC, 0.16);
   const key     = sessionKey(isGallery ? `gallery:${workout.id}` : dateStr, workout.id);
 
   const [exercises, setExercises] = useState([]);
@@ -329,6 +520,11 @@ export default function WorkoutModeScreen({ route, navigation }) {
   const sessionRef  = useRef(null);
   const finishedRef = useRef(false);
   useEffect(() => { sessionRef.current = session; }, [session]);
+
+  // The session used to open with the gate sound. It was fired on mount, so any
+  // remount of this screen re-fired it — it kept ringing mid-workout instead of
+  // marking the way in. The door is silent now; the sound kit is still used by
+  // the LVL bar (playCharge) and the tab swipe (playSwoosh).
 
   // Live clock for the running timer.
   useEffect(() => {
@@ -416,10 +612,22 @@ export default function WorkoutModeScreen({ route, navigation }) {
   // automatically, so a forgotten ▶ RESUME can never under-count the session.
   // The idle-gap pass runs FIRST (against the previous activity stamp), so a
   // forgotten pause is healed retroactively the moment training resumes.
-  const updateSet = useCallback((exId, setIdx, patch) => {
+  // `ex` is passed so an ACCUMULATE exercise can grow itself: the moment the
+  // last row carries something, a fresh empty row appears under it, so the
+  // player can keep spamming sets until the rep total is banked (max 12 rows).
+  const updateSet = useCallback((exId, setIdx, patch, ex) => {
     setSession(prev => {
       if (!prev) return prev;
-      const sets = (prev.log[exId] ?? []).map((s, i) => i === setIdx ? { ...s, ...patch } : s);
+      let sets = (prev.log[exId] ?? []).map((s, i) => i === setIdx ? { ...s, ...patch } : s);
+      if (ex && parseSets(ex.sets).accumulate) {
+        // Grow AND retract: the row count follows the last filled row exactly,
+        // so clearing sets off the bottom takes their rows with them. Truncation
+        // can only ever cut trailing empty rows (that's what accumRows counts),
+        // so nothing the player logged is thrown away here.
+        const want = accumRows(sets);
+        if (sets.length > want) sets = sets.slice(0, want);
+        while (sets.length < want) sets = [...sets, { done: false, reps: '' }];
+      }
       const next = withOpenSegment({
         ...withIdleGapAsBreak(prev),
         log: { ...prev.log, [exId]: sets },
@@ -544,14 +752,24 @@ export default function WorkoutModeScreen({ route, navigation }) {
     const chosenLabel = branches?.find(b => b.key === closed.chosenBranch)?.label ?? null;
     const exSummaries = active.map(ex => {
       const sets = closed.log[ex.id] ?? [];
+      const { accumulate } = parseSets(ex.sets);
+      const doneCount = sets.filter(s => s.done).length;
       return {
         letter:    ex.letter,
         name:      ex.name,
         target:    ex.reps,
         skipped:   !!(closed.skipped ?? {})[ex.id],
-        totalSets: sets.length,
-        doneCount: sets.filter(s => s.done).length,
-        reps:      sets.map(s => (s.done ? (String(s.reps).trim() || '✓') : '–')),
+        // An accumulate exercise has no declared set count — the sets it took ARE
+        // the sets it had, so trailing empty rows never read as sets missed.
+        totalSets: accumulate ? doneCount : sets.length,
+        doneCount,
+        // Same reason: only the sets actually done are worth listing (a fixed
+        // workout still shows "–" for the ones that were left).
+        reps:      (accumulate ? sets.filter(s => s.done) : sets)
+                     .map(s => (s.done ? (String(s.reps).trim() || '✓') : '–')),
+        accum:     accumulate
+          ? { done: accumDone(sets), target: accumTarget(ex.reps) }
+          : null,
       };
     });
     return {
@@ -749,26 +967,42 @@ export default function WorkoutModeScreen({ route, navigation }) {
   // (range) bonus sets; done is capped at required so extras don't overshoot.
   // Skipped exercises drop out of the denominator entirely — progress is measured
   // against what the player is actually doing today.
+  // An ACCUMULATE exercise has no declared set count, so it counts as one unit of
+  // work in the whole-number counter and moves the BAR by reps banked (below).
   const allSets       = activeList.reduce((a, ex) => a + (skipped[ex.id] ? 0 : requiredFor(ex)), 0);
   const doneSets      = activeList.reduce((a, ex) => skipped[ex.id] ? a :
-    a + Math.min(session.log[ex.id]?.filter(s => s.done).length ?? 0, requiredFor(ex)), 0);
+    parseSets(ex.sets).accumulate
+      ? a + (exComplete(ex, session.log, skipped) ? 1 : 0)
+      : a + Math.min(session.log[ex.id]?.filter(s => s.done).length ?? 0, requiredFor(ex)), 0);
+  // The bar is the same measure but fractional, so a long accumulate grind keeps
+  // it moving instead of freezing until the last rep lands.
+  const doneFrac      = activeList.reduce((a, ex) => skipped[ex.id] ? a :
+    a + exFraction(ex, session.log) * requiredFor(ex), 0);
   const elapsed       = activeMs(session.segments, nowTick);
   const breakCount    = Math.max(0, (session.segments?.length ?? 1) - 1);
-  const progressPct   = allSets > 0 ? Math.round((doneSets / allSets) * 100) : 0;
+  const progressPct   = allSets > 0 ? Math.round((doneFrac / allSets) * 100) : 0;
   const paused        = isPaused(session);
+  // Every required set banked — the session is won, everything after is bonus.
+  const allClear      = allSets > 0 && doneSets >= allSets;
+  const milestone     = milestoneFor(progressPct);
 
   // One exercise card. `current` = it belongs to the active group; `showNow`
   // controls the NOW tag (suppressed inside a superset — the block shows it).
   const renderCard = (ex, { current, showNow }) => {
     const sets    = session.log[ex.id] ?? [];
-    const { required, total } = parseSets(ex.sets);
+    const { required, total, accumulate } = parseSets(ex.sets);
+    const accTarget = accumulate ? accumTarget(ex.reps) : 0;
+    const accDone   = accumulate ? accumDone(sets) : 0;
+    const accLeft   = accumulate ? accumLeft(ex, sets) : 0;
     const isSkip  = !!skipped[ex.id];
     const exDone  = exComplete(ex, session.log, skipped);
     const realDone = !isSkip && exDone;   // actually finished (not just skipped)
     const hot     = current && !exDone;
+    const doneCount = sets.filter(s => s.done).length;
     return (
-      <View
+      <ExCardShell
         key={ex.id}
+        cleared={realDone}
         style={[
           styles.exCard,
           hot && styles.exCardCurrent,
@@ -777,9 +1011,23 @@ export default function WorkoutModeScreen({ route, navigation }) {
           // states of the EXERCISE, not of the workout's identity.
           hot && tc && { borderColor: tc, borderLeftColor: tc, shadowColor: tc },
           realDone && styles.exCardDone,
+          realDone && tc && { borderLeftColor: tc },
           isSkip && styles.exCardSkipped,
         ]}
       >
+        {/* The card you're ON wears a living border in the session's own colour.
+            One frame at a time (only the hot card is ever `hot`), so the eye can
+            land on "this is the movement" without reading a word. */}
+        {hot && (
+          <ShimmerFrame
+            style={styles.cardFrame}
+            colors={tcRamp}
+            active
+            radius={10}
+            thickness={2}
+            duration={3400}
+          />
+        )}
         <View style={styles.exHead}>
           <View style={[
             styles.letterBadge,
@@ -808,56 +1056,92 @@ export default function WorkoutModeScreen({ route, navigation }) {
               <Text style={[
                 styles.exName,
                 styles.exNameLink,
+                // The live movement is the headline of the screen — it grows.
+                hot && styles.exNameHot,
                 tc && { color: tc, textShadowColor: rgba(tc, 0.5) },
               ]}>
                 {ex.name?.toUpperCase()}
               </Text>
             </TouchableOpacity>
-            <Text style={styles.exTarget}>
-              {required === total ? `${total} SETS` : `${required}–${total} SETS`}
-              {ex.reps ? ` · ${ex.reps} REPS` : ''}
-            </Text>
+            {/* Accumulate carries no target line at all: the tally below states
+                the whole contract and stays LIVE as it's paid down, so a static
+                "N REPS TOTAL" up here would only say the same thing twice. */}
+            {!accumulate && (
+              <Text style={styles.exTarget}>
+                {required === total ? `${total} SET${total === 1 ? '' : 'S'}` : `${required}–${total} SETS`}
+                {ex.reps ? ` · ${ex.reps} REPS` : ''}
+              </Text>
+            )}
+            {/* Charge cells — this movement's own progress, countable at a glance. */}
+            {!accumulate && !isSkip && (
+              <SetPips total={required} done={Math.min(doneCount, required)} tint={doneC} />
+            )}
           </View>
           {showNow && hot && <Text style={[styles.nowTag, tcFill]}>NOW</Text>}
-          {isSkip ? <Text style={styles.skipTag}>SKIPPED</Text> : realDone && <Text style={styles.doneTag}>✓</Text>}
+          {isSkip ? <Text style={styles.skipTag}>SKIPPED</Text> : realDone && <Text style={[styles.doneTag, doneText]}>✓</Text>}
         </View>
 
-        {ex.variation ? <CoachText text={ex.variation} style={styles.exVariation} prefix="※ " /> : null}
+        {/* The coach's aside for THIS movement — it rides the session's colour
+            like the rest of the card. No glyph in front of it: the colour and the
+            left indent already say whose voice it is. */}
+        {ex.variation ? <CoachText text={ex.variation} style={[styles.exVariation, tcText]} /> : null}
         {ex.notes ? <CoachText text={ex.notes} style={styles.exNotes} /> : null}
 
         {/* Sets — rows past the required count are OPTIONAL (range upper bound):
             rendered muted so the mandatory sets read as the real target. */}
+        {/* Accumulate tally — the only number that matters on this card: how
+            many reps are banked and how many are still owed. */}
+        {accumulate && (
+          <AccumTally done={accDone} target={accTarget} left={accLeft} tint={tc} />
+        )}
+
         {sets.map((set, si) => {
-          const optional = si >= required;
+          const optional = !accumulate && si >= required;
           return (
-          <SetFlashRow key={si} done={set.done} style={[styles.setRow, optional && styles.setRowOptional]}>
+          <SetFlashRow key={si} done={set.done} wash={doneWash} style={[styles.setRow, optional && styles.setRowOptional]}>
             <TouchableOpacity
-              style={[styles.checkbox, optional && styles.checkboxOptional, set.done && styles.checkboxDone]}
-              onPress={() => { if (!set.done) hapticTap(); updateSet(ex.id, si, { done: !set.done }); }}
+              style={[
+                styles.checkbox,
+                optional && styles.checkboxOptional,
+                set.done && styles.checkboxDone,
+                set.done && doneBox,
+              ]}
+              onPress={() => { if (!set.done) hapticTap(); updateSet(ex.id, si, { done: !set.done }, ex); }}
               activeOpacity={0.8}
             >
-              {set.done && <PopCheck><Text style={styles.checkboxMark}>✓</Text></PopCheck>}
+              {set.done && <PopCheck><Text style={[styles.checkboxMark, doneText]}>✓</Text></PopCheck>}
             </TouchableOpacity>
             <Text style={[
               styles.setLabel,
               optional && styles.setLabelOptional,
-              set.done && { color: SL.green },
+              set.done && { color: doneC },
             ]}>
               SET {si + 1}{optional ? ' · OPTIONAL' : ''}
             </Text>
             <TextInput
-              style={[styles.repsInput, set.done && styles.repsInputDone]}
+              style={[styles.repsInput, set.done && styles.repsInputDone, set.done && doneInput]}
               value={set.reps}
-              onChangeText={(t) => updateSet(ex.id, si, { reps: t.replace(/[^0-9]/g, '') })}
+              onChangeText={(t) => updateSet(ex.id, si, { reps: t.replace(/[^0-9]/g, '') }, ex)}
               keyboardType="numeric"
-              placeholder={ex.reps ? String(ex.reps) : '—'}
+              // On accumulate the target is the TOTAL, not the per-set number —
+              // ghosting "50" in every row would read as 50 reps a set.
+              placeholder={!accumulate && ex.reps ? String(ex.reps) : '—'}
               placeholderTextColor={SL.muted}
+              selectionColor={doneC}
               maxLength={4}
             />
             <Text style={styles.repsUnit}>REPS</Text>
           </SetFlashRow>
           );
         })}
+
+        {/* The row cap exists so the card can't grow past the screen. Hitting it
+            isn't a failure — the remaining reps just ride on the last set. */}
+        {accumulate && sets.length >= MAX_ACCUM_SETS && accLeft > 0 && (
+          <Text style={styles.accumCap}>
+            {MAX_ACCUM_SETS} SETS MAX · ADD THE REST TO THE LAST ONE
+          </Text>
+        )}
 
         {/* Skip control — bail on this exercise today (can't do it / failing it).
             Only on the live (current) card, or as an UNDO once skipped. */}
@@ -879,7 +1163,7 @@ export default function WorkoutModeScreen({ route, navigation }) {
             style={{ alignSelf: 'flex-start', marginTop: 4 }}
           />
         )}
-      </View>
+      </ExCardShell>
     );
   };
 
@@ -895,12 +1179,13 @@ export default function WorkoutModeScreen({ route, navigation }) {
           current && styles.groupWrapCurrent,
           current && !done && tcBorder,
           done && styles.groupWrapDone,
+          done && tc && { borderColor: tc },
         ]}
       >
         <View style={styles.groupHeader}>
           <Text style={[styles.groupHeaderText, tcText]}>⇄ SUPERSET · ANY ORDER</Text>
           {current && !done && <Text style={[styles.nowTag, tcFill]}>NOW</Text>}
-          {done && <Text style={styles.doneTag}>✓</Text>}
+          {done && <Text style={[styles.doneTag, doneText]}>✓</Text>}
         </View>
         {g.items.map(ex => renderCard(ex, { current, showNow: false }))}
       </View>
@@ -956,9 +1241,24 @@ export default function WorkoutModeScreen({ route, navigation }) {
             ? <Text style={styles.onBreakText}>⏸ ON BREAK — CLOCK STOPPED</Text>
             : breakCount > 0 && <Text style={styles.progressMeta}>{breakCount} BREAK{breakCount > 1 ? 'S' : ''}</Text>}
         </View>
-        <View style={styles.progressTrack}>
-          <ShimmerFill style={[styles.progressFill, tcFill, { width: `${progressPct}%` }]} colors={tcRamp} active />
+
+        {/* The gauge: a fat clean bar with the number spelled out beside it.
+            Cleared, the whole readout goes gold — the app's one word for
+            "this is won". */}
+        <View style={styles.gaugeRow}>
+          <View style={[styles.progressTrack, allClear && styles.progressTrackDone]}>
+            <ShimmerFill style={[styles.progressFill, tcFill, { width: `${progressPct}%` }]} colors={allClear ? GOLD : tcRamp} active />
+          </View>
+          <Text style={[styles.gaugePct, tcText, allClear && styles.gaugePctDone]}>{progressPct}%</Text>
         </View>
+        {/* The status line is there to tell you how far in you are. At 100% the
+            gold bar and the number already say it, so it steps aside rather than
+            repeating them. */}
+        {!allClear && (
+          <View style={styles.milestoneRow}>
+            <Text style={[styles.milestoneText, tcText]}>{milestone.text}</Text>
+          </View>
+        )}
       </View>
 
       <View style={styles.list}>
@@ -1028,19 +1328,18 @@ export default function WorkoutModeScreen({ route, navigation }) {
           <Text style={styles.emptyText}>NO EXERCISES IN THIS WORKOUT</Text>
         )}
 
-        {/* Breathes once every required set is done — the eye lands on the exit. */}
-        <Breathe active={allSets > 0 && doneSets >= allSets}>
-          <PillButton
-            label="FINISH WORKOUT"
-            variant="solid"
-            size="lg"
-            onPress={() => handleFinish()}
-            style={{ marginTop: 8 }}
-          />
-        </Breathe>
-        <Text style={styles.finishHint}>
-          Exit anytime — your progress is saved. ⏸ stops the clock; logging a set restarts it.
-        </Text>
+        {/* The button changes its mind about what it is: an escape hatch
+            mid-session, the reward for the work once the board is clear. The
+            label and the gold carry that on their own — no motion (see the
+            removed `Breathe` note above). */}
+        <PillButton
+          label={allClear ? 'COMPLETE THE MISSION' : 'FINISH WORKOUT'}
+          variant="solid"
+          tone={allClear ? 'gold' : 'accent'}
+          size="md"
+          onPress={() => handleFinish()}
+          style={{ marginTop: 8 }}
+        />
 
         <View style={{ height: 32 }} />
       </View>
@@ -1194,11 +1493,26 @@ const styles = StyleSheet.create({
 
   progressMetaRow: { flexDirection: 'row', gap: 16, marginTop: 14, flexWrap: 'wrap' },
   progressMeta: { fontFamily: F.body, fontSize: 15, color: SL.muted, letterSpacing: 1.5 },
+  // The gauge: bar + spelled-out percentage on one line.
+  gaugeRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 10 },
   progressTrack: {
-    height: 6, borderRadius: 3, marginTop: 10,
+    flex: 1, height: 12, borderRadius: 6,
     backgroundColor: SL.panel, borderWidth: 1, borderColor: SL.border, overflow: 'hidden',
   },
-  progressFill: { height: '100%', backgroundColor: SL.accent, borderRadius: 3 },
+  progressTrackDone: { borderColor: 'rgba(255,215,0,0.55)' },
+  progressFill: { height: '100%', backgroundColor: SL.accent, borderRadius: 6 },
+
+  gaugePct: {
+    fontFamily: F.heading, fontSize: 22, color: SL.accent, letterSpacing: 1,
+    minWidth: 62, textAlign: 'right',
+  },
+  gaugePctDone: {
+    color: SL.gold,
+    textShadowColor: 'rgba(255,215,0,0.55)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 14,
+  },
+  milestoneRow: { marginTop: 8 },
+  milestoneText: { fontFamily: F.heading, fontSize: 15, color: SL.accent, letterSpacing: 3 },
+
 
   // List
   list: { paddingHorizontal: 16, paddingTop: 16, gap: 12, width: '100%', maxWidth: 1440, alignSelf: 'center' },
@@ -1207,6 +1521,10 @@ const styles = StyleSheet.create({
     backgroundColor: SL.panel, borderWidth: 1.5, borderColor: SL.border,
     borderLeftWidth: 4, borderLeftColor: SL.border, borderRadius: 10, padding: 16, gap: 10,
   },
+  // The living border of the card you're on, and the one-shot gold bloom that
+  // marks the moment its work lands.
+  cardFrame: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 10 },
+  clearWash: { backgroundColor: 'rgba(255,215,0,0.30)', borderRadius: 10 },
   exCardCurrent: {
     borderColor: SL.accent, borderLeftColor: SL.accent,
     shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.35, shadowRadius: 14,
@@ -1282,12 +1600,52 @@ const styles = StyleSheet.create({
     color: SL.accent,
     textShadowColor: 'rgba(74,158,191,0.5)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
   },
+  // The live movement is the headline of the screen while you're doing it.
+  exNameHot: { fontSize: 28, letterSpacing: 2 },
   exTarget: { fontFamily: F.bodyMed, fontSize: 16, color: SL.muted, letterSpacing: 1, marginTop: 2 },
+  // Charge cells — one per required set, filled as the work is banked.
+  pipRow: { flexDirection: 'row', gap: 6, marginTop: 8 },
+  pip: {
+    width: 22, height: 7, borderRadius: 3,
+    borderWidth: 1, borderColor: SL.border, backgroundColor: 'rgba(74,158,191,0.06)',
+  },
+  pipOn: {
+    backgroundColor: SL.accent, borderColor: SL.accent,
+    shadowColor: SL.accent, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.6, shadowRadius: 6,
+  },
+  // Accumulate tally — the banked/owed readout that replaces a fixed set count.
+  accumBar: {
+    marginTop: 10, paddingVertical: 8, paddingHorizontal: 12,
+    borderWidth: 1, borderColor: 'rgba(74,158,191,0.45)', borderRadius: 8,
+    backgroundColor: 'rgba(74,158,191,0.07)',
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+  },
+  accumCount: { fontFamily: F.heading, fontSize: 22, color: SL.accent, letterSpacing: 1 },
+  accumCap:   { fontFamily: F.bodyMed, fontSize: 12, color: '#8fb2cf', letterSpacing: 1, marginTop: 4 },
+  // Cleared: the panel leaves the session's colour behind and goes gold.
+  accumBarCleared: {
+    borderColor: 'rgba(255,215,0,0.55)',
+    backgroundColor: 'rgba(255,215,0,0.10)',
+    shadowColor: SL.gold, shadowOpacity: 0.45, shadowRadius: 14,
+    shadowOffset: { width: 0, height: 0 }, elevation: 6,
+  },
+  accumFrame: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, borderRadius: 8 },
+  accumWash:  { backgroundColor: 'rgba(255,215,0,0.35)', borderRadius: 8 },
+  accumCountCleared: {
+    fontFamily: F.heading, fontSize: 24, color: SL.gold, letterSpacing: 1,
+    textShadowColor: 'rgba(255,215,0,0.55)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 14,
+  },
+  accumClearedLabel: { fontFamily: F.heading, fontSize: 15, color: SL.gold, letterSpacing: 2.5 },
+  accumSeal: {
+    shadowColor: SL.gold, shadowOpacity: 0.7, shadowRadius: 8,
+    shadowOffset: { width: 0, height: 0 },
+  },
   nowTag: {
-    fontFamily: F.heading, fontSize: 14, color: SL.bg, letterSpacing: 1.5,
-    backgroundColor: SL.accent, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 4, overflow: 'hidden',
+    fontFamily: F.heading, fontSize: 16, color: SL.bg, letterSpacing: 2,
+    backgroundColor: SL.accent, paddingHorizontal: 12, paddingVertical: 5, borderRadius: 5, overflow: 'hidden',
   },
   doneTag: { fontFamily: F.heading, fontSize: 24, color: SL.green },
+
   skipTag: {
     fontFamily: F.heading, fontSize: 13, color: SL.muted, letterSpacing: 1.5,
     borderWidth: 1, borderColor: SL.muted, paddingHorizontal: 8, paddingVertical: 3,
@@ -1305,7 +1663,7 @@ const styles = StyleSheet.create({
   // The one-shot green wash SetFlashRow fades out after a set is checked.
   setFlash: { backgroundColor: 'rgba(76,175,80,0.16)', borderRadius: 8 },
   checkbox: {
-    width: 34, height: 34, borderWidth: 2, borderColor: SL.muted, borderRadius: 8,
+    width: 40, height: 40, borderWidth: 2, borderColor: SL.muted, borderRadius: 9,
     justifyContent: 'center', alignItems: 'center',
   },
   checkboxDone: { borderColor: SL.green, backgroundColor: 'rgba(76,175,80,0.15)' },
@@ -1319,6 +1677,10 @@ const styles = StyleSheet.create({
     width: 120, height: 42, borderWidth: 1.5, borderColor: SL.border, borderRadius: 8,
     textAlign: 'center', fontFamily: F.heading, fontSize: 20, color: SL.text,
     backgroundColor: SL.bg, marginLeft: 'auto', paddingHorizontal: 8,
+    // On web the browser paints its own white focus ring on a focused input,
+    // which read as "the field I'm typing in changed colour". The field keeps
+    // its own (session-coloured) border instead.
+    ...Platform.select({ web: { outlineStyle: 'none', outlineWidth: 0 }, default: null }),
   },
   repsInputDone: { borderColor: SL.green, color: SL.green },
   repsUnit: { fontFamily: F.bodyMed, fontSize: 14, color: SL.muted, letterSpacing: 1.5, width: 42 },
@@ -1328,7 +1690,6 @@ const styles = StyleSheet.create({
     textAlign: 'center', marginVertical: 32,
   },
 
-  finishHint: { fontFamily: F.bodyMed, fontSize: 14, color: SL.muted, textAlign: 'center', marginTop: 10, letterSpacing: 0.5 },
 
   // ── Final time check (post-FINISH clock editor) ───────────────────────────
   adjustBackdrop: { flex: 1, backgroundColor: 'rgba(2,5,10,0.9)' },

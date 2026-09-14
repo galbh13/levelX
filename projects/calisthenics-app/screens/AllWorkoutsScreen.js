@@ -14,6 +14,8 @@ import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
 import SystemConfirm from '../components/SystemConfirm';
+import { GearLine } from '../components/CoachText';
+import { splitGear } from '../lib/gear';
 
 const DOW_FULL = ['SUNDAY','MONDAY','TUESDAY','WEDNESDAY','THURSDAY','FRIDAY','SATURDAY'];
 // First letter of each weekday for the compact at-a-glance week strip on each card.
@@ -303,10 +305,17 @@ export default function AllWorkoutsScreen({ navigation }) {
             )}
           </View>
 
-          {/* Purpose */}
-          {item.purpose ? (
-            <Text style={styles.cardPurpose} numberOfLines={2}>{item.purpose}</Text>
-          ) : null}
+          {/* Purpose — a "*bands" requirement leaves the prose and becomes its
+              own strip, so the card never shows the raw marker. */}
+          {item.purpose ? (() => {
+            const { prose, items } = splitGear(item.purpose);
+            return (
+              <>
+                {prose ? <Text style={styles.cardPurpose} numberOfLines={2}>{prose}</Text> : null}
+                <GearLine items={items} />
+              </>
+            );
+          })() : null}
 
           {/* Weekly-plan assignment */}
           <View style={styles.assignRow}>
@@ -450,7 +459,15 @@ export default function AllWorkoutsScreen({ navigation }) {
                     onPress={() => toggleDay(dow)}
                     activeOpacity={0.75}
                   >
-                    <Text style={[styles.dayPickText, on && styles.dayPickTextOn]}>{label}</Text>
+                    <Text
+                      style={[styles.dayPickText, on && styles.dayPickTextOn]}
+                      numberOfLines={1}
+                      allowFontScaling={false}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.6}
+                    >
+                      {label}
+                    </Text>
                   </TouchableOpacity>
                 );
               })}
@@ -760,15 +777,22 @@ const styles = StyleSheet.create({
     marginTop: 8,
     marginBottom: 20,
   },
+  // All seven weekdays stay on ONE row at every width — a day that wraps to a
+  // second line reads like a different group, which is exactly the confusion
+  // we're avoiding. Pills flex instead of holding a fixed width.
   dayPickerGrid: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
+    flexWrap: 'nowrap',
+    alignSelf: 'stretch',
     justifyContent: 'center',
-    gap: 8,
+    gap: 6,
     marginBottom: 24,
   },
   dayPick: {
-    width: 64,
+    flex: 1,
+    minWidth: 0,
+    maxWidth: 64,
+    paddingHorizontal: 2,
     height: 56,
     borderWidth: 1.5,
     borderColor: SL.border,

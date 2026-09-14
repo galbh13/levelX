@@ -4,6 +4,8 @@ import {
 } from 'react-native';
 import { F } from '../constants/fonts';
 import { ShimmerFrame, ShimmerText } from './Shimmer';
+import { GearLine } from './CoachText';
+import { splitGear } from '../lib/gear';
 
 // ─── Mission launcher ───────────────────────────────────────────────────────
 // Replaces the old red-gate portal. Tapping today's mission no longer opens a
@@ -64,6 +66,7 @@ export default function QuestGate({
   const scan = useRef(new Animated.Value(0)).current;   // repeating scan bar
   const beat = useRef(new Animated.Value(0)).current;   // header dot + glow
   const { width: winW } = useWindowDimensions();
+  const { prose: purposeProse, items: gear } = useMemo(() => splitGear(purpose), [purpose]);
 
   useEffect(() => {
     if (!visible) { anim.setValue(0); scan.setValue(0); beat.setValue(0); return; }
@@ -159,9 +162,13 @@ export default function QuestGate({
               {title}
             </Text>
 
-            {!!purpose && (
-              <Text style={styles.purpose} numberOfLines={2}>{purpose}</Text>
+            {/* Kit comes out of the prose and gets its own strip: the launcher
+                is the last screen before the set starts, so "you need a band"
+                has to be readable at a glance, not buried in the purpose. */}
+            {!!purposeProse && (
+              <Text style={styles.purpose} numberOfLines={2}>{purposeProse}</Text>
             )}
+            <GearLine items={gear} />
 
             {!!tagLabel && (
               <View style={[styles.tag, { borderColor: hot + '77', backgroundColor: hot + '14' }]}>

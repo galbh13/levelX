@@ -6,6 +6,7 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../lib/supabase';
 import { uploadAssetToBucket, videoMeta } from '../lib/storageUpload';
+import { renameExerciseEverywhere } from '../lib/workouts';
 import { F } from '../constants/fonts';
 import ScreenFrame from '../components/ScreenFrame';
 
@@ -129,6 +130,25 @@ export default function AddExerciseScreen({ navigation, route }) {
           .update(fields)
           .eq('id', editing.id);
         if (error) throw error;
+
+        // A rename has to reach the copies. Workouts and library templates store
+        // the NAME they were built with, so without this the movement keeps its
+        // old name everywhere it's actually being trained.
+        if (fields.name !== editing.name) {
+          const { error: propErr } = await renameExerciseEverywhere({
+            galleryId: editing.id,
+            oldName:   editing.name,
+            newName:   fields.name,
+          });
+          // The catalog entry itself IS saved at this point — say what didn't
+          // follow rather than reporting the rename as failed.
+          if (propErr) {
+            setErrorMsg(`Renamed, but existing workouts kept the old name: ${propErr.message}`);
+            setSaving(false);
+            return;
+          }
+        }
+
         // Return straight to the gallery (it's below in the stack and re-fetches
         // on focus, so the edited values show). This pops the in-between detail
         // screen too, matching the workout editor which also returns to the gallery.
@@ -261,7 +281,9 @@ export default function AddExerciseScreen({ navigation, route }) {
           <Text style={styles.hintCode}>note:</Text> /{' '}
           <Text style={styles.hintCode}>common mistake:</Text> become callouts ·{' '}
           <Text style={styles.hintCode}>1.</Text> starts a numbered list ·{' '}
-          <Text style={styles.hintCode}>back cues - 1</Text> shows the cue colour it names.
+          <Text style={styles.hintCode}>back cues - 1</Text> shows the cue colour it names ·{' '}
+          <Text style={styles.hintCode}>*bands</Text> marks kit the player must bring — the
+          card writes REQUIRED and the full name for you.
         </Text>
         <TextInput
           style={[styles.input, styles.multiline]}

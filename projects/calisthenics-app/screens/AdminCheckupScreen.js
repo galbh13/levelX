@@ -12,9 +12,11 @@ import PillButton from '../components/PillButton';
 import VideoPlayer from '../components/VideoPlayer';
 import CheckupTemplateEditor from '../components/CheckupTemplateEditor';
 import SystemConfirm from '../components/SystemConfirm';
+import { useDesktopLayout } from '../constants/layout';
 import {
   purgeExpiredCheckups, WEEKDAYS_SHORT, resetPlayerTemplate,
   splitCheckupAnswers, buildExerciseCards,
+  resolvePlayerTemplate, splitTemplateParts,
 } from '../lib/checkups';
 
 const FB_NOTE_MAX = 500;
@@ -28,15 +30,26 @@ function formatDate(ts) {
 // Reached from PlayerAdminScreen ("CHECK-UP" tile). Three jobs on one screen:
 //   1. Set the player's recurring check-up DAY.
 //   2. Review their latest SUBMITTED check-up (Part-1 answers + Part-2 exercise
-//      clips/notes) and reply with a feedback video URL + note.
+//      clips/notes) and reply — either a feedback video URL + note, or, for a
+//      shallow submission, a written note on its own (NOTE ONLY).
 //   3. THIS PLAYER'S CHECK-UP — the one list they actually fill in, edited in
 //      place. It shows the class standard until something is changed here; the
 //      first change forks it onto the player (see CheckupTemplateEditor), so a
 //      personal tweak is just an edit + save, never a second structure on the page.
 // Writes here need the admin-override RLS in migrations/20260714_checkups.sql +
 // 20260722_checkup_templates.sql.
+//
+// TWO LAYOUTS, ONE SCREEN (2026-09-11). The coach does this review on a COMPUTER
+// while screen-recording it for the player, so on a desktop-sized canvas
+// (`useDesktopLayout`) the card widens past CARD_W, the answers and the exercise
+// cards go TWO-UP, the clips get a taller frame and every label/field steps up a
+// size — a phone-width column on a 1920 monitor reads as an unfinished app in a
+// recording. On a phone nothing changes: `wide` is false and every desktop style
+// drops out. The rule for editing this screen is that `wide` only ever ADDS an
+// override on top of the phone style, never replaces the phone layout.
 export default function AdminCheckupScreen({ navigation, route }) {
   const player = route.params?.player ?? null;
+  const { wide, cardW } = useDesktopLayout();
 
   const [loading, setLoading]   = useState(true);
   const [checkup, setCheckup]   = useState(null);   // latest SUBMITTED check-up
@@ -49,6 +62,10 @@ export default function AdminCheckupScreen({ navigation, route }) {
 
   const [fbUrl,   setFbUrl]     = useState('');
   const [fbNote,  setFbNote]    = useState('');
+  // How this reply goes out. A shallow check-up (a few written words, nothing
+  // filmed) doesn't need a recorded video back — NOTE ONLY drops the URL field
+  // and makes the written note the whole reply.
+  const [fbMode,  setFbMode]    = useState('video');   // 'video' | 'note'
   const [saving,  setSaving]    = useState(false);
   const [savedMsg,setSavedMsg]  = useState(false);
   const [errorMsg,setErrorMsg]  = useState('');
@@ -62,13 +79,36 @@ export default function AdminCheckupScreen({ navigation, route }) {
   const [editorKey, setEditorKey] = useState(0);
   const [busyTpl,   setBusyTpl]   = useState(false);
   const [confirm,   setConfirm]   = useState(null);
-  // The template section is READ-ONLY until the coach asks to edit it: he screen-
-  // records himself going over a player's check-up, and admin controls in that
-  // recording look unprofessional to the player watching it.
+  // The template section is CLOSED until the coach asks for it (2026-09-11), and
+  // then READ-ONLY until he asks to edit: he screen-records himself going over a
+  // player's submitted check-up, and the authoring list hanging open under the
+  // review is a second page of content in that recording that the player has no
+  // reason to see. Two steps, deliberately — OPEN gives the clean numbered list
+  // (which IS worth recording, hence it survived), EDIT adds the admin chrome.
+  const [tplOpen,    setTplOpen]    = useState(false);
   const [tplEditing, setTplEditing] = useState(false);
+  // What the closed row reports. The editor is unmounted while the section is
+  // shut, so it cannot be the one to answer "personal or standard, and how many
+  // of each" — the screen resolves that itself, on load and on every close.
+  const [tplCounts,  setTplCounts]  = useState({ questions: 0, exercises: 0 });
   const [fbFocus,    setFbFocus]    = useState(null);   // 'url' | 'note' | null
   const onSourceChange = useCallback(src => setTplSource(src), []);
   const hasOverride = tplSource === 'player';
+
+  // Resolve the list this player fills in WITHOUT mounting the editor — the
+  // chip ('PERSONAL' / 'CLASS STANDARD') and the closed row's tally have to be
+  // right before anything is opened.
+  const loadTplSummary = useCallback(async (cls) => {
+    if (!player?.id) return;
+    try {
+      const res = await resolvePlayerTemplate(player.id, cls ?? null);
+      const { questions, exercises } = splitTemplateParts(res.items);
+      setTplSource(res.source);
+      setTplCounts({ questions: questions.length, exercises: exercises.length });
+    } catch (e) {
+      console.error('[AdminCheckupScreen] loadTplSummary:', e);
+    }
+  }, [player?.id]);
 
   const load = useCallback(async () => {
     if (!player?.id) { setLoading(false); return; }
@@ -82,6 +122,7 @@ export default function AdminCheckupScreen({ navigation, route }) {
       // The profile is the authority on the class (the roster row can be stale) —
       // the editor needs it to know which standard this player inherits.
       setClassId(prof?.class_id ?? player.class_id ?? null);
+      await loadTplSummary(prof?.class_id ?? player.class_id ?? null);
 
       await purgeExpiredCheckups(player.id);
 
@@ -111,6 +152,8 @@ export default function AdminCheckupScreen({ navigation, route }) {
         setVideos(vids ?? []);
         setFbUrl(latest.feedback_url ?? '');
         setFbNote(latest.feedback_note ?? '');
+        // A reply already sent as note-only reopens in note-only mode.
+        setFbMode(latest.feedback_at && !latest.feedback_url ? 'note' : 'video');
       } else {
         setCheckup(null);
       }
@@ -118,13 +161,18 @@ export default function AdminCheckupScreen({ navigation, route }) {
       console.error('[AdminCheckupScreen] load:', e);
     }
     setLoading(false);
-  }, [player]);
+  }, [player, loadTplSummary]);
 
   useEffect(() => { load(); }, [load]);
 
   async function handleSave() {
     setErrorMsg(''); setSavedMsg(false);
-    if (!fbUrl.trim() && !fbNote.trim()) {
+    const noteOnly = fbMode === 'note';
+    if (noteOnly && !fbNote.trim()) {
+      setErrorMsg('Write a note — in note-only mode that IS the reply.');
+      return;
+    }
+    if (!noteOnly && !fbUrl.trim() && !fbNote.trim()) {
       setErrorMsg('Add a feedback video URL or a note.');
       return;
     }
@@ -133,7 +181,9 @@ export default function AdminCheckupScreen({ navigation, route }) {
       const { data, error } = await supabase
         .from('checkups')
         .update({
-          feedback_url:  fbUrl.trim() || null,
+          // Note-only CLEARS the link, so flipping an already-sent reply to
+          // note-only never leaves a stale video button on the player's screen.
+          feedback_url:  noteOnly ? null : (fbUrl.trim() || null),
           feedback_note: fbNote.trim() || null,
           feedback_at:   new Date().toISOString(),
         })
@@ -184,6 +234,7 @@ export default function AdminCheckupScreen({ navigation, route }) {
       await resetPlayerTemplate(player.id);
       setTplSource('class');
       setEditorKey(k => k + 1);
+      await loadTplSummary(classId);
     } catch (e) {
       console.error('[AdminCheckupScreen] resetToStandard:', e);
     }
@@ -192,8 +243,22 @@ export default function AdminCheckupScreen({ navigation, route }) {
 
   const hasFeedback = !!checkup?.feedback_at;
 
+  // Closing also leaves edit mode, so the section always REOPENS on the clean
+  // read-only list — the state the coach records in — and never on whatever
+  // chrome he left showing last time. Re-resolving on close keeps the collapsed
+  // row's tally honest after an add or a delete.
+  function toggleTpl() {
+    if (tplOpen) {
+      setTplEditing(false);
+      setTplOpen(false);
+      loadTplSummary(classId);
+    } else {
+      setTplOpen(true);
+    }
+  }
+
   return (
-    <ScreenFrame fill ready={!loading}>
+    <ScreenFrame fill ready={!loading} maxWidth={cardW}>
       <View style={styles.card}>
         <ScreenHeader
           title="CHECK-UP"
@@ -204,19 +269,19 @@ export default function AdminCheckupScreen({ navigation, route }) {
         {loading ? (
           <View style={styles.center}><ActivityIndicator size="large" color={C.iceGlow} /></View>
         ) : (
-        <ScrollView style={styles.scroll} contentContainerStyle={styles.body} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+        <ScrollView style={styles.scroll} contentContainerStyle={[styles.body, wide && W.body]} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
           {checkup && (
-            <View style={styles.submitBanner}>
-              <Text style={styles.submitBannerText}>
+            <View style={[styles.submitBanner, wide && W.submitBanner]}>
+              <Text style={[styles.submitBannerText, wide && W.submitBannerText]}>
                 ✓  SUBMITTED {formatDate(checkup.submitted_at).toUpperCase()}
               </Text>
-              {hasFeedback && <Text style={styles.submitBannerDone}>★ FEEDBACK SENT</Text>}
+              {hasFeedback && <Text style={[styles.submitBannerDone, wide && W.submitBannerDone]}>★ FEEDBACK SENT</Text>}
             </View>
           )}
 
           {/* Recurring check-up day */}
-          <SectionTitle>CHECK-UP DAY</SectionTitle>
-          <View style={styles.dayRow}>
+          <SectionTitle wide={wide}>CHECK-UP DAY</SectionTitle>
+          <View style={[styles.dayRow, wide && W.dayRow]}>
             {WEEKDAYS_SHORT.map((d, i) => {
               const active = i === checkupDay;
               return (
@@ -224,9 +289,9 @@ export default function AdminCheckupScreen({ navigation, route }) {
                   key={d}
                   disabled={savingDay}
                   onPress={() => setDay(i)}
-                  style={[styles.dayPill, active && styles.dayPillActive]}
+                  style={[styles.dayPill, wide && W.dayPill, active && styles.dayPillActive]}
                 >
-                  <Text style={[styles.dayPillText, active && styles.dayPillTextActive]}>{d}</Text>
+                  <Text style={[styles.dayPillText, wide && W.dayPillText, active && styles.dayPillTextActive]}>{d}</Text>
                 </TouchableOpacity>
               );
             })}
@@ -242,53 +307,64 @@ export default function AdminCheckupScreen({ navigation, route }) {
             <>
               {answers.length > 0 && (
                 <>
-                  <SectionTitle>THEIR ANSWERS</SectionTitle>
-                  {answers.map(a => (
-                    <View key={a.id} style={styles.qBlock}>
-                      <Text style={styles.qPrompt}>{a.prompt}</Text>
-                      <View style={styles.notePanel}>
-                        <Text style={styles.notePanelText}>{a.answer_text || '—'}</Text>
+                  <SectionTitle wide={wide}>THEIR ANSWERS</SectionTitle>
+                  {/* Two-up on a desktop canvas. The cells are wrappers, not the
+                      blocks themselves, so the phone styles keep their own
+                      margins untouched. */}
+                  <View style={wide ? W.grid : null}>
+                    {answers.map(a => (
+                      <View key={a.id} style={wide ? W.gridCell : null}>
+                        <View style={styles.qBlock}>
+                          <Text style={[styles.qPrompt, wide && W.qPrompt]}>{a.prompt}</Text>
+                          <View style={[styles.notePanel, wide && W.notePanel]}>
+                            <Text style={[styles.notePanelText, wide && W.notePanelText]}>{a.answer_text || '—'}</Text>
+                          </View>
+                        </View>
                       </View>
-                    </View>
-                  ))}
+                    ))}
+                  </View>
                 </>
               )}
 
               {exerciseCards.length > 0 && (
                 <>
-                  <SectionTitle>THEIR EXERCISES</SectionTitle>
+                  <SectionTitle wide={wide}>THEIR EXERCISES</SectionTitle>
+                  <View style={wide ? W.grid : null}>
                   {exerciseCards.map((g, gi, all) => (
-                    <View key={g.key} style={styles.clipCard}>
+                    <View key={g.key} style={wide ? W.gridCell : null}>
+                    <View style={[styles.clipCard, wide && W.clipCard]}>
                       {/* One exercise = one hard-edged card: numbered, accent-railed
                           and spaced, so a wall of clips reads as N exercises. */}
-                      <View style={styles.clipHead}>
-                        <Text style={styles.clipIndex}>EXERCISE {gi + 1} / {all.length}</Text>
+                      <View style={[styles.clipHead, wide && W.clipHead]}>
+                        <Text style={[styles.clipIndex, wide && W.clipMeta]}>EXERCISE {gi + 1} / {all.length}</Text>
                         {g.videos.length > 1 && (
-                          <Text style={styles.clipCount}>{g.videos.length} CLIPS</Text>
+                          <Text style={[styles.clipCount, wide && W.clipMeta]}>{g.videos.length} CLIPS</Text>
                         )}
                         {g.videos.length === 0 && (
-                          <Text style={styles.clipNoClip}>NO CLIP · NOTE ONLY</Text>
+                          <Text style={[styles.clipNoClip, wide && W.clipMeta]}>NO CLIP · NOTE ONLY</Text>
                         )}
                       </View>
-                      {!!g.prompt && <Text style={styles.clipName}>{g.prompt}</Text>}
+                      {!!g.prompt && <Text style={[styles.clipName, wide && W.clipName]}>{g.prompt}</Text>}
                       {g.videos.map((v, i) => (
                         <View key={v.id} style={i > 0 ? styles.clipSplit : undefined}>
                           {g.videos.length > 1 && (
-                            <Text style={styles.clipTag}>CLIP {i + 1} OF {g.videos.length}</Text>
+                            <Text style={[styles.clipTag, wide && W.clipTag]}>CLIP {i + 1} OF {g.videos.length}</Text>
                           )}
-                          <VideoPlayer url={v.video_url} height={220} style={{ marginTop: 10 }} />
+                          <ReviewClip url={v.video_url} wide={wide} />
                           <TouchableOpacity onPress={() => Linking.openURL(v.video_url)}>
-                            <Text style={styles.openLink}>⤓  OPEN / DOWNLOAD CLIP</Text>
+                            <Text style={[styles.openLink, wide && W.openLink]}>⤓  OPEN / DOWNLOAD CLIP</Text>
                           </TouchableOpacity>
                         </View>
                       ))}
                       {!!g.note && (
-                        <View style={styles.notePanel}>
-                          <Text style={styles.notePanelText}>{g.note}</Text>
+                        <View style={[styles.notePanel, wide && W.notePanel]}>
+                          <Text style={[styles.notePanelText, wide && W.notePanelText]}>{g.note}</Text>
                         </View>
                       )}
                     </View>
+                    </View>
                   ))}
+                  </View>
                 </>
               )}
               {answers.length === 0 && exerciseCards.length === 0 && (
@@ -296,31 +372,62 @@ export default function AdminCheckupScreen({ navigation, route }) {
               )}
 
               {/* Feedback form */}
-              <View style={styles.feedbackBlock}>
-                <SectionTitle>YOUR FEEDBACK</SectionTitle>
+              <View style={[styles.feedbackBlock, wide && W.feedbackBlock]}>
+                <SectionTitle wide={wide}>YOUR FEEDBACK</SectionTitle>
 
-                <Text style={styles.fieldLabel}>FEEDBACK VIDEO URL</Text>
-                <TextInput
-                  style={[styles.input, fbFocus === 'url' && styles.inputFocus]}
-                  onFocus={() => setFbFocus('url')}
-                  onBlur={() => setFbFocus(null)}
-                  placeholder="Paste a link to the feedback clip you recorded…"
-                  placeholderTextColor={C.textMuted}
-                  value={fbUrl}
-                  onChangeText={setFbUrl}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                />
+                {/* Two ways to reply. NOTE ONLY is for the shallow check-up — a
+                    few written words, nothing filmed — where recording a video
+                    back is more than the submission asked for. */}
+                <View style={[styles.modeRow, wide && W.modeRow]}>
+                  {[
+                    { key: 'video', label: 'VIDEO + NOTE' },
+                    { key: 'note',  label: 'NOTE ONLY' },
+                  ].map(m => {
+                    const active = fbMode === m.key;
+                    return (
+                      <TouchableOpacity
+                        key={m.key}
+                        onPress={() => setFbMode(m.key)}
+                        style={[styles.modePill, wide && W.modePill, active && styles.modePillActive]}
+                      >
+                        <Text style={[styles.modePillText, wide && W.modePillText, active && styles.modePillTextActive]}>
+                          {m.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
+                {fbMode === 'video' && (
+                  <>
+                    <Text style={[styles.fieldLabel, wide && W.fieldLabel]}>FEEDBACK VIDEO URL</Text>
+                    <TextInput
+                      style={[styles.input, wide && W.input, fbFocus === 'url' && styles.inputFocus]}
+                      onFocus={() => setFbFocus('url')}
+                      onBlur={() => setFbFocus(null)}
+                      placeholder="Paste a link to the feedback clip you recorded…"
+                      placeholderTextColor={C.textMuted}
+                      value={fbUrl}
+                      onChangeText={setFbUrl}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                    />
+                  </>
+                )}
 
                 <View style={styles.labelRow}>
-                  <Text style={styles.fieldLabel}>NOTE (OPTIONAL)</Text>
-                  <Text style={styles.counter}>{fbNote.length}/{FB_NOTE_MAX}</Text>
+                  <Text style={[styles.fieldLabel, wide && W.fieldLabel]}>
+                    {fbMode === 'note' ? 'NOTE' : 'NOTE (OPTIONAL)'}
+                  </Text>
+                  <Text style={[styles.counter, wide && W.counter]}>{fbNote.length}/{FB_NOTE_MAX}</Text>
                 </View>
                 <TextInput
-                  style={[styles.input, styles.multiline, fbFocus === 'note' && styles.inputFocus]}
+                  style={[styles.input, styles.multiline, wide && W.input, wide && W.multiline, fbFocus === 'note' && styles.inputFocus]}
                   onFocus={() => setFbFocus('note')}
                   onBlur={() => setFbFocus(null)}
-                  placeholder="A few words alongside the video…"
+                  placeholder={fbMode === 'note'
+                    ? 'Your whole reply — no video this time…'
+                    : 'A few words alongside the video…'}
                   placeholderTextColor={C.textMuted}
                   value={fbNote}
                   onChangeText={setFbNote}
@@ -337,64 +444,93 @@ export default function AdminCheckupScreen({ navigation, route }) {
                 )}
 
                 <PillButton
-                  label={saving ? 'SAVING…' : hasFeedback ? 'UPDATE FEEDBACK' : 'SEND FEEDBACK'}
+                  label={saving ? 'SAVING…'
+                    : hasFeedback ? 'UPDATE FEEDBACK'
+                    : fbMode === 'note' ? 'SEND NOTE' : 'SEND FEEDBACK'}
                   onPress={handleSave}
                   loading={saving}
                   variant="solid"
                   tone="green"
                   size="lg"
-                  style={{ marginTop: 22 }}
+                  style={[{ marginTop: 22 }, wide && W.sendBtn]}
                 />
               </View>
             </>
           )}
 
           {/* ── This player's check-up — ONE list, edited in place ── */}
-          <View style={styles.customizeBlock}>
+          <View style={[styles.customizeBlock, wide && W.customizeBlock]}>
             <View style={styles.customizeHead}>
-              <SectionTitle>THIS PLAYER'S CHECK-UP</SectionTitle>
+              <SectionTitle wide={wide}>THIS PLAYER'S CHECK-UP</SectionTitle>
               <View style={styles.headRight}>
-                <View style={[styles.scopeChip, hasOverride ? styles.scopeChipCustom : styles.scopeChipStd]}>
-                  <Text style={[styles.scopeChipText, hasOverride ? styles.scopeChipTextCustom : styles.scopeChipTextStd]}>
+                <View style={[styles.scopeChip, wide && W.scopeChip, hasOverride ? styles.scopeChipCustom : styles.scopeChipStd]}>
+                  <Text style={[styles.scopeChipText, wide && W.scopeChipText, hasOverride ? styles.scopeChipTextCustom : styles.scopeChipTextStd]}>
                     {hasOverride ? 'PERSONAL' : 'CLASS STANDARD'}
                   </Text>
                 </View>
+                {/* EDIT only exists once the section is open — it acts on a list
+                    that isn't on screen otherwise. */}
+                {tplOpen && (
+                  <PillButton
+                    label={tplEditing ? 'DONE' : 'EDIT'}
+                    onPress={() => setTplEditing(v => !v)}
+                    variant={tplEditing ? 'solid' : 'outline'}
+                    tone={tplEditing ? 'green' : 'accent'}
+                    size={wide ? 'md' : 'sm'}
+                  />
+                )}
                 <PillButton
-                  label={tplEditing ? 'DONE' : 'EDIT'}
-                  onPress={() => setTplEditing(v => !v)}
-                  variant={tplEditing ? 'solid' : 'outline'}
-                  tone={tplEditing ? 'green' : 'accent'}
-                  size="sm"
+                  label={tplOpen ? '▲  CLOSE' : '▼  OPEN'}
+                  onPress={toggleTpl}
+                  variant="outline"
+                  tone={tplOpen ? 'muted' : 'accent'}
+                  size={wide ? 'md' : 'sm'}
                 />
               </View>
             </View>
 
-            {/* The explainer belongs to the editing state — the clean view stays
-                clean, so it can be on screen while the coach is recording. */}
-            {tplEditing && (
-              <Text style={styles.customizeHint}>
-                {hasOverride
-                  ? 'Tailored to this player. Every change saves to them only — their class standard is untouched.'
-                  : "What this player fills in, inherited from their class. Change anything here and it becomes theirs alone — the class standard stays as it is."}
+            {/* Closed: one line saying what is in there, so the section still
+                reports itself without putting the whole list on screen. */}
+            {!tplOpen && (
+              <Text style={[styles.customizeClosed, wide && W.customizeClosed]}>
+                {tplCounts.questions + tplCounts.exercises === 0
+                  ? 'Nothing authored yet — open to build this player’s check-up.'
+                  : `${tplCounts.questions} question${tplCounts.questions === 1 ? '' : 's'} · ${tplCounts.exercises} exercise${tplCounts.exercises === 1 ? '' : 's'}`}
               </Text>
             )}
 
-            <CheckupTemplateEditor
-              key={editorKey}
-              scope={{ playerId: player.id, classId }}
-              onSourceChange={onSourceChange}
-              editable={tplEditing}
-            />
+            {tplOpen && (
+              <>
+                {/* The explainer belongs to the editing state — the clean view
+                    stays clean, so it can be on screen while the coach is
+                    recording. */}
+                {tplEditing && (
+                  <Text style={[styles.customizeHint, wide && W.customizeHint]}>
+                    {hasOverride
+                      ? 'Tailored to this player. Every change saves to them only — their class standard is untouched.'
+                      : "What this player fills in, inherited from their class. Change anything here and it becomes theirs alone — the class standard stays as it is."}
+                  </Text>
+                )}
 
-            {tplEditing && hasOverride && (
-              <PillButton
-                label={busyTpl ? 'RESETTING…' : '↺  BACK TO CLASS STANDARD'}
-                onPress={askReset}
-                loading={busyTpl}
-                tone="danger"
-                size="sm"
-                style={{ alignSelf: 'flex-start', marginTop: 20 }}
-              />
+                <CheckupTemplateEditor
+                  key={editorKey}
+                  scope={{ playerId: player.id, classId }}
+                  onSourceChange={onSourceChange}
+                  editable={tplEditing}
+                  wide={wide}
+                />
+
+                {tplEditing && hasOverride && (
+                  <PillButton
+                    label={busyTpl ? 'RESETTING…' : '↺  BACK TO CLASS STANDARD'}
+                    onPress={askReset}
+                    loading={busyTpl}
+                    tone="danger"
+                    size="sm"
+                    style={{ alignSelf: 'flex-start', marginTop: 20 }}
+                  />
+                )}
+              </>
             )}
           </View>
 
@@ -415,11 +551,40 @@ export default function AdminCheckupScreen({ navigation, route }) {
   );
 }
 
-function SectionTitle({ children }) {
+// The player's clip inside the review card.
+//
+// On a PHONE it is the fixed 220-high row it has always been. On DESKTOP the box
+// is shaped to the CLIP instead: the coach films these on a phone, so most are
+// portrait, and a portrait clip dropped into a ~1100-wide fixed-height box is a
+// stamp between two grey slabs — which is most of what the wasted space on that
+// monitor was actually made of. `VideoPlayer.onRatio` reports the real aspect as
+// soon as the metadata lands, and until then the neutral box below holds the
+// layout so nothing jumps.
+function ReviewClip({ url, wide }) {
+  const [ratio, setRatio] = useState(null);
+  const [boxW,  setBoxW]  = useState(0);
+
+  if (!wide) return <VideoPlayer url={url} height={220} style={{ marginTop: 10 }} />;
+
+  // Height from the clip, floored so a wide clip is still watchable and capped
+  // so a tall one can't push the next exercise off the screen.
+  const h = ratio && boxW ? Math.max(260, Math.min(boxW / ratio, 620)) : 420;
+  // …and then the width follows the height for anything narrower than the cell,
+  // so a portrait clip is a portrait player, centred.
+  const w = ratio ? Math.min(boxW || 0, h * ratio) || undefined : undefined;
+
   return (
-    <View style={styles.sectionHead}>
-      <View style={styles.sectionBar} />
-      <Text style={styles.sectionTitle}>{children}</Text>
+    <View style={W.clipBox} onLayout={e => setBoxW(e.nativeEvent.layout.width)}>
+      <VideoPlayer url={url} width={w} height={h} onRatio={setRatio} style={{ marginTop: 10 }} />
+    </View>
+  );
+}
+
+function SectionTitle({ children, wide = false }) {
+  return (
+    <View style={[styles.sectionHead, wide && W.sectionHead]}>
+      <View style={[styles.sectionBar, wide && W.sectionBar]} />
+      <Text style={[styles.sectionTitle, wide && W.sectionTitle]}>{children}</Text>
     </View>
   );
 }
@@ -508,6 +673,23 @@ const styles = StyleSheet.create({
   },
   notePanelText: { fontFamily: F.body, fontSize: 15, color: C.text, lineHeight: 22, letterSpacing: 0.3 },
 
+  // VIDEO + NOTE / NOTE ONLY switch, same pill language as the day row.
+  modeRow: { flexDirection: 'row', gap: 8, marginTop: 12, marginBottom: 4 },
+  modePill: {
+    flex: 1, alignItems: 'center', justifyContent: 'center',
+    paddingVertical: 11, borderRadius: 999,
+    borderWidth: 1.5, borderColor: C.lockedBorder, backgroundColor: C.surface,
+  },
+  modePillActive: {
+    borderColor: C.iceGlow, backgroundColor: 'rgba(74,158,191,0.16)',
+    shadowColor: C.iceGlow, shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.6, shadowRadius: 8,
+  },
+  modePillText: { fontFamily: F.heading, fontSize: 12, color: C.textMuted, letterSpacing: 1.5 },
+  modePillTextActive: {
+    color: C.text,
+    textShadowColor: 'rgba(74,158,191,0.7)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 8,
+  },
+
   feedbackBlock: {
     marginTop: 22, paddingTop: 8,
     borderTopWidth: 1, borderTopColor: C.cardBorder,
@@ -557,4 +739,71 @@ const styles = StyleSheet.create({
     fontFamily: F.bodyMed, fontSize: 14, color: C.textMuted,
     letterSpacing: 0.4, lineHeight: 20, marginBottom: 18, marginTop: 6,
   },
+  // The one line the section shows while it's shut.
+  customizeClosed: {
+    fontFamily: F.bodyMed, fontSize: 14, color: C.textMuted,
+    letterSpacing: 1, lineHeight: 20, marginTop: 6,
+  },
+});
+
+// ─── THE DESKTOP OVERRIDES ──────────────────────────────────────────────────
+// Applied ON TOP of `styles` (never instead of them) whenever the canvas is
+// desktop-sized — see the `wide` note on the component. Keeping them in their
+// own sheet rather than threading a scale factor through every number means the
+// phone layout above stays readable as the one real layout, and a desktop tweak
+// can never accidentally move the phone.
+//
+// The measure: at DESKTOP_CARD_W the card is ~2400 canvas units, so a two-up
+// grid cell is ~1160 — the reason the type steps up rather than the lines just
+// running longer. A one-column body at this width would set 200-character
+// lines, which is worse than the dead space it replaced.
+const W = StyleSheet.create({
+  body: { paddingHorizontal: 44, paddingTop: 14, paddingBottom: 70 },
+
+  // Two-up. The cells carry the gutter (via the row's negative margin) so the
+  // blocks inside keep their own phone margins unchanged.
+  grid: { flexDirection: 'row', flexWrap: 'wrap', marginHorizontal: -14 },
+  gridCell: { width: '50%', paddingHorizontal: 14 },
+
+  submitBanner: { paddingVertical: 18, paddingHorizontal: 24, borderRadius: 14, marginBottom: 30 },
+  submitBannerText: { fontSize: 20, letterSpacing: 2 },
+  submitBannerDone: { fontSize: 17, letterSpacing: 2 },
+
+  sectionHead: { gap: 16, marginBottom: 20, marginTop: 16 },
+  sectionBar: { width: 7, height: 30 },
+  sectionTitle: { fontSize: 27, letterSpacing: 4 },
+
+  dayRow: { gap: 10, marginBottom: 30 },
+  dayPill: { paddingVertical: 18 },
+  dayPillText: { fontSize: 16, letterSpacing: 1.5 },
+
+  qPrompt: { fontSize: 21, lineHeight: 29, marginBottom: 12 },
+  notePanel: { padding: 20, borderRadius: 14, marginTop: 10 },
+  notePanelText: { fontSize: 20, lineHeight: 30 },
+
+  clipCard: { padding: 20, paddingLeft: 24, borderRadius: 18, borderLeftWidth: 7, marginBottom: 34 },
+  clipHead: { paddingBottom: 12, marginBottom: 14 },
+  clipMeta: { fontSize: 15, letterSpacing: 3 },
+  clipName: { fontSize: 30, lineHeight: 38, letterSpacing: 1.5 },
+  clipTag: { fontSize: 14, letterSpacing: 2.5, marginTop: 6 },
+  clipBox: { alignItems: 'center' },
+  openLink: { fontSize: 17, letterSpacing: 2.5, marginTop: 16 },
+
+  feedbackBlock: { marginTop: 34, paddingTop: 14 },
+  modeRow: { gap: 12, marginTop: 18 },
+  modePill: { paddingVertical: 16 },
+  modePillText: { fontSize: 16, letterSpacing: 2 },
+  fieldLabel: { fontSize: 18, letterSpacing: 2.5, marginBottom: 12, marginTop: 14 },
+  counter: { fontSize: 16, marginBottom: 12 },
+  input: { fontSize: 20, paddingHorizontal: 22, paddingVertical: 20, borderRadius: 14 },
+  multiline: { minHeight: 190, lineHeight: 30, paddingTop: 18 },
+  // A full-bleed SEND across the whole card would be a 2000px button; it stays
+  // the size of its job and sits where the eye already is.
+  sendBtn: { alignSelf: 'flex-start', minWidth: 380, marginTop: 30 },
+
+  customizeBlock: { marginTop: 44, paddingTop: 28 },
+  scopeChip: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 10 },
+  scopeChipText: { fontSize: 14, letterSpacing: 2 },
+  customizeHint: { fontSize: 18, lineHeight: 27, marginBottom: 24, marginTop: 10 },
+  customizeClosed: { fontSize: 18, lineHeight: 27, marginTop: 10 },
 });

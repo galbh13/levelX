@@ -24,6 +24,7 @@ import { hapticSuccess, hapticTap } from '../lib/haptics';
 import { useAppInsets } from '../constants/layout';
 import { FRAME_PAD, FRAME_PAD_V } from '../components/ScreenFrame';
 import { noteQuestCompleted, noteQuestUncompleted, reconcileQuestProgress } from '../lib/questProgress';
+import { chainLabel } from '../lib/questLabels';
 
 // An SVG path whose props (here strokeDashoffset) can be driven by an Animated
 // value — lets completed connectors carry a travelling "energy" dash.
@@ -1548,7 +1549,7 @@ function QuestNode({ quest, state, isRequired, nodeWidth, delay, disabled, celeb
           {isMirror && (
             <View style={[styles.mirrorTag, isDone && styles.mirrorTagDone]}>
               <Text style={[styles.mirrorTagText, isDone && styles.mirrorTagTextDone]}>
-                {(mirrorSource?.chain ?? 'another quest').replace(/_/g, ' ').toUpperCase()}
+                {chainLabel(mirrorSource?.chain ?? 'another quest')}
               </Text>
             </View>
           )}
@@ -1748,7 +1749,7 @@ function VersionSwitch({ toUpgrade, label, onPress }) {
         numberOfLines={1}
         adjustsFontSizeToFit
         minimumFontScale={0.7}
-      >{label.replace(/_/g, ' ').toUpperCase()}</Text>
+      >{chainLabel(label)}</Text>
     </TouchableOpacity>
   );
 }
@@ -2442,7 +2443,7 @@ export default function QuestTreeScreen({ route, navigation }) {
           </View>
 
           {/* Quest name — the hero title (color + shining kept; entrance added) */}
-          <HeroTitle text={chain.replace(/_/g, ' ').toUpperCase()} />
+          <HeroTitle text={chainLabel(chain)} />
 
           {/* Quest-type badge — gem emblem. An upgrade's rows are SEEDED as
               'side' but it is shown as the main quest it replaced, so the badge
@@ -2597,7 +2598,7 @@ export default function QuestTreeScreen({ route, navigation }) {
                   pointerEvents="none"
                 >
                   <Text style={styles.branchLabel}>
-                    {branch.replace(/_/g, ' ').toUpperCase()}
+                    {chainLabel(branch)}
                   </Text>
                 </View>
               );
@@ -2677,7 +2678,7 @@ export default function QuestTreeScreen({ route, navigation }) {
             // say WHERE this node is earned — the player has to go and do it in
             // the quest that owns it.
             const src   = mirrorSources[pendingQuest.mirror_quest_id] ?? null;
-            const where = (src?.chain ?? '').replace(/_/g, ' ').toUpperCase();
+            const where = chainLabel(src?.chain ?? '');
             const met   = completions.has(pendingQuest.id);
             return (
               <View style={styles.confirmCard}>
@@ -2825,7 +2826,7 @@ export default function QuestTreeScreen({ route, navigation }) {
             {/* Name the destination, not the quest being given up — the player
                 is choosing where they land, which is the original chain. */}
             <Text style={styles.confirmCardName} numberOfLines={2} adjustsFontSizeToFit minimumFontScale={0.7}>
-              {`RETURN TO ${base.chain.replace(/_/g, ' ').toUpperCase()}`}
+              {`RETURN TO ${chainLabel(base.chain)}`}
             </Text>
             {doneCount > 0 && (
               <Text style={[styles.confirmCardDelta, styles.confirmCardDeltaDown]}>

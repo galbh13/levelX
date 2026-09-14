@@ -10,6 +10,8 @@ import { F } from '../constants/fonts';
 import ScreenFrame from '../components/ScreenFrame';
 import ScreenHeader from '../components/ScreenHeader';
 import PillButton from '../components/PillButton';
+import { GearLine } from '../components/CoachText';
+import { splitGear } from '../lib/gear';
 
 const SL = {
   bg:     '#050912',
@@ -33,7 +35,6 @@ export default function EliteWorkoutsScreen({ navigation }) {
   const [classId,  setClassId]  = useState(null);   // defaults to the first class
   const [category, setCategory] = useState('main'); // main | side | accessory (mirrors the gallery GOAL filter)
   const [search,   setSearch]   = useState('');
-  const [expanded, setExpanded] = useState(null);
   const [imported, setImported] = useState({});      // gallery id -> true
   const [busy,     setBusy]     = useState({});      // gallery id -> importing
   const [loading,  setLoading]  = useState(true);
@@ -115,7 +116,7 @@ export default function EliteWorkoutsScreen({ navigation }) {
             <TouchableOpacity
               key={c.id}
               style={[styles.chip, selectedClass?.id === c.id && styles.chipActive]}
-              onPress={() => { setClassId(c.id); setExpanded(null); }}
+              onPress={() => setClassId(c.id)}
             >
               <Text style={[styles.chipText, selectedClass?.id === c.id && styles.chipTextActive]}>
                 {c.name.toUpperCase()}
@@ -130,7 +131,7 @@ export default function EliteWorkoutsScreen({ navigation }) {
             <TouchableOpacity
               key={c.k}
               style={[styles.chip, category === c.k && styles.chipActive]}
-              onPress={() => { setCategory(c.k); setExpanded(null); }}
+              onPress={() => setCategory(c.k)}
             >
               <Text style={[styles.chipText, category === c.k && styles.chipTextActive]}>
                 {c.l}
@@ -149,7 +150,12 @@ export default function EliteWorkoutsScreen({ navigation }) {
           />
         </View>
 
-        {/* List — fills the remaining fixed-card height, scrolls internally */}
+        {/* List — fills the remaining fixed-card height, scrolls internally.
+            Tapping a card OPENS the workout on the real workout screen (WorkoutDetail
+            in preview mode), the same way the coach gallery does, instead of the
+            cramped inline name + sets×reps expansion it used to unfold — that
+            version could never show variations, notes or a fork. BACK on that
+            screen returns here with class, goal and search intact. */}
         <View style={styles.listArea}>
           {loading ? (
             <View style={styles.areaCenter}>
@@ -173,41 +179,37 @@ export default function EliteWorkoutsScreen({ navigation }) {
             <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.list} showsVerticalScrollIndicator={false}>
               {shown.map(w => {
                 const exCount = w.exercises?.length ?? 0;
-                const isOpen  = expanded === w.id;
                 const done    = !!imported[w.id];
                 const fork    = Array.isArray(w.branches) && w.branches.length >= 2;
                 return (
                   <View key={w.id} style={styles.workoutCard}>
                     <TouchableOpacity
                       style={styles.workoutHead}
-                      onPress={() => setExpanded(isOpen ? null : w.id)}
+                      onPress={() => navigation.navigate('WorkoutDetail', { preview: w })}
                       activeOpacity={0.8}
                     >
                       <View style={{ flex: 1 }}>
                         <Text style={styles.workoutTitle}>{w.title?.toUpperCase()}</Text>
-                        {w.description ? (
-                          <Text style={styles.workoutDesc} numberOfLines={isOpen ? undefined : 1}>
-                            {w.description}
-                          </Text>
-                        ) : null}
+                        {w.description ? (() => {
+                          const { prose, items } = splitGear(w.description);
+                          return (
+                            <>
+                              {prose ? (
+                                <Text style={styles.workoutDesc} numberOfLines={2}>
+                                  {prose}
+                                </Text>
+                              ) : null}
+                              <GearLine items={items} />
+                            </>
+                          );
+                        })() : null}
                         <Text style={styles.workoutMeta}>
                           {exCount} {exCount === 1 ? 'EXERCISE' : 'EXERCISES'}{fork ? ' · FORK' : ''}
                         </Text>
                       </View>
-                      <Text style={styles.chevron}>{isOpen ? '▲' : '▼'}</Text>
+                      {/* Points RIGHT: this card leads somewhere, it doesn't unfold. */}
+                      <Text style={styles.chevron}>›</Text>
                     </TouchableOpacity>
-
-                    {isOpen && (
-                      <View style={styles.exList}>
-                        {(w.exercises ?? []).map((ex, i) => (
-                          <View key={i} style={styles.exRow}>
-                            <Text style={styles.exLetter}>{String.fromCharCode(65 + i)}</Text>
-                            <Text style={styles.exName} numberOfLines={1}>{ex.name}</Text>
-                            <Text style={styles.exSets}>{ex.sets}×{ex.reps}</Text>
-                          </View>
-                        ))}
-                      </View>
-                    )}
 
                     <PillButton
                       label={done ? '✓ ADDED' : '+ IMPORT'}
@@ -280,14 +282,5 @@ const styles = StyleSheet.create({
   workoutTitle: { fontFamily: F.heading, fontSize: 22, color: SL.text, letterSpacing: 1.5, textTransform: 'uppercase' },
   workoutDesc: { fontFamily: F.bodyMed, fontSize: 16, color: SL.muted, letterSpacing: 0.5, marginTop: 4 },
   workoutMeta: { fontFamily: F.bodyMed, fontSize: 14, color: SL.accent, letterSpacing: 1.5, marginTop: 6 },
-  chevron: { fontFamily: F.body, fontSize: 14, color: SL.muted },
-
-  exList: { paddingHorizontal: 16, paddingBottom: 8, gap: 6 },
-  exRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
-    paddingVertical: 8, borderTopWidth: 1, borderTopColor: 'rgba(26,58,92,0.5)',
-  },
-  exLetter: { fontFamily: F.heading, fontSize: 16, color: SL.accent, width: 22 },
-  exName: { flex: 1, fontFamily: F.bodyMed, fontSize: 16, color: SL.text, letterSpacing: 0.5 },
-  exSets: { fontFamily: F.bodyMed, fontSize: 15, color: SL.muted, letterSpacing: 1 },
+  chevron: { fontFamily: F.heading, fontSize: 26, color: SL.accent, opacity: 0.7 },
 });

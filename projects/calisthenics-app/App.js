@@ -21,6 +21,7 @@ import { F } from './constants/fonts';
 import { supabase } from './lib/supabase';
 import GuidedTour from './components/GuidedTour';
 import TourBoundary from './components/TourBoundary';
+import CrashBoundary from './components/CrashBoundary';
 import { TourProvider, useTour } from './context/TourContext';
 import { markOnboardingSeen } from './lib/onboarding';
 
@@ -30,6 +31,7 @@ import WorkoutsScreen    from './screens/WorkoutsScreen';
 import CheckupScreen      from './screens/CheckupScreen';
 import LoginScreen           from './screens/LoginScreen';
 import SetPasswordScreen     from './screens/SetPasswordScreen';
+import NotAssignedScreen     from './screens/NotAssignedScreen';
 import AdminDashboard        from './screens/AdminDashboard';
 import PlayerAdminScreen     from './screens/PlayerAdminScreen';
 import AdminCheckupScreen    from './screens/AdminCheckupScreen';
@@ -56,6 +58,7 @@ import { CoachProvider, useCoach } from './context/CoachContext';
 import { CheckupNotifyProvider, useCheckupNotify } from './context/CheckupNotifyContext';
 import { AdminNotifyProvider } from './context/AdminNotifyContext';
 import { armHoloEntry, isHoloComing, onHoloStart } from './lib/holoEntry';
+import { playSwoosh, primeSfx } from './lib/sfx';
 import SystemIntro from './components/SystemIntro';
 import IntroBoundary from './components/IntroBoundary';
 import ScreenFrame from './components/ScreenFrame';
@@ -156,6 +159,12 @@ const TAB_LABEL = { Personal: 'PROFILE' };
 const BAR_RISE_MS = 300;
 const BAR_RISE_FALLBACK_MS = 6000;
 
+// One page-turn sound per move. A multi-page tab press slides through every page
+// in between; every crossing inside this window belongs to that one trip and
+// stays silent. Long enough to cover the pager's slide, short enough that a
+// second real swipe (finger up, finger down again) still speaks.
+const SWOOSH_LOCKOUT_MS = 280;
+
 function PlayerTabBar({ state, navigation, position }) {
   // Edge-to-edge: the Android nav bar (48dp with three buttons) sits ON the app,
   // so the labels landed on top of it. Pad the bar by the real inset — never
@@ -226,6 +235,34 @@ function PlayerTabBar({ state, navigation, position }) {
   }, [position, count]);
   // Snap to the committed index too (covers tab presses, where position may jump).
   useEffect(() => { setActiveIndex(state.index); }, [state.index]);
+
+  // ── The page turn ─────────────────────────────────────────────────────────
+  // A swoosh every time the system moves to another page. It hangs off
+  // `activeIndex`, not `state.index`, so it fires at the SAME moment the label
+  // and the glow marker commit — the halfway point of a drag — instead of after
+  // the pager finishes settling. A tab press runs through the same value, so
+  // press and swipe sound identical. Direction tilts the pitch (see playSwoosh),
+  // and the ref is seeded with the opening tab, so app start is silent.
+  //
+  // ONE MOVE = ONE SWOOSH. A tab press that jumps several pages (Skills →
+  // Check-up) animates the pager THROUGH every page in between, so `activeIndex`
+  // steps 0→1→2→3 and the naive version fired three times — a machine-gun of
+  // swooshes for a single tap. So the first crossing sounds and the rest of that
+  // same flight is swallowed: any further crossing inside SWOOSH_LOCKOUT_MS is
+  // part of the trip that already announced itself. The window is shorter than a
+  // finger can lift and swipe again, so two deliberate swipes still get two
+  // swooshes — only one continuous transit is collapsed into one.
+  const prevTab = useRef(state.index);
+  const lastSwoosh = useRef(0);
+  useEffect(() => {
+    if (prevTab.current === activeIndex) return;
+    const dir = activeIndex > prevTab.current ? 1 : -1;
+    prevTab.current = activeIndex;
+    const now = Date.now();
+    if (now - lastSwoosh.current < SWOOSH_LOCKOUT_MS) return;   // same flight — already sounded
+    lastSwoosh.current = now;
+    playSwoosh(dir);
+  }, [activeIndex]);
 
   const inputRange = state.routes.map((_, i) => i);
   const translateX = position.interpolate({
@@ -423,6 +460,12 @@ function AdminNavigator() {
         <AdminStack.Screen name="WorkoutMode"       component={WorkoutModeScreen} />
         <AdminStack.Screen name="WorkoutSummary"    component={WorkoutSummaryScreen} />
         <AdminStack.Screen name="PlayerAdmin"       component={PlayerAdminScreen} />
+        {/* The player's own PROFILE page, opened read/write from MANAGE PLAYER with a
+            `studentId` param (PersonalScreen resolves the signed-in user when it gets
+            none). HunterStatus rides along because the PLAYER CARD panel on that page
+            pushes it — without it the panel would dead-end inside the admin stack. */}
+        <AdminStack.Screen name="PlayerProfile"     component={PersonalScreen} />
+        <AdminStack.Screen name="HunterStatus"      component={HunterStatusScreen} />
         <AdminStack.Screen name="PlayerCheckup"     component={AdminCheckupScreen} />
         <AdminStack.Screen name="CheckupTemplates"  component={AdminCheckupTemplateScreen} />
         <AdminStack.Screen name="WorkoutsList"      component={WorkoutsScreen} />
@@ -619,6 +662,10 @@ export default function App() {
     return () => { cancelled = true; };
   }, []);
 
+  // Decode/allocate the UI sound kit once, up front, so the first page turn
+  // already has its swoosh loaded instead of warming on the way past.
+  useEffect(() => { primeSfx(); }, []);
+
   const [fontGrace, setFontGrace] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => setFontGrace(true), 4000);
@@ -631,6 +678,9 @@ export default function App() {
   // An invited player still holding the shared starter password — the app is
   // blocked behind SetPasswordScreen until they pick their own.
   const [mustChangePw, setMustChangePw] = useState(false);
+  // A player the coach has invited but not yet placed in a class. The tab app
+  // has nothing to show them, so they wait on NotAssignedScreen instead.
+  const [unassigned, setUnassigned] = useState(false);
   // The THE SYSTEM title sequence — plays once per cold start, over everything.
   const [introDone, setIntroDone] = useState(false);
 
@@ -715,6 +765,21 @@ export default function App() {
     } catch {
       setMustChangePw(false);
     }
+
+    // Placement. A player with no class_id has nothing for the tabs to render —
+    // see NotAssignedScreen — so they get the waiting room instead. Its own query
+    // for the same reason must_change_password has one: a failure here must not
+    // decide routing for everyone. `false` is the safe direction (show the app).
+    try {
+      const { data } = await supabase
+        .from('profiles')
+        .select('class_id')
+        .eq('id', userId)
+        .single();
+      setUnassigned(!data?.class_id);
+    } catch {
+      setUnassigned(false);
+    }
   }
 
   // Hide the native splash as soon as we're ready to render. CRITICAL: do NOT tie
@@ -770,6 +835,19 @@ export default function App() {
       );
     }
 
+    // Placed after the password gate and before the tabs: an invited player sets
+    // their password first, then waits here until the coach gives them a class.
+    // Admins are exempt — they have no class of their own and never should.
+    if (unassigned && role !== 'admin') {
+      return (
+        <ScaledRoot>
+          <NavigationContainer theme={NAV_THEME}>
+            <NotAssignedScreen onRecheck={() => fetchRole(session.user.id)} />
+          </NavigationContainer>
+        </ScaledRoot>
+      );
+    }
+
     // Only two roles remain: admin and player. Everyone else is treated as a player.
     return (
       <ScaledRoot>
@@ -789,6 +867,11 @@ export default function App() {
   // Kept OUTSIDE ScaledRoot so the clip fills the real screen, not the zoomed canvas.
   return (
     <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+    {/* Outermost guard: anything that throws below this — any screen, any
+        navigator — lands on a recoverable error card instead of unmounting the
+        whole tree into a black screen. Only SafeAreaProvider stays above it, so
+        the fallback can read real insets. See CrashBoundary. */}
+    <CrashBoundary>
     <View style={{ flex: 1, backgroundColor: C.bg }}>
       {renderContent()}
       {INTRO_ENABLED && !introDone && (
@@ -797,6 +880,7 @@ export default function App() {
         </IntroBoundary>
       )}
     </View>
+    </CrashBoundary>
     </SafeAreaProvider>
   );
 }

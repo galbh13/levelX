@@ -110,6 +110,11 @@ export default function CheckupScreen() {
   const [subAnswers, setSubAnswers] = useState([]);
   const [subVideos,  setSubVideos]  = useState([]);
   const [subNotes,   setSubNotes]   = useState([]);   // Part-2 notes (clip or no clip)
+  // Is the read-only record of what was sent unfolded? Collapsed on arrival: it's
+  // reference, and open by default it buried the feedback and the actions under a
+  // page of scroll. Reset whenever a different check-up loads, so the panel never
+  // opens onto the wrong submission.
+  const [showSubmission, setShowSubmission] = useState(false);
 
   // The submitted check-up a player left behind by tapping START NEW CHECK-UP.
   // Kept in memory (the row itself is untouched in the DB) so the new form always
@@ -221,6 +226,8 @@ export default function CheckupScreen() {
           setSubAnswers(split.questionRows);
           setSubNotes(split.exerciseNotes);
           setSubVideos(vids ?? []);
+          // A freshly loaded submission arrives folded, whatever the last one was.
+          setShowSubmission(false);
           if (newSessionRef.current) {
             // They chose to start a NEW check-up: their latest row is still the old
             // submitted one, so keep them in the empty form and hold that submission
@@ -719,7 +726,7 @@ export default function CheckupScreen() {
   // same card, same WATCH FEEDBACK VIDEO button — tagged as the real one so the
   // highlight lands on it. It exists only while that step is showing (the tour
   // publishes its id) and only when there is no real feedback to show instead.
-  const { stepId } = useTour();
+  const { stepId, tourOpen } = useTour();
   // The coach's last reply, shown as a standing card whenever the CURRENT
   // check-up isn't the one carrying it (composing, or sent and still waiting).
   const standingFeedback = !reviewed && lastFeedback && (lastFeedback.feedback_note || lastFeedback.feedback_url)
@@ -733,6 +740,19 @@ export default function CheckupScreen() {
   const cycleStart = checkupCycleStart(checkupDay);
   const sentThisCycle = !!checkup?.submitted_at && !!cycleStart
     && new Date(checkup.submitted_at) >= cycleStart;
+  // The check-up day has arrived (or passed) and nothing has been sent for THIS
+  // cycle — so the banner about the previous submission has to be followed by
+  // what the player still owes. Same schedule the ScheduleBar chip reads.
+  const schedStatus = checkupSchedule(checkupDay)?.status ?? null;
+  const thisCycleDue = !sentThisCycle && (schedStatus === 'today' || schedStatus === 'grace');
+
+  // The submitted check-up is collapsed by default — see the disclosure button.
+  // The guided tour aims two of its steps at the YOUR ANSWERS and YOUR EXERCISES
+  // headings, which don't exist while it's folded, so the tour forces it open for
+  // as long as it runs. `tourOpen` rather than a step id: those two steps carry no
+  // `id` of their own, and an open panel is harmless on the other steps.
+  const hasSubmission = subAnswers.length > 0 || subCards.length > 0;
+  const subOpen = showSubmission || tourOpen;
 
   return (
     <ScreenFrame fill ready={!loading}>
@@ -853,9 +873,13 @@ export default function CheckupScreen() {
                   {questions.map(q => (
                     <View key={q.id} style={styles.qBlock}>
                       <Text style={styles.qPrompt}>{q.prompt}</Text>
+                      {/* An empty box stops people who have nothing written to
+                          say. A number is always answerable, so the way out is
+                          on the question itself. */}
+                      <Text style={styles.qHint}>[ you can also grade it 1–10 ]</Text>
                       <TextInput
                         style={styles.answerInput}
-                        placeholder="Your answer…"
+                        placeholder="Your answer… or a number 1–10"
                         placeholderTextColor={C.textMuted}
                         value={answers[q.id] ?? ''}
                         onChangeText={t => setAnswers(m => ({ ...m, [q.id]: t }))}
@@ -1048,14 +1072,30 @@ export default function CheckupScreen() {
             </>
           ) : (
             <>
-              {/* Status banner — one line: what happened, then when. */}
+              {/* Status banner — one line: what happened, then when.
+                  It has to name WHICH cycle it is talking about. This banner and
+                  the ScheduleBar above it answer two different questions — "what
+                  happened to my last submission" and "do I owe one this week" —
+                  and when the last submission predates the current cycle both
+                  are true at once: the bar reads LATE in red while this said
+                  "SENT — AWAITING FEEDBACK". Both correct, and together they
+                  looked like a bug. Saying LAST CHECK-UP separates the weeks. */}
               <View style={styles.banner}>
                 <Text style={styles.bannerText}>
-                  {reviewed ? 'CURRENT FEEDBACK TIME' : 'SENT — AWAITING FEEDBACK'}
+                  {reviewed ? 'CURRENT FEEDBACK TIME'
+                    : sentThisCycle ? 'SENT — AWAITING FEEDBACK'
+                    : 'LAST CHECK-UP — AWAITING FEEDBACK'}
                 </Text>
                 {!!checkup?.submitted_at && (
                   <Text style={styles.bannerSub}>
-                    {'·  ' + formatDate(checkup.submitted_at) + (reviewed ? '' : ' · still editable')}
+                    {/* "still editable" only where editing makes sense. Re-opening
+                        a previous cycle's check-up doesn't discharge this week's. */}
+                    {'·  ' + formatDate(checkup.submitted_at) + (!reviewed && sentThisCycle ? ' · still editable' : '')}
+                  </Text>
+                )}
+                {thisCycleDue && (
+                  <Text style={styles.bannerDue}>
+                    THIS WEEK'S CHECK-UP IS STILL OPEN — START A NEW ONE BELOW
                   </Text>
                 )}
               </View>
@@ -1080,8 +1120,32 @@ export default function CheckupScreen() {
                 </View>
               )}
 
-              {/* Their submission (read-only) */}
-              {subAnswers.length > 0 && (
+              {/* Their submission (read-only), behind one tap.
+                  It used to be permanently open, so the screen a player lands on
+                  after sending was a wall of their own already-answered questions
+                  and clips — the parts that need attention (the coach's feedback,
+                  what is still owed this week, the two actions) were pushed below
+                  a full page of scroll. It is a RECORD, not a task: kept, but
+                  folded away until asked for. */}
+              {hasSubmission && (
+                <TouchableOpacity
+                  style={styles.discloseBtn}
+                  onPress={() => setShowSubmission(v => !v)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.discloseText}>
+                    {showSubmission ? 'HIDE MY CHECK-UP' : 'MY CHECK-UP'}
+                  </Text>
+                  <Text style={styles.discloseMeta}>
+                    {subAnswers.length > 0 && `${subAnswers.length} ANSWER${subAnswers.length === 1 ? '' : 'S'}`}
+                    {subAnswers.length > 0 && subCards.length > 0 && '  ·  '}
+                    {subCards.length > 0 && `${subCards.length} EXERCISE${subCards.length === 1 ? '' : 'S'}`}
+                  </Text>
+                  <Text style={styles.discloseChevron}>{showSubmission ? '▲' : '▼'}</Text>
+                </TouchableOpacity>
+              )}
+
+              {subOpen && subAnswers.length > 0 && (
                 <>
                   <View ref={tourAnswersRef} collapsable={false}><SectionTitle>YOUR ANSWERS</SectionTitle></View>
                   {subAnswers.map(a => (
@@ -1094,7 +1158,7 @@ export default function CheckupScreen() {
                   ))}
                 </>
               )}
-              {subCards.length > 0 && (
+              {subOpen && subCards.length > 0 && (
                 <>
                   <View ref={tourExercisesRef} collapsable={false}>
                     <SectionTitle>YOUR EXERCISES</SectionTitle>
@@ -1355,7 +1419,11 @@ const styles = StyleSheet.create({
 
   // Question block
   qBlock: { marginBottom: 18 },
-  qPrompt: { fontFamily: F.bodyMed, fontSize: 16, color: C.text, lineHeight: 22, letterSpacing: 0.2, marginBottom: 10 },
+  qPrompt: { fontFamily: F.bodyMed, fontSize: 16, color: C.text, lineHeight: 22, letterSpacing: 0.2, marginBottom: 6 },
+  qHint: {
+    fontFamily: F.body, fontSize: 13, color: C.textMuted,
+    letterSpacing: 0.6, marginBottom: 10,
+  },
   answerInput: {
     backgroundColor: C.bg, borderWidth: 1.5, borderColor: C.cardBorder, borderRadius: 12,
     paddingHorizontal: 16, paddingVertical: 14, minHeight: 80,
@@ -1425,6 +1493,31 @@ const styles = StyleSheet.create({
   },
   bannerText:   { fontFamily: F.heading, fontSize: 18, color: C.iceGlow, letterSpacing: 2 },
   bannerSub:    { fontFamily: F.heading, fontSize: 17, color: C.iceGlow, opacity: 0.75, letterSpacing: 1.5 },
+  // The outstanding-work line. Carries the ScheduleBar's LATE red so the two
+  // agree at a glance, and sits under the ice-toned banner text rather than
+  // competing with it.
+  bannerDue:    { fontFamily: F.heading, fontSize: 14, color: LATE_RED, letterSpacing: 1.2, textAlign: 'center', marginTop: 8, lineHeight: 19 },
+
+  // The fold for the sent check-up. A quiet row, not a PillButton: the two real
+  // actions on this screen are the pills at the foot, and a third one here would
+  // compete with them for the same eye. It reads as a drawer, which is what it is.
+  discloseBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginTop: 22,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C.cardBorder,
+    backgroundColor: C.surface,
+  },
+  discloseText:    { fontFamily: F.heading, fontSize: 15, color: C.iceGlow, letterSpacing: 2 },
+  // The count sits between the label and the chevron and takes the slack, so the
+  // chevron stays pinned right however long the label runs.
+  discloseMeta:    { flex: 1, fontFamily: F.heading, fontSize: 11, color: C.textMuted, letterSpacing: 1.5 },
+  discloseChevron: { fontFamily: F.heading, fontSize: 11, color: C.iceGlow },
 
   feedbackCard: {
     backgroundColor: C.surface,

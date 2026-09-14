@@ -54,8 +54,12 @@ export const FRAME_MAX_W = CARD_W;
 // so the two bodies can cross-swipe inside what reads as ONE card.
 //
 // `maxWidth` is deliberately NOT a per-screen styling knob any more: every card
-// is FRAME_MAX_W wide. It survives in the signature only as an escape hatch —
-// prefer leaving it alone.
+// is FRAME_MAX_W wide. It survives in the signature for ONE sanctioned use —
+// `useDesktopLayout()` in constants/layout.js, which widens an ADMIN screen on a
+// desktop-sized canvas (AdminCheckupScreen: the coach reviews and screen-records
+// on a monitor). Never on a player tab: the tabs are a swipe pager, so a card of
+// a different width would be visible against its neighbour mid-drag. Anywhere
+// else, leave it alone.
 export default function ScreenFrame({ children, overlay = null, ready = true, colors = BLUE, maxWidth = FRAME_MAX_W, duration = 4200, fill = false, holoEntry = true, ghost = false }) {
   // Keep the card clear of the status bar / notch (edge-to-edge on Android).
   const insets = useAppInsets();
