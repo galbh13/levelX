@@ -18,6 +18,11 @@ import {
   splitCheckupAnswers, buildExerciseCards,
   resolvePlayerTemplate, splitTemplateParts,
 } from '../lib/checkups';
+import {
+  fetchActiveGoals, fetchGoalsForCheckup, saveActiveGoals,
+  parseGoalsText, formatGoalsText, MAX_GOALS,
+} from '../lib/checkupGoals';
+import GoalsCard from '../components/GoalsCard';
 
 const FB_NOTE_MAX = 500;
 
@@ -92,6 +97,22 @@ export default function AdminCheckupScreen({ navigation, route }) {
   // of each" — the screen resolves that itself, on load and on every close.
   const [tplCounts,  setTplCounts]  = useState({ questions: 0, exercises: 0 });
   const [fbFocus,    setFbFocus]    = useState(null);   // 'url' | 'note' | null
+
+  // ── The week's milestones ──
+  // What the coach sets NEXT and what the submission being reviewed CLOSED
+  // (`scored` — the goals set a week ago, with the player's ticks on them).
+  // Writing the next week's goals happens in the same breath as the feedback,
+  // because this is the moment the coach knows what to ask for.
+  //
+  // The milestones are typed as TEXT, in the goals language (`1. do this`, one per
+  // line — see parseGoalsText). One box, typed the way you'd write it on paper,
+  // instead of a rack of input rows to tab between every week.
+  const [goalText,  setGoalText]  = useState('');
+  const [scored,    setScored]    = useState([]);
+  const [goalFocus, setGoalFocus] = useState(false);
+  // What that text actually means — the live parse, which is both what gets
+  // saved and what the preview renders.
+  const parsedGoals = useMemo(() => parseGoalsText(goalText), [goalText]);
   const onSourceChange = useCallback(src => setTplSource(src), []);
   const hasOverride = tplSource === 'player';
 
@@ -126,6 +147,12 @@ export default function AdminCheckupScreen({ navigation, route }) {
 
       await purgeExpiredCheckups(player.id);
 
+      // The milestones, both halves: the goals still open on this player (what the
+      // editor starts from — mid-week edits amend the set rather than stacking a
+      // second one), and, further down, the goals their latest submission closed.
+      const openGoals = await fetchActiveGoals(player.id);
+      setGoalText(formatGoalsText(openGoals));
+
       const { data: latest } = await supabase
         .from('checkups')
         .select('*')
@@ -154,8 +181,12 @@ export default function AdminCheckupScreen({ navigation, route }) {
         setFbNote(latest.feedback_note ?? '');
         // A reply already sent as note-only reopens in note-only mode.
         setFbMode(latest.feedback_at && !latest.feedback_url ? 'note' : 'video');
+        // How last week's milestones actually went — read straight off the goals the
+        // player's submission closed.
+        setScored(await fetchGoalsForCheckup(latest.id));
       } else {
         setCheckup(null);
+        setScored([]);
       }
     } catch (e) {
       console.error('[AdminCheckupScreen] load:', e);
@@ -192,11 +223,43 @@ export default function AdminCheckupScreen({ navigation, route }) {
         .single();
       if (error) throw error;
       setCheckup(data);
+
+      // The reply and the next week's goals go out together — one button, because
+      // to the player they are one thing: "here's how that went, here's the week."
+      // The goals are written AFTER the feedback so a failure here can never lose
+      // a reply the coach already recorded; the error says which half landed.
+      const saved = await saveActiveGoals(player.id, checkup.id, parsedGoals);
+      // Re-print what was actually stored: the box comes back renumbered and
+      // tidied, which is also the proof that the parse read it the way it looks.
+      setGoalText(formatGoalsText(saved));
       setSavedMsg(true);
     } catch (e) {
       setErrorMsg(e.message ?? 'Could not save feedback.');
     }
     setSaving(false);
+  }
+
+  // The milestones on their own, with no reply attached — the player has never
+  // submitted, so there is no check-up to hang feedback on (source_checkup_id
+  // stays null; the goals belong to the player either way).
+  async function handleSaveGoalsOnly() {
+    setErrorMsg(''); setSavedMsg(false);
+    setSaving(true);
+    try {
+      const saved = await saveActiveGoals(player.id, checkup?.id ?? null, parsedGoals);
+      setGoalText(formatGoalsText(saved));
+      setSavedMsg(true);
+    } catch (e) {
+      setErrorMsg(e.message ?? 'Could not save the goals.');
+    }
+    setSaving(false);
+  }
+
+  // Typing again means the SAVED banner is about something older than what's on
+  // screen — drop it, the same way the feedback fields do.
+  function onGoalTextChange(t) {
+    setSavedMsg(false);
+    setGoalText(t);
   }
 
   async function setDay(day) {
@@ -242,6 +305,9 @@ export default function AdminCheckupScreen({ navigation, route }) {
   }
 
   const hasFeedback = !!checkup?.feedback_at;
+  // Is there anything in the box? Drives the send button's wording — the coach
+  // should be able to read off the button that the goals go out with the reply.
+  const anyGoal = parsedGoals.length > 0;
 
   // Closing also leaves edit mode, so the section always REOPENS on the clean
   // read-only list — the state the coach records in — and never on whatever
@@ -299,12 +365,56 @@ export default function AdminCheckupScreen({ navigation, route }) {
 
           {/* ── Review ── */}
           {!checkup ? (
-            <View style={styles.emptyBox}>
-              <Text style={styles.emptyIcon}>◇</Text>
-              <Text style={styles.emptyText}>This player hasn't submitted a check-up yet.</Text>
-            </View>
+            <>
+              <View style={styles.emptyBox}>
+                <Text style={styles.emptyIcon}>◇</Text>
+                <Text style={styles.emptyText}>This player hasn't submitted a check-up yet.</Text>
+              </View>
+              {/* There's nothing to reply to yet — but the milestones don't wait for
+                  a first submission. Set it here and it's on their check-up screen
+                  from the moment they open it. */}
+              <View style={[styles.feedbackBlock, wide && W.feedbackBlock]}>
+                <SectionTitle wide={wide}>SET THEIR FIRST MILESTONES</SectionTitle>
+                <GoalEditor
+                  text={goalText} goals={parsedGoals} focus={goalFocus} wide={wide}
+                  onChange={onGoalTextChange}
+                  onFocus={() => setGoalFocus(true)} onBlur={() => setGoalFocus(false)}
+                />
+                {!!errorMsg && (
+                  <View style={styles.errorBox}><Text style={styles.errorText}>⚠  {errorMsg}</Text></View>
+                )}
+                {savedMsg && (
+                  <View style={styles.savedBox}><Text style={styles.savedText}>✓  GOALS SAVED</Text></View>
+                )}
+                <PillButton
+                  label={saving ? 'SAVING…' : 'SAVE MILESTONES'}
+                  onPress={handleSaveGoalsOnly}
+                  loading={saving}
+                  disabled={!anyGoal}
+                  variant="solid"
+                  tone="green"
+                  size="lg"
+                  style={[{ marginTop: 22 }, wide && W.sendBtn]}
+                />
+              </View>
+            </>
           ) : (
             <>
+              {/* How the milestones you set last time actually went — first thing on
+                  the review, because it is the question the rest of the check-up
+                  is evidence for. Same card the player ticks, ticks and all. */}
+              {scored.length > 0 && (
+                <>
+                  <SectionTitle wide={wide}>THEIR WEEK</SectionTitle>
+                  <GoalsCard
+                    goals={scored}
+                    readOnly
+                    title="THE MILESTONES YOU SET"
+                    style={{ marginTop: 4 }}
+                  />
+                </>
+              )}
+
               {answers.length > 0 && (
                 <>
                   <SectionTitle wide={wide}>THEIR ANSWERS</SectionTitle>
@@ -436,16 +546,33 @@ export default function AdminCheckupScreen({ navigation, route }) {
                   textAlignVertical="top"
                 />
 
+                {/* ── NEXT WEEK'S MILESTONES ──
+                    Written here, with the reply, and sent by the same button.
+                    These land as the FACE of the player's check-up screen: the
+                    first thing they see all week, ticked off one by one, and
+                    scored back to you on their next submission. Keep them few
+                    and concrete — this is a week, not a plan. */}
+                <GoalEditor
+                  text={goalText} goals={parsedGoals} focus={goalFocus} wide={wide}
+                  onChange={onGoalTextChange}
+                  onFocus={() => setGoalFocus(true)} onBlur={() => setGoalFocus(false)}
+                />
+
                 {!!errorMsg && (
                   <View style={styles.errorBox}><Text style={styles.errorText}>⚠  {errorMsg}</Text></View>
                 )}
                 {savedMsg && (
-                  <View style={styles.savedBox}><Text style={styles.savedText}>✓  FEEDBACK SAVED</Text></View>
+                  <View style={styles.savedBox}>
+                    <Text style={styles.savedText}>
+                      {anyGoal ? '✓  FEEDBACK + MILESTONES SAVED' : '✓  FEEDBACK SAVED'}
+                    </Text>
+                  </View>
                 )}
 
                 <PillButton
                   label={saving ? 'SAVING…'
-                    : hasFeedback ? 'UPDATE FEEDBACK'
+                    : hasFeedback ? (anyGoal ? 'UPDATE FEEDBACK + MILESTONES' : 'UPDATE FEEDBACK')
+                    : anyGoal ? 'SEND FEEDBACK + MILESTONES'
                     : fbMode === 'note' ? 'SEND NOTE' : 'SEND FEEDBACK'}
                   onPress={handleSave}
                   loading={saving}
@@ -560,6 +687,74 @@ export default function AdminCheckupScreen({ navigation, route }) {
 // monitor was actually made of. `VideoPlayer.onRatio` reports the real aspect as
 // soon as the metadata lands, and until then the neutral box below holds the
 // layout so nothing jumps.
+// ─── The milestones editor ─────────────────────────────────────────────────────────
+// The coach's half of the week's goals: a short numbered list, one line each. It
+// appears in TWO places on this screen — inside the reply (the normal case: you
+// answer the check-up and set the week in the same breath) and inside the empty
+// state (a player who has never submitted still needs a first set). Same
+// rows, same limits; only the button that saves them differs.
+function GoalEditor({ text, goals, focus, wide, onChange, onFocus, onBlur }) {
+  const over = goals.length >= MAX_GOALS;
+  return (
+    <View style={styles.goalBlock}>
+      <View style={styles.labelRow}>
+        <Text style={[styles.fieldLabel, wide && W.fieldLabel]}>THEIR MILESTONES FOR THE WEEK</Text>
+        <Text style={[styles.counter, wide && W.counter, over && styles.counterFull]}>
+          {goals.length}/{MAX_GOALS}
+        </Text>
+      </View>
+      <Text style={styles.goalHint}>
+        The face of their check-up screen — they tick these off as the week goes.
+      </Text>
+
+      {/* THE LANGUAGE, stated where it is typed. One line, because the whole
+          point of this format is that it needs no explaining. */}
+      <View style={styles.langBar}>
+        <Text style={styles.langCode}>1.</Text>
+        <Text style={styles.langText}>
+          number, dot, space, then the goal — one per line
+        </Text>
+      </View>
+
+      <TextInput
+        style={[
+          styles.input, styles.goalBox, wide && W.input, wide && W.goalBox,
+          focus && styles.inputFocus,
+        ]}
+        onFocus={onFocus}
+        onBlur={onBlur}
+        placeholder={'1. Hold a 30s freestanding handstand\n2. Three L-sit sessions\n3. Sleep 7h+ every night'}
+        placeholderTextColor={C.textMuted}
+        value={text}
+        onChangeText={onChange}
+        multiline
+        textAlignVertical="top"
+      />
+
+      {/* What the player will actually see. The parse is forgiving, so the only
+          honest way to show what was understood is to render it — the same card
+          their screen uses, with the same numbering. */}
+      {goals.length > 0 && (
+        <>
+          <Text style={[styles.fieldLabel, wide && W.fieldLabel, { marginTop: 18 }]}>
+            WHAT THEY'LL SEE
+          </Text>
+          <GoalsCard
+            goals={goals.map((t, i) => ({ id: `preview-${i}`, text: t, done: false }))}
+            readOnly
+            style={{ marginBottom: 0 }}
+          />
+        </>
+      )}
+      {over && (
+        <Text style={styles.goalOver}>
+          A week holds {MAX_GOALS} goals — anything past that is dropped.
+        </Text>
+      )}
+    </View>
+  );
+}
+
 function ReviewClip({ url, wide }) {
   const [ratio, setRatio] = useState(null);
   const [boxW,  setBoxW]  = useState(0);
@@ -709,6 +904,31 @@ const styles = StyleSheet.create({
   inputFocus: { borderColor: C.iceGlow },
   multiline: { minHeight: 110, paddingTop: 14, lineHeight: 24 },
 
+  // Next week's milestones — numbered rows, one line each, sitting under the note.
+  goalBlock: {
+    marginTop: 24, paddingTop: 16,
+    borderTopWidth: 1, borderTopColor: C.cardBorder,
+  },
+  goalHint: {
+    fontFamily: F.bodyMed, fontSize: 13, color: C.textMuted,
+    letterSpacing: 0.4, marginBottom: 12, marginTop: -4,
+  },
+  // The one-line statement of the goals language, sat above the box it describes.
+  langBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    borderLeftWidth: 3, borderLeftColor: 'rgba(74,158,191,0.45)',
+    backgroundColor: 'rgba(74,158,191,0.07)',
+    borderRadius: 8, paddingVertical: 9, paddingHorizontal: 12, marginBottom: 12,
+  },
+  langCode: { fontFamily: F.heading, fontSize: 15, color: C.iceGlow, letterSpacing: 1 },
+  langText: { flex: 1, fontFamily: F.bodyMed, fontSize: 13, color: C.text, opacity: 0.75, letterSpacing: 0.3 },
+  goalBox: { minHeight: 132, paddingTop: 14, lineHeight: 26 },
+  counterFull: { color: C.iceGlow },
+  goalOver: {
+    fontFamily: F.bodyMed, fontSize: 13, color: C.iceGlow, opacity: 0.8,
+    marginTop: 10, letterSpacing: 0.3,
+  },
+
   errorBox: {
     marginTop: 18, backgroundColor: 'rgba(255,60,60,0.12)',
     borderWidth: 1.5, borderColor: '#FF4444', borderRadius: 10, padding: 14,
@@ -797,6 +1017,7 @@ const W = StyleSheet.create({
   counter: { fontSize: 16, marginBottom: 12 },
   input: { fontSize: 20, paddingHorizontal: 22, paddingVertical: 20, borderRadius: 14 },
   multiline: { minHeight: 190, lineHeight: 30, paddingTop: 18 },
+  goalBox: { minHeight: 200, lineHeight: 34, paddingTop: 18 },
   // A full-bleed SEND across the whole card would be a 2000px button; it stays
   // the size of its job and sits where the eye already is.
   sendBtn: { alignSelf: 'flex-start', minWidth: 380, marginTop: 30 },

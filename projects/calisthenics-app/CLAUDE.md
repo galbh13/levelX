@@ -345,6 +345,36 @@ only the coach may check it. Rule: [lib/coachQuests.js](lib/coachQuests.js).
   be run on the live Supabase**; it also adds the column.
 
 ## Checkups — admin-authored template + player submission + coach feedback
+
+### The week's MISSION — the face of the check-up (2026-09-18)
+The CHECK-UP tab opens on the player's **goals for the week**, above the form:
+`components/GoalsCard.js`, backed by `checkup_goals`
+(`migrations/20260918_checkup_goals.sql` — **run it on the live Supabase**) and
+[lib/checkupGoals.js](lib/checkupGoals.js).
+- The **coach authors** them on `AdminCheckupScreen`, in the same save as the
+  feedback (button reads SEND FEEDBACK + GOALS). A player with no submission yet
+  gets a SET THEIR FIRST MISSION block instead.
+- **THE GOALS LANGUAGE** (`parseGoalsText` / `formatGoalsText` in
+  [lib/checkupGoals.js](lib/checkupGoals.js)). The mission is typed as TEXT in one
+  box — `1. ` then the goal, one per line — not as a rack of input rows. Sibling
+  of the `goal -` / `note -` markup in `components/CoachText.js`, deliberately
+  smaller because this gets typed every week. Forgiving by design: the separator
+  may be `.` `)` `-` `:` or nothing; `-`/`•` bullets count; the numbers needn't be
+  right or in order (position decides, and the box is re-printed renumbered on
+  save); an unmarked line CONTINUES the goal above it (so a wrapped long goal stays
+  one goal); blank lines are spacing. Capped at `MAX_GOALS` 6 / `GOAL_MAX` 140
+  chars. The editor renders a live `GoalsCard` preview — WHAT THEY'LL SEE — because
+  a forgiving parser has to show what it understood.
+- The **player ticks** them off through the week (optimistic; `setGoalDone`).
+- **SUBMIT CHECK-UP is unchanged** — it just also calls `closeActiveGoals`, which
+  stamps every open goal with that submission. That ends the week and files the
+  score, so the coach's next review opens on "3 / 4 achieved" and which one
+  slipped. Editing/re-saving an already-sent check-up closes nothing.
+- Goals **outlive** the check-up they were written on (both FKs are ON DELETE SET
+  NULL) — the purge must never take the week's mission off the player's screen.
+- Between submitting and the coach's reply there are no open goals, so the card
+  shows the week just closed, read-only, as LAST WEEK'S MISSION.
+
 A **check-up** is now an **admin-authored structured form** the player fills in
 (was a free-form clips+reflection submission until 2026-07-22). It has **two parts**:
 - **Part 1 — QUESTIONS** (`part='question'`): plain text questions the admin writes
@@ -681,53 +711,147 @@ the same time and for the same reason. Removed then:
 (they lived in the now-deleted `lib/community.js`) and the chat half of
 [lib/adminInbox.js](lib/adminInbox.js).
 
-## The PROFILE tab (2026-09-04)
+## The PROFILE tab (2026-09-04 · restructured 2026-09-18)
 The 4th player tab reads **PROFILE** (was COMMUNITY → PERSONAL → THE SYSTEM). The
 route is still `Personal` internally — the tab bar, `TAB_LABEL` in App.js, the
 guided tour and every `navigate('Personal')` key off that name, so only the label
 changed. Screen: `screens/PersonalScreen.js`, house accent (`C.deepBlue`), shared
-`ScreenFrame fill` + `ScreenHeader title="PROFILE"`.
+`ScreenFrame fill` + `ScreenHeader`.
 
 **This tab is not about the training — it is the gaming layer around it.** The
-coach has nothing to teach here yet; what it gives a player is an identity page.
-Three things, top to bottom:
-- **The portrait.** Tap to upload / change (`expo-image-picker` → `uploadAvatar`).
-  It is the **SAME `profiles.avatar_url`** the Player Card portrait uses — one
-  picture per player, editable from either place. Initials fallback, same rule as
-  `HunterStatusScreen`. The name under it is `full_name` and stays un-editable
-  everywhere (see Player Profiles).
-- **NODE 1 — PLAYER & GOALS.** Two free-text fields the player writes and
-  rewrites: **PLAYER PROFILE** (who they are) and **END GOAL** (what they're
-  chasing). Reads as plain text with a muted prompt where it's empty; the EDIT
-  pill swaps both into inputs with SAVE / CANCEL. Stored on `profiles.bio` /
-  `profiles.end_goal` (600-char client cap), read/written by `fetchPlayerNotes` /
-  `savePlayerNotes` in [lib/profile.js](lib/profile.js) — migration
-  `20260904_profile_bio_goal.sql`, **must be run on the live Supabase**.
-  · The notes are fetched **separately from `fetchHunterProfile`** on purpose: a
-    missing column fails the WHOLE PostgREST select, so folding them into the
-    Player Card's query would take that screen down with them on a drifted live
-    DB. Here it degrades to "no notes yet"; the SAVE path reports the real error.
-  · The tab reloads on every focus, so the load **never overwrites a draft** the
-    player is mid-way through typing (`editing` guard).
-- **NODE 2 — PLAYER CARD.** Opens `HunterStatusScreen` (route `HunterStatus`,
-  registered in `PersonalStack`) with the signed-in player's own id. **This is
-  the Player Card's only entry point** — see "Player Profiles" below.
-- **NODE 3 — THE SYSTEM [coming soon...].** The locked node, dimmed and not
-  pressable. Behind it goes the coach's online course — nutrition, sleep,
-  recovery — once it is recorded. It reads as a node that EXISTS and isn't open
-  yet, which is the point: the previous screen was a bare COMING SOON and said
-  nothing about what the tab is for. (The old placeholder `SystemScreen.js` and
-  its `System` route were deleted 2026-09-04; this panel replaced them.)
+portrait and the name sit at the top; under them is a LIST OF NODES.
 
-All three are the app's standard **ice panel** — the same shape as HomeScreen's
+### Two lists, one screen (2026-09-18)
+The nodes used to be one flat stack of four, three of which read
+`[coming soon...]`. They are now split in two behind a single `section` state
+(`'root'` | `'system'`) — **a state swap, NOT a route.** The portrait and name
+belong to both lists, and pushing a second screen would rebuild them (and reload
+the profile) for a list of two panels. When `section === 'system'` the
+`ScreenHeader` retitles to **THE SYSTEM** and its BACK pill walks out to the root
+list first; only from the root list does BACK leave the screen at all (the admin
+copy). `useFocusEffect` resets to `'root'` on blur, so re-entering the tab never
+drops the player into the inner list with no memory of how they got there.
+
+**ROOT list**
+- **PLAYER CARD (ice).** Opens `HunterStatusScreen` (route `HunterStatus`,
+  registered in `PersonalStack`) with the viewed player's id. **This is the
+  Player Card's only entry point** — see "Player Profiles" below. PLAYER & GOALS
+  (`profiles.bio` / `profiles.end_goal`) used to be its own node HERE; on
+  2026-09-06 it moved ONTO the card, above the signature move.
+- **4-WEEK PLAN (ember) — the SPECIAL node (2026-09-18).** See below.
+- **THE SYSTEM (purple).** No longer a locked node — it is the DOOR to the second
+  list. Everything not ready yet lives behind it.
+
+**THE SYSTEM list** — still all `[coming soon...]`:
+- **TUTORIAL (gold).** Replays the guided walkthrough (`components/GuidedTour`),
+  the same thing HomeScreen's TUTORIAL pill starts. Gated by `TUTORIAL_ENABLED`
+  (`constants/flags`) — while the tour is off it still SHOWS, locked, so the
+  player knows it exists.
+- **COMMON LANGUAGE (jade).** The app's vocabulary (LVL, class, prestige, quest,
+  combo, the shapes) in one place. Last, because it is the thing you go LOOK
+  something up in.
+- The coach's online course (nutrition, sleep, recovery) lands in this list too
+  once it is recorded.
+
+### THE 4-WEEK PLAN — the onboarding runway (2026-09-18)
+A new disciple lands in a system with a quest tree, a class ladder, daily quests,
+workouts and a weekly check-up all switched on at once, and the `checkup_goals`
+cycle only starts producing direction AFTER their first submission — which leaves
+the first month, the month people quit in, with no map. The 4-WEEK PLAN is that
+map: **four weeks, written by the coach once, read by the player.**
+**Who it is for:** a player who is brand new, or one who got stuck. Not everyone
+and not forever — it is a runway, and after week 4 the check-up cycle carries it.
+- **Screen:** `screens/FourWeekPlanScreen.js`, route `FourWeekPlan`, registered
+  on **both** `PersonalStack` (the player's read) and `AdminStack` (the coach's
+  editor). Data: [lib/fourWeekPlan.js](lib/fourWeekPlan.js). Tables `plan_weeks`
+  (the content) + `plan_runs` (the clock), migrations
+  `20260919_four_week_plan.sql` — **must be
+  run on the live Supabase.**
+- **One screen, two jobs**, the same `studentId`-in-params split PersonalScreen
+  makes: the player's tab passes nothing and the screen resolves the signed-in
+  user; a `studentId` means the coach, and turns the four week cards into forms.
+- **The coach authors it from the PLAYER'S OWN PAGE** — AdminDashboard → player →
+  **PROFILE** → 4-WEEK PLAN — so the plan is written inside the exact layout it
+  will be read in. There is no separate admin builder screen, and no tile for it
+  on the MANAGE PLAYER hub.
+- **Three fields per week** (`WEEK_FIELDS`, one list walked by BOTH the reader
+  and the editor so they can never drift — dropping a field there drops it from
+  the form AND the read-out): `goal` (what the week is FOR — the card's
+  headline), `guidance` (what to actually do), `modules` (which pieces of the
+  course to watch). A fourth, `focus`, was cut on 2026-09-19 as a restatement of
+  the first two; its column went with it.
+- **Per-week SAVE**, not one SAVE under four forms: a coach writes a plan a week
+  at a time, and a form that can only be committed whole turns a half-finished
+  thought into something you must either finish now or throw away. Each card
+  holds its own draft and is dirty-gated.
+- **Four weeks always render, written or not.** A plan that showed only the
+  filled-in weeks would leave the player unable to tell "week 3 is a rest week"
+  from "week 3 isn't written yet" — an unwritten week dims to 55% and says so. A
+  player with NO plan gets one grey card carrying one sentence that names who
+  owes them it; the heading that used to sit over that sentence only read it out
+  loud.
+- **Ember (`#FF8A3D`), the one warm thing on the tab** — because it is the only
+  node whose content was written for this player by name. The colour alone
+  carries that: a `SPECIAL MISSION` tag over the node's title was tried on
+  2026-09-18 and cut the same day as noise — the row already reads as the odd one
+  out. The plan screen's header wears the same ember instead of the house ice.
+
+#### The clock (2026-09-19)
+Four weeks written down is a document; a player still has to GUESS which week
+they are in, and a player who is three days behind cannot know it — so they never
+make up the ground. **The coach starts the plan and the screen counts the days.**
+- **One date does all of it.** `plan_runs.started_on` (table `plan_runs`,
+  same migration). Which week, which day of it, how many
+  days are left, the calendar range on each card — all derived, so there is no
+  per-week state to keep in sync.
+- **The coach's control — `StartBlock`.** `START TODAY` / `START TOMORROW`, which
+  is the whole decision: they are either handing the plan over in front of the
+  player or setting them up for the morning. Plus `CLEAR`. A started plan keeps
+  both buttons live as `RE-START …` — **re-starting is the point** for the stuck
+  player, who gets the same four weeks pointed at them again from today (upsert
+  on the PK; the weeks are untouched). The block also prints what the clock
+  currently reads, so the coach knows where the player is before re-starting.
+- **The player's read — `ProgressStrip`.** "YOU ARE IN WEEK 2 · DAY 3 OF 7 ·
+  5 DAYS LEFT · DAY 10 OF 28", over a four-segment bar that fills across the week
+  they're in. `daysLeftInWeek` is **inclusive of today** — that is how a person
+  counts a deadline, and "3 DAYS LEFT" under an unmet week is the whole nudge.
+- **Week cards get dated.** `weekState()` gives each card `past` / `current` /
+  `upcoming` / `none`; the current one is the only lit card (full ember border,
+  stronger glow, `NOW` badge), past ones recede to 62% with a `DONE` badge but
+  stay readable — a player who is behind needs to go back and read week 2.
+- **The clock is OPTIONAL.** With no start date `weekState()` returns `'none'`
+  and the screen renders exactly as it did before there was a clock. A plan
+  handed to a player who isn't starting it yet is still a plan.
+- **Date rules — do not break these.** All maths is YYYY-MM-DD string arithmetic
+  against `israelToday()`, in pure functions in `lib/fourWeekPlan.js`
+  (`planProgress` / `weekState` / `weekDates`), shared so the player's card and
+  the coach's editor can never disagree about what day it is. Every parse is
+  pinned to **UTC midnight** — a local-midnight parse shifts the whole plan by a
+  day east of Greenwich. `formatDay()` spells the month from a fixed table
+  because `toLocaleDateString`'s short month differs between Node ("Sept") and
+  Hermes. `today` is read ONCE per mount (a state initializer), so a screen left
+  open across midnight doesn't change week under a player mid-scroll.
+
+### The panel language
+Every node is the app's standard **ice panel** — the same shape as HomeScreen's
 TODAY'S MISSIONS / DAILY QUESTS: dark `#070d1a` ground, `#1a3a5c` edge, a 4px
-accent bar beside a glow title, then a hairline divider. The locked one is that
-panel one step down in every dimension (dim border, no glow, muted ink), and
-PLAYER CARD wears a chevron instead of a chip because it is the one that opens a
-screen. The first cut hung them off a quest-tree spine with diamond gems and was
-rejected — this screen is chrome, not a tree, and a second visual system for
-three items is not worth inventing. A future node joins the list; it does not get
-a new screen. (Was the COMMUNITY tab — see "Community — DELETED".)
+accent bar beside a glow title. Each node carries its OWN colour so they read as
+different things rather than one repeated box: **ice** PLAYER CARD · **ember**
+4-WEEK PLAN · **purple** THE SYSTEM · **gold** TUTORIAL · **jade** COMMON
+LANGUAGE. A node that OPENS wears a chevron; a locked one wears a muted
+`[coming soon...]` chip in its own tone. The first cut hung them off a quest-tree
+spine with diamond gems and was rejected — this screen is chrome, not a tree.
+
+**Style trap, still live:** `panelHeaderText` carries typography ONLY, and each
+panel opts INTO `panelHeaderFill` (`flex: 1`). A `flex: 1` base that a variant
+undoes with `flexGrow`/`flexBasis` is a shorthand-vs-longhand fight whose winner
+is platform-dependent — on web the shorthand won and the locked title laid out at
+zero width, so THE SYSTEM vanished and left a header reading only
+`[coming soon...]`. Likewise never `flex: 0` on one of these titles: in RN that
+is grow 0 / shrink 0 / **basis 0**.
+
+(Was the COMMUNITY tab — see "Community — DELETED". The old placeholder
+`SystemScreen.js` and its `System` route were deleted 2026-09-04.)
 
 ## Admin inbox — CHECK-UP INBOX (2026-08-25)
 The "someone is waiting on you" queue on the AdminDashboard top bar: a pill that

@@ -50,6 +50,7 @@ import DailyQuestScreen        from './screens/CoachDailyQuestScreen';
 import QuestTreeScreen         from './screens/QuestTreeScreen';
 import PersonalScreen          from './screens/PersonalScreen';
 import HunterStatusScreen      from './screens/HunterStatusScreen';
+import FourWeekPlanScreen      from './screens/FourWeekPlanScreen';
 import AdminCheckupInboxScreen from './screens/AdminCheckupInboxScreen';
 import AdminBusinessScreen     from './screens/AdminBusinessScreen';
 import AdminPlansScreen        from './screens/AdminPlansScreen';
@@ -443,6 +444,9 @@ function PersonalNavigator() {
     <PersonalStack.Navigator screenOptions={{ headerShown: false }}>
       <PersonalStack.Screen name="PersonalList" component={PersonalScreen} />
       <PersonalStack.Screen name="HunterStatus" component={HunterStatusScreen} />
+      {/* The coach's 4-week runway, read-only here. The SAME screen is registered
+          on the admin stack below, where it becomes the editor. */}
+      <PersonalStack.Screen name="FourWeekPlan" component={FourWeekPlanScreen} />
     </PersonalStack.Navigator>
   );
 }
@@ -466,6 +470,9 @@ function AdminNavigator() {
             pushes it — without it the panel would dead-end inside the admin stack. */}
         <AdminStack.Screen name="PlayerProfile"     component={PersonalScreen} />
         <AdminStack.Screen name="HunterStatus"      component={HunterStatusScreen} />
+        {/* Same screen as the player's, but entered with a studentId — which is
+            what turns the four week cards into the coach's editor. */}
+        <AdminStack.Screen name="FourWeekPlan"      component={FourWeekPlanScreen} />
         <AdminStack.Screen name="PlayerCheckup"     component={AdminCheckupScreen} />
         <AdminStack.Screen name="CheckupTemplates"  component={AdminCheckupTemplateScreen} />
         <AdminStack.Screen name="WorkoutsList"      component={WorkoutsScreen} />

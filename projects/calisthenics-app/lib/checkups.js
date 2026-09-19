@@ -43,6 +43,27 @@ export function checkupCycleStart(checkupDay, now = new Date()) {
   return new Date(now.getFullYear(), now.getMonth(), now.getDate() - back);
 }
 
+// THE MILESTONE WINDOW — the actual days a player has to reach this week's
+// milestones, which is NOT the same span as the check-up cycle above.
+//
+// The check-up day is a TRAINING day: the player still trains on it and submits
+// at the end of it. So the week of work RUNS UP TO the check-up day and includes
+// it, and the next week starts the morning after. With check-ups on Saturday the
+// window is Sunday → the following Saturday.
+//
+//   end   = the next check-up day ON OR AFTER today (today itself when today IS
+//           the check-up day — that day still belongs to the week finishing)
+//   start = six days before that, i.e. the day after the previous check-up day
+//
+// Returns { start, end } as local dates, or null when no day is pinned.
+export function milestoneWindow(checkupDay, now = new Date()) {
+  if (checkupDay == null) return null;
+  const ahead = ((checkupDay - now.getDay()) % 7 + 7) % 7;   // 0 = today is the day
+  const end   = new Date(now.getFullYear(), now.getMonth(), now.getDate() + ahead);
+  const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 6);
+  return { start, end };
+}
+
 // Is this week's check-up STILL OWED right now, and how badly? Drives the CHECKUP
 // tab dot (and the screen's status row) — it flips off the moment the player
 // submits for the current cycle.

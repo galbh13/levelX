@@ -159,6 +159,12 @@ const STEPS = [
   { phase: 'CHECK-UP', tone: 'green', tab: 'Checkup', caption: 'center', scrollTop: 'checkup',
     title: 'This is Check-Up',
     line: 'Once a week your coach checks how you are doing.' },
+  // The mission is the FACE of the screen — the first thing a player sees when
+  // they swipe here — so it gets the first target of the phase, before the form.
+  { phase: 'CHECK-UP', tone: 'green', tab: 'Checkup', scrollTop: 'checkup',
+    targetName: 'checkup.goals',
+    title: 'Your Milestones',
+    line: 'At the top are your milestones for this week — set by your coach when they replied last time. Tap one to tick it off as you reach it. Where you got to goes in with your check-up.' },
   // A player who has ALREADY submitted sees the read-only view — no form, no SUBMIT
   // button. So these two name alternatives / carry no fraction fallback: they point
   // at the submitted answers instead, and the SEND IT step simply shows no mark

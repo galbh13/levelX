@@ -39,6 +39,13 @@ removed from the app — see `migrations/20260605_drop_total_exp.sql`.)
 > `migrations/20260722_checkup_templates.sql`. `checkups.note` is now legacy
 > (unwritten). See `checkup_template_items` / `checkup_answers` below.
 
+> **Weekly goals — the face of the check-up (2026-09-18):** the check-up screen
+> now opens on the player's MISSION for the week instead of on the form — new
+> table `checkup_goals` (`migrations/20260918_checkup_goals.sql`). The coach
+> writes the goals when they reply to a check-up; the player ticks them off all
+> week and SUBMIT CHECK-UP files them under that submission, which is where the
+> coach reads the score back. See `checkup_goals` below.
+
 > **Self-coach refactor (2026-05-22):** the `coach` and `student` roles were
 > collapsed into a single `player` role, and the entire Checkup system
 > (`checkups`, `checkup_questions`, `checkup_answers`, `checkup_exercises`,
@@ -734,6 +741,133 @@ rows OR their own `player_id` rows — read-only; only the admin modifies).
 **Used by:** `AdminCheckupTemplateScreen` (class-standard authoring, from the ADMIN
 dashboard), `AdminCheckupScreen` (per-player customize), `CheckupScreen` (player
 renders the resolved template).
+
+### `plan_runs`
+**The 4-WEEK PLAN's clock** (2026-09-19). One row per player: the day their plan
+starts. `plan_weeks` says WHAT each week is; this says WHEN, and every number the
+screen shows — which week, which day of it, how many days are left, the calendar
+range on each card — is derived from this single date. Added in
+`migrations/20260919_four_week_plan.sql`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `student_id` | uuid **PK** | FK → `profiles(id)` ON DELETE CASCADE. The player IS the key — one live run each; re-starting OVERWRITES rather than accumulating |
+| `started_on` | date | Day 1 of week 1, in the coach's calendar. **A date, not a timestamp** — the plan is counted in whole days against `israelToday()` (Asia/Jerusalem), so a player opening the app at 23:00 and again at 01:00 never skips a day |
+| `created_at` / `updated_at` | timestamptz | `updated_at` written by the client on every start |
+
+**RLS:** `admin all plan runs` (`public.is_admin()`, full CRUD — the coach starts,
+re-starts and clears it) + `owner read plan runs` (SELECT only). **No owner UPDATE
+policy, deliberately:** a player who could move their own start date could delete
+the fact that they are behind, which is the one number this table exists to show
+them.
+
+> **Why its own table and not a column on `profiles`.** A missing column fails the
+> WHOLE PostgREST select (the lesson of `20260904_profile_bio_goal.sql`), and
+> `profiles` is read by nearly every screen — an unmigrated live DB would take the
+> Player Card down with it. A missing TABLE here degrades to "your coach hasn't
+> started your plan yet", which is a real state anyway. `fetchPlanStart()`
+> swallows its error to `null` for the same reason.
+
+> **Re-startable on purpose.** The player this feature is for is either brand new
+> OR stuck; the stuck one gets the same four weeks pointed at them again from
+> today. The coach presses START again, the row is upserted, the clock resets and
+> the weeks themselves are untouched.
+
+**The maths lives in [lib/fourWeekPlan.js](lib/fourWeekPlan.js)** and is PURE —
+`planProgress(startedOn, today)` returns `state` (`unset`/`pending`/`active`/
+`done`), `currentWeek`, `dayInWeek`, `daysLeftInWeek` (inclusive of today) and
+`day` of 28; `weekState()` and `weekDates()` derive each card's badge and range.
+Every parse is pinned to **UTC midnight** (`T00:00:00Z`) — a local-midnight parse
+shifts the whole plan by a day east of Greenwich — and `formatDay()` spells the
+month from a fixed table rather than `toLocaleDateString`, whose short month
+differs between Node ("Sept") and Hermes.
+
+**Used by:** `FourWeekPlanScreen` — `StartBlock` (the coach's TODAY / TOMORROW /
+CLEAR control) and `ProgressStrip` (the player's "YOU ARE IN WEEK 2 · DAY 3 OF 7
+· 5 DAYS LEFT" + the four-segment runway bar).
+
+### `plan_weeks`
+**THE 4-WEEK PLAN** — the coach's onboarding runway (2026-09-18). Four rows per
+player, read from the **4-WEEK PLAN** node on the PROFILE tab and written by the
+coach from the ADMIN COPY of that same screen. Added in
+`migrations/20260919_four_week_plan.sql`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `student_id` | uuid | FK → `profiles(id)` ON DELETE CASCADE (owner; RLS) |
+| `week_index` | smallint | **1–4, CHECK-constrained.** The plan is a runway, not an open-ended programme — the constraint is what keeps it four weeks |
+| `goal` | text | What this week is FOR, one line (≤ 120, `WEEK_FIELDS`). The card's headline |
+| `guidance` | text | What to actually do this week (≤ 900) |
+| `modules` | text | Which pieces of the course land this week (≤ 500) |
+| `created_at` / `updated_at` | timestamptz | `updated_at` is written by the client on every save (no trigger) |
+
+**Unique:** `(student_id, week_index)` — and it is load-bearing: `saveWeek()`
+UPSERTs on it, so the editor never has to know whether a week already has a row.
+That index is also the only read path, so no second index is defined.
+**RLS:** `admin all plan weeks` (`public.is_admin()`, full CRUD) +
+`owner read plan weeks` (SELECT only). **There is deliberately no owner UPDATE
+policy** — unlike `checkup_goals` there is no tick here: the plan is something
+the player follows, not something they fill in. Adding a per-week "done" tick
+later needs BOTH an update policy AND a column-guard trigger (copy
+`checkup_goal_guard`), or the player could rewrite the coach's words.
+
+> **No parent row, no publish flag.** An unwritten week is a MISSING ROW, and a
+> player with no plan is a player with no rows; `fetchPlan()` pads whatever comes
+> back out to four week objects so neither screen reasons about gaps. A
+> draft/published state would buy nothing for a four-row document that exactly
+> one person ever edits.
+
+**Used by:** [lib/fourWeekPlan.js](lib/fourWeekPlan.js) (all reads/writes),
+`FourWeekPlanScreen` (reader for the player, per-week editor for the coach),
+`PersonalScreen` (the node that opens it).
+
+### `checkup_goals`
+The **week's mission** — the short list of goals the coach sets for a player, and
+the FACE of their check-up screen (2026-09-18). Added in
+`migrations/20260918_checkup_goals.sql`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | uuid PK | `gen_random_uuid()` |
+| `student_id` | uuid | FK → `profiles(id)` ON DELETE CASCADE (owner; RLS) |
+| `source_checkup_id` | uuid | FK → `checkups(id)` ON DELETE **SET NULL** — the reply this goal was written on. NULL once that check-up is purged, or when set with no submission to reply to |
+| `result_checkup_id` | uuid | FK → `checkups(id)` ON DELETE **SET NULL** — the submission that CLOSED this goal. **NULL = still this week's mission** |
+| `text` | text | The goal, one line (≤ 140 chars, `GOAL_MAX`) |
+| `order_index` | int | Position in the list (≤ 6 goals, `MAX_GOALS`) |
+| `done` | boolean | The player's tick |
+| `done_at` | timestamptz | When they ticked it. NULL when not done |
+| `created_at` | timestamptz | Auto |
+
+**Index:** `(student_id)`, partial `(student_id, order_index) WHERE result_checkup_id IS NULL`
+(the player-screen read), `(result_checkup_id)` (the coach's review).
+**RLS:** `admin all checkup goals` (`public.is_admin()`, full CRUD — the coach
+authors everything) + `owner read checkup goals` / `owner tick checkup goals`
+(SELECT + UPDATE on their own rows).
+**Trigger `checkup_goal_guard`:** on a NON-admin UPDATE, `student_id`,
+`source_checkup_id`, `text`, `order_index` and `created_at` are pinned back to
+their old values — a player may tick a goal and file it under their submission,
+never rewrite the mission. (A column-level GRANT can't express this: the coach
+authenticates as the same `authenticated` role.)
+
+> **The cycle** (see [lib/checkupGoals.js](lib/checkupGoals.js)):
+> 1. The coach replies to a check-up on `AdminCheckupScreen` and writes the next
+>    week's goals in the same save (`saveActiveGoals` — a rewrite that KEEPS rows
+>    whose text is unchanged, so mid-week edits don't wipe the player's ticks).
+> 2. They're ACTIVE (`result_checkup_id IS NULL`) and sit at the top of
+>    `CheckupScreen` all week; the player taps to tick (`setGoalDone`).
+> 3. SUBMIT CHECK-UP calls `closeActiveGoals`, stamping every open goal with that
+>    submission — it ends the week AND files the score under the check-up the
+>    coach is about to review. A goal written ON that same check-up is excluded,
+>    and an EDIT re-save closes nothing.
+> 4. The coach's review opens on that scored set, then sets the next week → 1.
+>
+> **Not purged.** Both check-up FKs are ON DELETE SET NULL precisely because
+> check-ups are wiped on submit and on the 14-day TTL — the mission has to outlive
+> the row it was written on.
+
+**Used by:** `CheckupScreen` (the mission card + the ticks), `AdminCheckupScreen`
+(authoring + the scored read-back), `components/GoalsCard.js` (shared card).
 
 ### `checkup_answers`
 The player's **Part-1 text answers** — one row per question (2026-07-22). `prompt`

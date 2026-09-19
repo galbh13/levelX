@@ -21,28 +21,45 @@ import { uploadAvatar } from '../lib/profile';
 // player reads changed.
 //
 // This tab isn't about the training; it's the gaming layer around it. A portrait
-// the player uploads, then four panels in HomeScreen's panel language — each in
-// its own colour so they read as four different things (ice · gold ·
-// purple · jade):
-//   1. PLAYER CARD (ice) — opens HunterStatusScreen (the card itself: portrait,
-//      LVL/class/prestige, PLAYER & GOALS, signature move). That screen used to
-//      hang off the deleted community group roster; the PROFILE tab is where it
-//      belongs. PLAYER & GOALS (`profiles.bio` / `profiles.end_goal`) used to be
-//      its own panel HERE — on 2026-09-06 it moved ONTO the card, above the
-//      signature move, where the player's own words belong.
-//   2. TUTORIAL (gold) — replays the guided walkthrough (components/GuidedTour),
-//      the same thing HomeScreen's TUTORIAL pill starts. It sits BETWEEN the
-//      other two on purpose: the card is who you are, the tutorial is how the
-//      app works, the course is what comes next. Both entry points are gated by
-//      TUTORIAL_ENABLED (constants/flags) — while the tour is switched off for
-//      release this node still SHOWS, locked, so the player knows it exists.
-//   3. THE SYSTEM [coming soon...] (purple) — the locked node. The coach's online
-//      course (nutrition, sleep, recovery) lands behind it once it's recorded;
-//      until then it reads as a node that EXISTS and isn't open yet, rather than
-//      as an empty screen.
-//   4. COMMON LANGUAGE [coming soon...] (jade) — the app's vocabulary in one
-//      place (LVL, class, prestige, quest, combo, the shapes). Last, because it
-//      is the thing you go LOOK something up in, not somewhere you start.
+// the player uploads, then a list of panels in HomeScreen's panel language — each
+// in its own colour so they read as different things, not one repeated box.
+//
+// TWO LISTS, ONE SCREEN. Since 2026-09-18 the four nodes are split in two, and
+// pressing THE SYSTEM swaps the list IN PLACE (the `section` state below) rather
+// than pushing a route — the portrait and the name stay put, only the panels
+// change, and the header's BACK pill walks back out to the root list:
+//
+//   ROOT list
+//     1. PLAYER CARD (ice) — opens HunterStatusScreen (the card itself: portrait,
+//        LVL/class/prestige, PLAYER & GOALS, signature move). That screen used to
+//        hang off the deleted community group roster; the PROFILE tab is where it
+//        belongs. PLAYER & GOALS (`profiles.bio` / `profiles.end_goal`) used to
+//        be its own panel HERE — on 2026-09-06 it moved ONTO the card, above the
+//        signature move, where the player's own words belong.
+//     2. THE 4-WEEK PLAN (ember) — the SPECIAL node, added 2026-09-18. The four
+//        weeks the coach writes to carry a new disciple from their first day to
+//        their first check-up cycle; see screens/FourWeekPlanScreen.js and
+//        supabase/migrations/20260919_four_week_plan.sql. It is the only node on
+//        this tab painted WARM, because it is the only one whose content was
+//        written for this player by name — and the coach AUTHORS it from this
+//        very screen's admin copy (AdminDashboard → player → PROFILE), so the
+//        plan is written inside the page it is read in.
+//     3. THE SYSTEM (purple) — no longer a locked node: it is the DOOR to the
+//        second list. Everything that isn't ready yet lives behind it, so the root
+//        list reads as live nodes instead of one live node with three
+//        [coming soon...] boxes stacked under it.
+//
+//   THE SYSTEM list — what's behind the door, still all coming soon
+//     1. TUTORIAL (gold) — replays the guided walkthrough (components/GuidedTour),
+//        the same thing HomeScreen's TUTORIAL pill starts. Gated by
+//        TUTORIAL_ENABLED (constants/flags) — while the tour is switched off for
+//        release this node still SHOWS, locked, so the player knows it exists.
+//     2. COMMON LANGUAGE (jade) — the app's vocabulary in one place (LVL, class,
+//        prestige, quest, combo, the shapes). Last, because it is the thing you go
+//        LOOK something up in, not somewhere you start.
+//   The coach's online course (nutrition, sleep, recovery) lands in this list too
+//   once it's recorded.
+//
 // None of them carries a blurb: the title says it, and a paragraph under each one
 // turned the page into a wall of explanation.
 //
@@ -64,8 +81,12 @@ const BORDER = '#1a3a5c';           // panel edge
 //   • TUTORIAL    → GOLD. The tour's own 'gold' tone (GuidedTour's TONES.gold):
 //     a guide, warm against the two cold panels around it, and the one thing on
 //     this screen that talks rather than shows.
-//   • THE SYSTEM  → PURPLE. Off the app's whole cold-blue chrome on purpose: the
-//     course is a different layer of the product, and it is still locked.
+//   • 4-WEEK PLAN → EMBER. The ONE warm colour on a screen of cold ones, because
+//     it is the one node addressed to this player personally. The colour alone
+//     carries it — an earlier cut added a SPECIAL MISSION tag over the title and
+//     it was noise: the row already reads as the odd one out.
+//   • THE SYSTEM  → PURPLE. Off the app's whole cold-blue chrome on purpose: it
+//     opens a different LAYER of the product, not another screen of this one.
 //   • COMMON LANGUAGE → JADE. The last colour that isn't already spoken for here,
 //     and far enough from the ice at the top that the four bars never read as one
 //     gradient running down the screen.
@@ -77,6 +98,8 @@ const PURPLE     = '#A970FF';       // THE SYSTEM — bar + title
 const PURPLE_EDGE = '#3d2a66';      // its border
 const JADE      = '#1FD79A';        // COMMON LANGUAGE — bar + title
 const JADE_EDGE = '#1d4a3d';        // its border
+const EMBER        = '#FF8A3D';     // 4-WEEK PLAN — bar, title, chevron
+const EMBER_EDGE   = '#5c3312';     // its border — ember dimmed, not a bright rim
 
 // Initials fallback when a player has no portrait — first letter of up to two
 // name words (e.g. "Gal Ben Hamo" → "GB"). Same rule as the Player Card.
@@ -107,6 +130,12 @@ export default function PersonalScreen({ navigation, route }) {
   const { openTour } = useTour();
   const tutorialLive = TUTORIAL_ENABLED && !adminView;
 
+  // Which list the panels show: 'root' (PLAYER CARD · THE SYSTEM) or 'system'
+  // (what sits behind THE SYSTEM). A plain state swap, NOT a route — the portrait
+  // and the name above the list belong to both lists, and pushing a second screen
+  // would rebuild them (and reload the profile) for a list of two panels.
+  const [section, setSection] = useState('root');
+
   const [me, setMe] = useState(null);            // { id, fullName, avatarUrl }
   const [loading, setLoading] = useState(true);
   const [busyAvatar, setBusyAvatar] = useState(false);
@@ -130,7 +159,10 @@ export default function PersonalScreen({ navigation, route }) {
     setLoading(false);
   }, [viewedId]);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  // Coming back to the tab always lands on the ROOT list. Leaving the tab from
+  // inside THE SYSTEM and returning to it later would otherwise drop the player
+  // straight into the inner list with no memory of how they got there.
+  useFocusEffect(useCallback(() => { load(); return () => setSection('root'); }, [load]));
 
   async function pickAvatar() {
     if (!me?.id) return;
@@ -156,9 +188,20 @@ export default function PersonalScreen({ navigation, route }) {
   return (
     <ScreenFrame fill>
       <View style={styles.card}>
+        {/* Inside THE SYSTEM the header becomes that list's own title and BACK
+            walks out to the root list first — only from there does it leave the
+            screen at all (the admin's copy). */}
         <ScreenHeader
-          title={adminView ? 'PLAYER PROFILE' : 'PROFILE'}
-          onBack={adminView ? () => navigation.goBack() : undefined}
+          title={
+            section === 'system' ? 'THE SYSTEM'
+              : adminView ? 'PLAYER PROFILE'
+                : 'PROFILE'
+          }
+          onBack={
+            section === 'system' ? () => setSection('root')
+              : adminView ? () => navigation.goBack()
+                : undefined
+          }
         />
 
         <ScrollView
@@ -194,81 +237,108 @@ export default function PersonalScreen({ navigation, route }) {
                 {me?.fullName?.toUpperCase() ?? '—'}
               </Text>
 
-              {/* ── The four panels — the app's standard ice-panel language ── */}
+              {/* ── The panels — the app's standard ice-panel language ──
+                  Two lists behind one `section` state; see the note up top. ── */}
               <View style={styles.panels}>
+                {section === 'root' ? (
+                  <>
+                    {/* PLAYER CARD (ice) — the status card + signature move */}
+                    <Pressable
+                      style={({ pressed }) => [styles.panel, styles.panelIce, pressed && styles.panelPressed]}
+                      onPress={() => navigation.navigate('HunterStatus', { userId: me?.id })}
+                    >
+                      <View style={styles.panelHeader}>
+                        <View style={[styles.panelHeaderBar, styles.panelHeaderBarIce]} />
+                        <Text style={[styles.panelHeaderText, styles.panelHeaderTextIce, styles.panelHeaderFill]} numberOfLines={1}>
+                          PLAYER CARD
+                        </Text>
+                        <Text style={[styles.panelArrow, styles.panelArrowIce]}>›</Text>
+                      </View>
+                    </Pressable>
 
-                {/* PANEL 1 — PLAYER CARD (the status card + signature move) */}
-                <Pressable
-                  style={({ pressed }) => [styles.panel, styles.panelIce, pressed && styles.panelPressed]}
-                  onPress={() => navigation.navigate('HunterStatus', { userId: me?.id })}
-                >
-                  <View style={styles.panelHeader}>
-                    <View style={[styles.panelHeaderBar, styles.panelHeaderBarIce]} />
-                    <Text style={[styles.panelHeaderText, styles.panelHeaderTextIce, styles.panelHeaderFill]} numberOfLines={1}>
-                      PLAYER CARD
-                    </Text>
-                    <Text style={[styles.panelArrow, styles.panelArrowIce]}>›</Text>
-                  </View>
-                </Pressable>
+                    {/* 4-WEEK PLAN (ember) — the special node. The coach's
+                        onboarding runway; the admin copy of this screen is also
+                        where the coach WRITES it, which is why the node carries
+                        the viewed player's id straight through. */}
+                    <Pressable
+                      style={({ pressed }) => [styles.panel, styles.panelPlan, pressed && styles.panelPressed]}
+                      onPress={() => navigation.navigate('FourWeekPlan', adminView ? { studentId: me?.id } : undefined)}
+                    >
+                      <View style={styles.panelHeader}>
+                        <View style={[styles.panelHeaderBar, styles.panelHeaderBarPlan]} />
+                        <Text style={[styles.panelHeaderText, styles.panelHeaderTextPlan, styles.panelHeaderFill]} numberOfLines={1}>
+                          4-WEEK PLAN
+                        </Text>
+                        <Text style={[styles.panelArrow, styles.panelArrowPlan]}>›</Text>
+                      </View>
+                    </Pressable>
 
-                {/* PANEL 2 — TUTORIAL (replays the guided walkthrough) ──────────
-                    Live it is a pressable node with a chevron, exactly like the
-                    Player Card; while TUTORIAL_ENABLED is off it wears the same
-                    locked treatment THE SYSTEM does, in its own gold. */}
-                {tutorialLive ? (
-                  <Pressable
-                    style={({ pressed }) => [styles.panel, styles.panelGold, pressed && styles.panelPressed]}
-                    onPress={openTour}
-                  >
-                    <View style={styles.panelHeader}>
-                      <View style={[styles.panelHeaderBar, styles.panelHeaderBarGold]} />
-                      <Text style={[styles.panelHeaderText, styles.panelHeaderTextGold, styles.panelHeaderFill]} numberOfLines={1}>
-                        TUTORIAL
-                      </Text>
-                      <Text style={[styles.panelArrow, styles.panelArrowGold]}>›</Text>
-                    </View>
-                  </Pressable>
+                    {/* THE SYSTEM (purple) — the door to the second list. It used
+                        to be a [coming soon...] node itself; now it OPENS, and the
+                        things that aren't ready live inside it. The tour still
+                        points its arrow here. */}
+                    <Pressable
+                      style={({ pressed }) => [styles.panel, styles.panelSystem, pressed && styles.panelPressed]}
+                      onPress={() => setSection('system')}
+                      ref={adminView ? undefined : tourSystemRef}
+                      collapsable={false}
+                    >
+                      <View style={styles.panelHeader}>
+                        <View style={[styles.panelHeaderBar, styles.panelHeaderBarSystem]} />
+                        <Text style={[styles.panelHeaderText, styles.panelHeaderTextSystem, styles.panelHeaderFill]} numberOfLines={1}>
+                          THE SYSTEM
+                        </Text>
+                        <Text style={[styles.panelArrow, styles.panelArrowSystem]}>›</Text>
+                      </View>
+                    </Pressable>
+                  </>
                 ) : (
-                  <View style={[styles.panel, styles.panelGold, styles.panelGoldLocked]}>
-                    <View style={styles.panelHeader}>
-                      <View style={[styles.panelHeaderBar, styles.panelHeaderBarGold]} />
-                      <Text style={[styles.panelHeaderText, styles.panelHeaderTextGold]} numberOfLines={1}>
-                        TUTORIAL
-                      </Text>
-                      <Text style={[styles.soon, styles.soonGold, styles.panelHeaderFill]} numberOfLines={1}>[coming soon...]</Text>
+                  <>
+                    {/* TUTORIAL (gold) — replays the guided walkthrough. Live it is
+                        a pressable node with a chevron, exactly like the Player
+                        Card; while TUTORIAL_ENABLED is off it wears the locked
+                        treatment in its own gold. */}
+                    {tutorialLive ? (
+                      <Pressable
+                        style={({ pressed }) => [styles.panel, styles.panelGold, pressed && styles.panelPressed]}
+                        onPress={openTour}
+                      >
+                        <View style={styles.panelHeader}>
+                          <View style={[styles.panelHeaderBar, styles.panelHeaderBarGold]} />
+                          <Text style={[styles.panelHeaderText, styles.panelHeaderTextGold, styles.panelHeaderFill]} numberOfLines={1}>
+                            TUTORIAL
+                          </Text>
+                          <Text style={[styles.panelArrow, styles.panelArrowGold]}>›</Text>
+                        </View>
+                      </Pressable>
+                    ) : (
+                      <View style={[styles.panel, styles.panelGold, styles.panelGoldLocked]}>
+                        <View style={styles.panelHeader}>
+                          <View style={[styles.panelHeaderBar, styles.panelHeaderBarGold]} />
+                          <Text style={[styles.panelHeaderText, styles.panelHeaderTextGold]} numberOfLines={1}>
+                            TUTORIAL
+                          </Text>
+                          <Text style={[styles.soon, styles.soonGold, styles.panelHeaderFill]} numberOfLines={1}>[coming soon...]</Text>
+                        </View>
+                      </View>
+                    )}
+
+                    {/* COMMON LANGUAGE (jade) — locked; the app's vocabulary.
+                        The words the System speaks — LVL, class, prestige, quest,
+                        combo, the shapes — in one place, so a player can look one
+                        up instead of guessing. Locked until the entries are
+                        written; same [coming soon...] treatment, its own jade. */}
+                    <View style={[styles.panel, styles.panelJade]}>
+                      <View style={styles.panelHeader}>
+                        <View style={[styles.panelHeaderBar, styles.panelHeaderBarJade]} />
+                        <Text style={[styles.panelHeaderText, styles.panelHeaderTextJade]} numberOfLines={1}>
+                          COMMON LANGUAGE
+                        </Text>
+                        <Text style={[styles.soon, styles.soonJade, styles.panelHeaderFill]} numberOfLines={1}>[coming soon...]</Text>
+                      </View>
                     </View>
-                  </View>
+                  </>
                 )}
-
-                {/* PANEL 3 — THE SYSTEM (locked; the coach's course lands here) */}
-                <View
-                  style={[styles.panel, styles.panelLocked]}
-                  ref={adminView ? undefined : tourSystemRef}
-                  collapsable={false}
-                >
-                  <View style={styles.panelHeader}>
-                    <View style={[styles.panelHeaderBar, styles.panelHeaderBarLocked]} />
-                    <Text style={[styles.panelHeaderText, styles.panelHeaderTextLocked]} numberOfLines={1}>
-                      THE SYSTEM
-                    </Text>
-                    <Text style={[styles.soon, styles.panelHeaderFill]} numberOfLines={1}>[coming soon...]</Text>
-                  </View>
-                </View>
-
-                {/* PANEL 4 — COMMON LANGUAGE (locked; the app's vocabulary) ─────
-                    The words the System speaks — LVL, class, prestige, quest,
-                    combo, the shapes — in one place, so a player can look one up
-                    instead of guessing. Locked until the entries are written;
-                    same [coming soon...] treatment, its own jade. */}
-                <View style={[styles.panel, styles.panelJade]}>
-                  <View style={styles.panelHeader}>
-                    <View style={[styles.panelHeaderBar, styles.panelHeaderBarJade]} />
-                    <Text style={[styles.panelHeaderText, styles.panelHeaderTextJade]} numberOfLines={1}>
-                      COMMON LANGUAGE
-                    </Text>
-                    <Text style={[styles.soon, styles.soonJade, styles.panelHeaderFill]} numberOfLines={1}>[coming soon...]</Text>
-                  </View>
-                </View>
               </View>
 
               {errorMsg ? <Text style={styles.error}>{errorMsg}</Text> : null}
@@ -312,7 +382,7 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(255,255,255,0.5)', textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 16,
   },
 
-  // ── The four panels ──
+  // ── The panels ──
   // Deliberately the SAME ice-panel language as HomeScreen's TODAY'S MISSIONS /
   // DAILY QUESTS: the dark panel over the app's border blue, a 4px accent bar
   // beside a big glow title, then a hairline divider. An earlier cut hung them
@@ -371,7 +441,7 @@ const styles = StyleSheet.create({
   // ── COMMON LANGUAGE — the jade panel ──
   // Green-teal: the only warm-neutral left that isn't already spoken for, and far
   // enough from the ice above it that the four bars never read as a gradient.
-  // Its title is the longest of the four, so unlike the others it is allowed to
+  // Its title is the longest on the screen, so unlike the others it is allowed to
   // SHRINK (and starts a size down) — otherwise it shoves [coming soon...] off
   // the row on a narrow phone.
   panelJade:           { borderColor: JADE_EDGE, shadowColor: JADE, shadowOpacity: 0.16 },
@@ -382,20 +452,36 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
   },
 
-  // ── THE SYSTEM — the locked purple panel ──
-  // Purple instead of the house blue, and still one step down in intensity (soft
-  // glow, muted [coming soon...] chip) so it reads as "this exists and isn't open
-  // yet", not as a dead box and not as a live node either.
-  panelLocked: { borderColor: PURPLE_EDGE, shadowColor: PURPLE, shadowOpacity: 0.16 },
-  panelHeaderBarLocked: { backgroundColor: PURPLE, shadowColor: PURPLE, shadowOpacity: 0.7 },
-  // NOT `flex: 0` — in React Native that is grow 0 / shrink 0 / **basis 0**, so
-  // the title measured zero width and THE SYSTEM disappeared entirely, leaving a
-  // header that read only "[coming soon...]". Size to the text, shrink if needed.
-  panelHeaderTextLocked: {
+  // ── 4-WEEK PLAN — the ember panel ──
+  // The only warm node on the tab. Its glow is the strongest in the root list
+  // on purpose: a new player's eye
+  // should land here first, because this is the node that tells them what to
+  // actually DO next.
+  panelPlan: { borderColor: EMBER_EDGE, shadowColor: EMBER, shadowOpacity: 0.26 },
+  panelHeaderBarPlan: { backgroundColor: EMBER, shadowColor: EMBER },
+  panelHeaderTextPlan: {
+    color: EMBER,
+    textShadowColor: 'rgba(255,138,61,0.35)',
+    textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
+  },
+  panelArrowPlan: { color: EMBER },
+  // ── THE SYSTEM — the purple panel ──
+  // Purple instead of the house blue: it opens a different layer of the product,
+  // not another screen of this one. It was the LOCKED node until 2026-09-18 (soft
+  // glow, muted [coming soon...] chip); now it is a live door, so it carries a
+  // chevron and the same press state the Player Card does — the glow stays a
+  // notch under the ice above it so the two don't compete at the top of the list.
+  panelSystem: { borderColor: PURPLE_EDGE, shadowColor: PURPLE, shadowOpacity: 0.20 },
+  panelHeaderBarSystem: { backgroundColor: PURPLE, shadowColor: PURPLE, shadowOpacity: 0.7 },
+  panelHeaderTextSystem: {
     color: PURPLE,
     textShadowColor: 'rgba(169,112,255,0.30)',
     textShadowOffset: { width: 0, height: 0 }, textShadowRadius: 12,
   },
+  panelArrowSystem: { color: PURPLE },
+  // The [coming soon...] chip. Its base colour is a muted purple left over from
+  // when THE SYSTEM wore it; every node that still shows the chip overrides it
+  // with its own tone below.
   soon: { fontFamily: F.bodyMed, fontSize: 13, color: '#6b52a3', letterSpacing: 1 },
   soonGold: { color: '#8a6f3a' },   // the same muted chip, in the tutorial's gold
   soonJade: { color: '#3f7f68' },   // ditto, in the glossary's jade

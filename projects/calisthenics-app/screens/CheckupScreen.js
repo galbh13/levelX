@@ -18,10 +18,15 @@ import VideoPlayer from '../components/VideoPlayer';
 import {
   CHECKUP_BUCKET, MAX_VIDEO_BYTES, purgeExpiredCheckups,
   purgePreviousCheckups, deleteCheckupVideo,
-  checkupSchedule, checkupCycleStart, resolvePlayerTemplate, splitTemplateParts,
+  checkupSchedule, checkupCycleStart, milestoneWindow, resolvePlayerTemplate, splitTemplateParts,
   discardDraftCheckup, bindVideosToExercises, repairVideoLinks, normalizePrompt,
   EXERCISE_NOTE_BASE, splitCheckupAnswers, buildExerciseCards, fetchLatestFeedback,
 } from '../lib/checkups';
+import {
+  fetchActiveGoals, fetchGoalsForCheckup, setGoalDone, closeActiveGoals,
+  goalProgress,
+} from '../lib/checkupGoals';
+import GoalsCard from '../components/GoalsCard';
 import { useCheckupNotify } from '../context/CheckupNotifyContext';
 import { loadCheckupDraft, saveCheckupDraft, clearCheckupDraft, remapDraftKeys } from '../lib/checkupDraft';
 import { markFeedbackSeen } from '../lib/checkupSeen';
@@ -41,6 +46,12 @@ function formatDate(ts) {
 function formatDayStamp(d) {
   if (!d) return '';
   return `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`;
+}
+// The opening end of a date RANGE — no year, since the closing end carries it
+// and both dates are days apart. "13/9 → 19/9/2026".
+function formatShortDay(d) {
+  if (!d) return '';
+  return `${d.getDate()}/${d.getMonth() + 1}`;
 }
 // Status-row accent: red = late (the grace day, nothing sent).
 const LATE_RED   = '#E11D48';
@@ -67,6 +78,8 @@ export default function CheckupScreen() {
   // Part 2 gets its own tour step — the filming is the half people skip.
   const tourVideosRef    = useTourTarget('checkup.videos');
   const tourExercisesRef = useTourTarget('checkup.exercises');
+  // The milestones card — the face of the screen, and the tour's first stop here.
+  const tourGoalsRef     = useTourTarget('checkup.goals');
   // This screen is a long form, so the tour drives its scroll (see useTourScroller):
   // it brings a step's element into view before highlighting it instead of pointing
   // an arrow at something below the fold.
@@ -92,6 +105,16 @@ export default function CheckupScreen() {
   // screen where their coach's last note and video used to be.
   const [lastFeedback, setLastFeedback] = useState(null);
 
+  // THIS WEEK'S MILESTONES — the goals the coach set when they last replied. They sit
+  // at the top of the screen all week and the player ticks them off as they land;
+  // submitting the check-up closes them (see closeActiveGoals) and files them under
+  // the submission for the coach to read.
+  const [goals, setGoals] = useState([]);
+  // The set the CURRENT submitted check-up closed. Once a check-up is sent there
+  // are no open goals until the coach replies, so this is what keeps the face of
+  // the screen from going blank in the wait: the week just finished, as sent.
+  const [closedGoals, setClosedGoals] = useState([]);
+
   // Resolved template (while composing)
   const [templateSource, setTemplateSource] = useState('none'); // 'player' | 'class' | 'none'
   const [questions, setQuestions] = useState([]);
@@ -115,6 +138,13 @@ export default function CheckupScreen() {
   // page of scroll. Reset whenever a different check-up loads, so the panel never
   // opens onto the wrong submission.
   const [showSubmission, setShowSubmission] = useState(false);
+
+  // WHICH HALF OF THE SCREEN IS SHOWING. The check-up is two jobs — read the
+  // week's milestones, and fill the thing in — and on a phone they do not both fit
+  // without one of them being scrolled past. So they are two panes behind a bar
+  // at the top, and GOALS is the one the player lands on: the milestones are what
+  // this screen is FOR, the form is what they do once a week.
+  const [pane, setPane] = useState('goals');   // 'goals' | 'form'
 
   // The submitted check-up a player left behind by tapping START NEW CHECK-UP.
   // Kept in memory (the row itself is untouched in the DB) so the new form always
@@ -182,6 +212,11 @@ export default function CheckupScreen() {
 
       await purgeExpiredCheckups(user.id);
       setLastFeedback(await fetchLatestFeedback(user.id));
+      // The milestones is loaded on EVERY path through this function (parked check-up
+      // included) — it belongs to the player and the week, not to whichever
+      // check-up row happens to be on screen.
+      const openGoals = await fetchActiveGoals(user.id);
+      setGoals(openGoals);
 
       // A new check-up is parked: the player is LOOKING at the sent one while the
       // unsent one waits. Re-deriving the screen from the DB here would either
@@ -189,6 +224,7 @@ export default function CheckupScreen() {
       // the feedback (done above) and leave every compose map exactly as it is.
       if (parkedRef.current) {
         const held = parkedRef.current;
+        setClosedGoals(openGoals.length ? [] : await fetchGoalsForCheckup(held.prev.checkup?.id));
         setCheckup(held.prev.checkup);
         setSubAnswers(held.prev.subAnswers);
         setSubVideos(held.prev.subVideos);
@@ -207,6 +243,12 @@ export default function CheckupScreen() {
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
+
+      // With nothing open, the milestones the last submission CLOSED is what stays on
+      // screen while the coach writes the next one.
+      setClosedGoals(openGoals.length || !latest?.submitted_at
+        ? []
+        : await fetchGoalsForCheckup(latest.id));
 
       if (latest) {
         const { data: vids } = await supabase
@@ -433,6 +475,19 @@ export default function CheckupScreen() {
     await deleteCheckupVideo(video);
   }
 
+  // Tick / untick one of the week's goals. Optimistic: the box flips under the
+  // finger and the write follows. A failed write is logged, not shouted about —
+  // the next load re-reads the truth, and nothing here is worth an error banner
+  // over the player's own progress.
+  async function handleToggleGoal(goal) {
+    if (!goal?.id) return;
+    const next = !goal.done;
+    setGoals(gs => gs.map(g => (g.id === goal.id
+      ? { ...g, done: next, done_at: next ? new Date().toISOString() : null }
+      : g)));
+    await setGoalDone(goal.id, next);
+  }
+
   async function handleSubmit() {
     setErrorMsg('');
     const anyAnswer = Object.values(answers).some(t => t && t.trim());
@@ -443,6 +498,10 @@ export default function CheckupScreen() {
       return;
     }
     setSubmitting(true);
+    // Is this a re-save of a check-up that already went out (the EDIT path), or a
+    // genuine send? Only a send ends the week — see closeActiveGoals below. Read
+    // before anything is written, while `checkup` still describes what was there.
+    const wasSubmitted = !!checkup?.submitted_at;
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not signed in.');
@@ -503,6 +562,17 @@ export default function CheckupScreen() {
       // never holds more than one check-up's worth of storage. Re-submitting an
       // edited check-up reuses the same row, so this is a no-op in that case.
       await purgePreviousCheckups(user.id, draft.id);
+
+      // The week is over: file this week's goals under the submission that ended
+      // it. They stop being "this week's" and become the score the coach opens
+      // their review on. Ordered AFTER the purge — the goals point at this row,
+      // and the purge is what makes it the surviving one.
+      //
+      // Only on a REAL send. Re-saving an already-submitted check-up (the EDIT
+      // path reuses the same row) closes nothing: that week was filed when it was
+      // first sent, and anything open now is the NEXT set the coach has since
+      // written. closeActiveGoals guards the same case from the other side.
+      if (!wasSubmitted) await closeActiveGoals(user.id, draft.id);
 
       // Sent — the local draft has served its purpose.
       if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
@@ -754,16 +824,50 @@ export default function CheckupScreen() {
   const hasSubmission = subAnswers.length > 0 || subCards.length > 0;
   const subOpen = showSubmission || tourOpen;
 
+  // The two panes. The guided tour walks elements from BOTH halves (the milestones,
+  // the form, SUBMIT), and a step cannot point an arrow at something that isn't
+  // mounted — so while the tour is running the screen falls back to the single
+  // scroll it used to be and shows everything.
+  const showGoals = tourOpen || pane === 'goals';
+  const showForm  = tourOpen || pane === 'form';
+  // The goals pane standing ALONE (i.e. not the tour's everything-at-once view) —
+  // the case where the milestones gets the full height of the screen.
+  const goalsOnly = showGoals && !showForm;
+
+  // The coach's word belongs with the milestones, on the face of the screen —
+  // whether it was written on the check-up currently showing (`reviewed`) or is
+  // the standing one carried over from the last reply.
+  const faceFeedback = reviewed ? checkup : standingFeedback;
+  const goalScore = goalProgress(goals.length ? goals : closedGoals);
+
   return (
     <ScreenFrame fill ready={!loading}>
       <View style={styles.card}>
         <ScreenHeader title="WEEKLY CHECK-UP" />
 
+        {/* The switch between the two halves. OUTSIDE the ScrollView on purpose —
+            it is how you leave the pane you're in, so it can never be scrolled
+            off. Hidden while the tour runs (both panes are showing then) and
+            while the screen is still loading. */}
+        {!loading && !tourOpen && (
+          <PaneTabs
+            pane={pane}
+            onChange={setPane}
+            score={goalScore.total ? `${goalScore.done}/${goalScore.total}` : null}
+            complete={goalScore.complete}
+            due={thisCycleDue}
+          />
+        )}
+
         <View ref={tourBoxRef} collapsable={false} style={styles.scrollBox}>
         <ScrollView
           ref={tourScrollRef}
           style={styles.scroll}
-          contentContainerStyle={styles.body}
+          // On the goals pane the milestones is the ONLY thing here, so it takes the
+          // whole canvas rather than sitting as a small card under the status line
+          // with a screen of black beneath it. flexGrow lets the content still
+          // scroll if a six-milestone list outgrows a short phone.
+          contentContainerStyle={[styles.body, goalsOnly && styles.bodyFill]}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
           scrollEventThrottle={16}
@@ -776,22 +880,47 @@ export default function CheckupScreen() {
             </View>
           )}
 
-          {/* The coach's LATEST feedback — always here. It survives sending a new
-              check-up (see purgePreviousCheckups), so the note and the video link
-              stay readable right through the wait for the next reply. */}
-          {!!standingFeedback && (
+          {/* ── THE FACE OF THE CHECK-UP ──
+              The week's milestones, above everything else the screen does. While
+              goals are open they are tappable — the player ticks them off as the
+              week goes. Once the check-up is sent they close, and the card holds
+              the week just finished (read-only) until the coach sets the next
+              one, so this spot is never empty mid-cycle. With nothing set at all
+              it explains itself rather than disappearing. */}
+          {!loading && showGoals && (
+            <View ref={tourGoalsRef} collapsable={false} style={goalsOnly && styles.goalsFill}>
+              {goals.length > 0 ? (
+                <GoalsCard goals={goals} onToggle={handleToggleGoal} fill={goalsOnly} />
+              ) : (
+                <GoalsCard
+                  goals={closedGoals}
+                  readOnly
+                  fill={goalsOnly}
+                  title={closedGoals.length ? 'LAST WEEK’S MILESTONES' : 'THIS WEEK’S MILESTONES'}
+                  emptyText="Your coach sets your milestones for the week when they reply to your check-up. They show up right here — tick them off as you reach them."
+                />
+              )}
+            </View>
+          )}
+
+          {/* The coach's LATEST feedback, on the CHECK-UP side — the GOALS pane is
+              the milestones and nothing else. It survives sending a new check-up (see
+              purgePreviousCheckups), so the note and the video link stay readable
+              right through the wait for the next reply, whichever check-up row is
+              actually carrying them. */}
+          {showForm && !!faceFeedback && (
             <View ref={tourFeedbackRef} collapsable={false} style={styles.feedbackCard}>
               <SectionTitle>COACH FEEDBACK</SectionTitle>
               <Text style={styles.feedbackMeta}>
-                {'LATEST  ·  ' + formatDate(standingFeedback.feedback_at)}
+                {(reviewed ? 'ON THIS CHECK-UP  ·  ' : 'LATEST  ·  ') + formatDate(faceFeedback.feedback_at)}
               </Text>
-              {!!standingFeedback.feedback_note && (
-                <Text style={styles.feedbackNote}>{standingFeedback.feedback_note}</Text>
+              {!!faceFeedback.feedback_note && (
+                <Text style={styles.feedbackNote}>{faceFeedback.feedback_note}</Text>
               )}
-              {!!standingFeedback.feedback_url && (
+              {!!faceFeedback.feedback_url && (
                 <PillButton
                   label="▶  WATCH FEEDBACK VIDEO"
-                  onPress={() => Linking.openURL(standingFeedback.feedback_url)}
+                  onPress={() => Linking.openURL(faceFeedback.feedback_url)}
                   variant="solid"
                   tone="accent"
                   style={{ marginTop: 14 }}
@@ -827,9 +956,14 @@ export default function CheckupScreen() {
             </View>
           )}
 
+          {/* NOTHING ELSE GOES ON THE GOALS PANE. No call to action, no crossing
+              over — the CHECK-UP tab above is the way across, and everything that
+              is about filling the check-up in (SUBMIT included) lives on that
+              side. This half of the screen is the week's milestones and only that. */}
+
           {loading ? (
             <View style={styles.center}><ActivityIndicator size="large" color={C.iceGlow} /></View>
-          ) : composing && !hasTemplate ? (
+          ) : !showForm ? null : composing && !hasTemplate ? (
             <View ref={tourFormRef} collapsable={false} style={styles.emptyBox}>
               <Text style={styles.emptyIcon}>◇</Text>
               <Text style={styles.emptyTitle}>NO CHECK-UP YET</Text>
@@ -1100,25 +1234,9 @@ export default function CheckupScreen() {
                 )}
               </View>
 
-              {/* Coach feedback */}
-              {reviewed && (
-                <View ref={tourFeedbackRef} collapsable={false} style={styles.feedbackCard}>
-                  <SectionTitle>COACH FEEDBACK</SectionTitle>
-                  <Text style={styles.feedbackMeta}>
-                    {'ON THIS CHECK-UP  ·  ' + formatDate(checkup.feedback_at)}
-                  </Text>
-                  {!!checkup.feedback_note && <Text style={styles.feedbackNote}>{checkup.feedback_note}</Text>}
-                  {!!checkup.feedback_url && (
-                    <PillButton
-                      label="▶  WATCH FEEDBACK VIDEO"
-                      onPress={() => Linking.openURL(checkup.feedback_url)}
-                      variant="solid"
-                      tone="accent"
-                      style={{ marginTop: 14 }}
-                    />
-                  )}
-                </View>
-              )}
+              {/* The coach's reply to THIS check-up is not rendered here any more:
+                  it moved to the GOALS pane, next to the milestones that came out of
+                  it. One card, one place, whichever check-up carries it. */}
 
               {/* Their submission (read-only), behind one tap.
                   It used to be permanently open, so the screen a player lands on
@@ -1276,7 +1394,7 @@ function ScheduleBar({ checkupDay, sent, reviewed }) {
   const sched = checkupSchedule(checkupDay);
   if (!sched) {
     return (
-      <View style={styles.schedRow}>
+      <View style={[styles.schedBlock, styles.schedRow]}>
         <View style={[styles.schedTick, { backgroundColor: C.lockedBorder, shadowOpacity: 0 }]} />
         <Text style={[styles.schedLabel, styles.schedLabelMuted]}>NO CHECK-UP DAY SET</Text>
       </View>
@@ -1315,13 +1433,68 @@ function ScheduleBar({ checkupDay, sent, reviewed }) {
     chip = `${sched.daysUntil} DAY${sched.daysUntil === 1 ? '' : 'S'}`;
   }
 
+  // THE WINDOW the milestones actually run over — the days the player has to
+  // reach them. The check-up day is a training day and the week ends ON it, so
+  // this reads e.g. Sunday → Saturday for a Saturday check-up (see
+  // milestoneWindow). It gets its own line: a day name, a date range and a state
+  // chip on one row is more than a phone width holds.
+  const win = milestoneWindow(checkupDay);
+
   return (
-    <View style={styles.schedRow}>
-      <View style={[styles.schedTick, { backgroundColor: tone, shadowColor: tone }]} />
-      <Text style={styles.schedLabel}>{sched.dayName.toUpperCase()}</Text>
-      {!!stampDate && <Text style={styles.schedDate}>{formatDayStamp(stampDate)}</Text>}
-      <View style={styles.schedSpacer} />
-      <Text style={[styles.schedChip, { color: tone, borderColor: tone }]}>{chip}</Text>
+    <View style={styles.schedBlock}>
+      <View style={styles.schedRow}>
+        <View style={[styles.schedTick, { backgroundColor: tone, shadowColor: tone }]} />
+        <Text style={styles.schedLabel}>{sched.dayName.toUpperCase()}</Text>
+        {!!stampDate && <Text style={styles.schedDate}>{formatDayStamp(stampDate)}</Text>}
+        <View style={styles.schedSpacer} />
+        <Text style={[styles.schedChip, { color: tone, borderColor: tone }]}>{chip}</Text>
+      </View>
+      {!!win && (
+        <View style={styles.winRow}>
+          <Text style={styles.winLabel}>MILESTONE WEEK</Text>
+          <Text style={styles.winDates}>
+            {formatShortDay(win.start)}
+            <Text style={styles.winArrow}>{'  →  '}</Text>
+            {formatDayStamp(win.end)}
+          </Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+// ─── The pane switch ────────────────────────────────────────────────────────────
+// Two halves of one screen: the week's MILESTONES (where the player lands) and the
+// CHECK-UP itself. A phone can't hold both without one being buried under the
+// other, and the milestones is the half that's worth opening the app for — so the
+// form waits behind its own tab instead of under a page of scroll.
+// Each tab carries its own state: the goals tab its score, the check-up tab a dot
+// when this week's is still owed.
+function PaneTabs({ pane, onChange, score, complete, due }) {
+  const TABS = [
+    { key: 'goals', label: 'MILESTONES' },
+    { key: 'form',  label: 'CHECK-UP' },
+  ];
+  return (
+    <View style={styles.paneRow}>
+      {TABS.map(t => {
+        const active = pane === t.key;
+        const tone = active && t.key === 'goals' && complete ? '#1FD79A' : C.iceGlow;
+        return (
+          <TouchableOpacity
+            key={t.key}
+            onPress={() => onChange(t.key)}
+            activeOpacity={0.85}
+            style={[styles.paneTab, active && { borderBottomColor: tone }]}
+          >
+            <Text style={[styles.paneLabel, active && { color: tone }]}>{t.label}</Text>
+            {t.key === 'goals' && !!score && (
+              <Text style={[styles.paneBadge, active && { color: tone, borderColor: tone }]}>{score}</Text>
+            )}
+            {t.key === 'form' && due && <View style={styles.paneDot} />}
+          </TouchableOpacity>
+        );
+      })}
     </View>
   );
 }
@@ -1357,13 +1530,58 @@ const styles = StyleSheet.create({
   scrollBox: { flex: 1 },
   scroll: { flex: 1 },
   body: { paddingHorizontal: 24, paddingTop: 22, paddingBottom: 40 },
+  // Goals pane alone: the content fills the viewport so the milestones card can
+  // stretch into it instead of leaving the screen half empty.
+  bodyFill: { flexGrow: 1, paddingBottom: 24 },
+  goalsFill: { flex: 1 },
+
+  // The pane switch — two tabs on a hairline rule, under the header and above
+  // everything that scrolls.
+  paneRow: {
+    flexDirection: 'row', paddingHorizontal: 24,
+    borderBottomWidth: 1, borderBottomColor: C.cardBorder,
+  },
+  paneTab: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    paddingVertical: 13, borderBottomWidth: 2, borderBottomColor: 'transparent',
+  },
+  paneLabel: {
+    fontFamily: F.heading, fontSize: 16, letterSpacing: 2.4, color: C.textMuted,
+  },
+  paneBadge: {
+    fontFamily: F.heading, fontSize: 12, letterSpacing: 0.8,
+    color: C.textMuted, borderColor: C.textMuted, borderWidth: 1,
+    borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2,
+  },
+  // This week's check-up is still owed — the same red the status line uses.
+  paneDot: {
+    width: 7, height: 7, borderRadius: 4, backgroundColor: LATE_RED,
+    shadowColor: LATE_RED, shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.9, shadowRadius: 5,
+  },
 
   // Status LINE (not a box): tick · day · state chip, over a hairline rule.
-  schedRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 12,
+  // The whole status block: the day line, then the milestone week under it, with
+  // the hairline rule moved to the bottom of the pair.
+  schedBlock: {
     paddingBottom: 14, marginBottom: 20,
     borderBottomWidth: 1, borderBottomColor: C.cardBorder,
   },
+  schedRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  // The days the milestones actually run over — quieter than the day line above
+  // it, because it is the span, not the deadline.
+  winRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    marginTop: 10, paddingLeft: 15,
+  },
+  winLabel: {
+    fontFamily: F.heading, fontSize: 12, color: C.textMuted, letterSpacing: 2,
+  },
+  winDates: {
+    flex: 1, fontFamily: F.heading, fontSize: 15, color: C.iceGlow,
+    opacity: 0.85, letterSpacing: 1.2,
+  },
+  winArrow: { color: C.textMuted, letterSpacing: 0 },
   schedTick: {
     width: 3, height: 22, borderRadius: 2,
     shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.9, shadowRadius: 6,
